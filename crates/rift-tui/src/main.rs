@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser, Debug)]
-#[command(name = "rift", about = "Rift — a fast terminal coding agent for local Ollama models")]
+#[command(name = "rift", version, about = "Rift — a fast terminal coding agent for local Ollama models")]
 struct Cli {
     /// Ollama server URL
     #[arg(long, env = "RIFT_HOST", default_value = "http://localhost:11434")]

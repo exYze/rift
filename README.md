@@ -12,6 +12,24 @@ Rift is a ground-up Rust answer to opencode/Crush-style agents, designed around 
 
 Plus **WarpDrive**: parallel agent exploration in isolated git worktrees with side-by-side diff merge.
 
+## Install
+
+**macOS / Linux** (one line, no dependencies):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/exYze/rift/master/install.sh | sh
+```
+
+**Windows**: download `rift-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/exYze/rift/releases/latest) and put `rift.exe` on your PATH.
+
+**From source** (any platform with Rust):
+
+```sh
+cargo install --git https://github.com/exYze/rift rift-tui
+```
+
+Pre-built binaries: macOS (Apple Silicon + Intel), Linux (x64 + arm64, fully static — no glibc requirements), Windows x64. All on the [releases page](https://github.com/exYze/rift/releases) with SHA-256 checksums.
+
 ## Usage
 
 ```sh
