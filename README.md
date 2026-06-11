@@ -30,6 +30,14 @@ cargo install --git https://github.com/exYze/rift rift-tui
 
 Pre-built binaries: macOS (Apple Silicon + Intel), Linux (x64 + arm64, fully static — no glibc requirements), Windows x64. All on the [releases page](https://github.com/exYze/rift/releases) with SHA-256 checksums.
 
+## Updating
+
+```sh
+rift update        # or /update inside the TUI
+```
+
+rift checks for new releases on startup (at most once per 24h, cached, silent when offline) and shows a one-line notice when one exists. Set `RIFT_NO_UPDATE_CHECK=1` to disable the check entirely — no other network calls are ever made except to your own Ollama server.
+
 ## Usage
 
 ```sh

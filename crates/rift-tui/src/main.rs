@@ -1,6 +1,7 @@
 mod app;
 mod commands;
 mod swarm_ui;
+mod update;
 
 use std::path::PathBuf;
 
@@ -67,6 +68,8 @@ enum Cmd {
         #[arg(long)]
         cleanup: bool,
     },
+    /// Update rift to the latest release
+    Update,
 }
 
 #[tokio::main]
@@ -88,6 +91,10 @@ async fn main() -> Result<()> {
                 let n = swarm.cleanup_all().await?;
                 println!("removed {n} worktree(s)");
             }
+            return Ok(());
+        }
+        Some(Cmd::Update) => {
+            println!("{}", update::self_update(env!("CARGO_PKG_VERSION")).await?);
             return Ok(());
         }
         None => {}

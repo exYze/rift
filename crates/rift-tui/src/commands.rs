@@ -62,6 +62,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/tokens", "", "context budget, usage estimate, calibration"),
     ("/tools", "", "tools the model can call (builtin + MCP)"),
     ("/undo", "", "revert last turn's write/edit changes"),
+    ("/update", "", "update rift to the latest release"),
 ];
 
 fn help_text() -> String {
@@ -103,6 +104,7 @@ pub async fn run_command(
         "/swarm" => cmd_swarm(rest, agent, cx, fx, cancel).await,
         "/merge" => cmd_merge(rest, cx, fx).await,
         "/undo" => cmd_undo(agent, fx),
+        "/update" => cmd_update(fx, cancel).await,
         "/diff" => cmd_diff(cx, fx).await,
         "/host" => cmd_host(rest, agent, fx, cancel).await,
         "/think" => cmd_think(rest, agent, fx).await,
@@ -459,6 +461,18 @@ async fn cmd_merge(rest: &str, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Re
         msg.push_str(&format!(", removed {n} worktree(s)"));
     }
     let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+    Ok(msg)
+}
+
+async fn cmd_update(fx: &UnboundedSender<UiEffect>, cancel: &CancellationToken) -> Result<String> {
+    let _ = fx.send(UiEffect::Out(Kind::Info, "checking for the latest release…".into()));
+    let msg = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => bail!("cancelled"),
+        r = crate::update::self_update(env!("CARGO_PKG_VERSION")) => r?,
+    };
+    let note = if msg.starts_with("updated") { "\nrestart rift to use the new version" } else { "" };
+    let _ = fx.send(UiEffect::Out(Kind::Info, format!("{msg}{note}")));
     Ok(msg)
 }
 

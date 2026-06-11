@@ -14,7 +14,9 @@ rift-core = { path = "../rift-core" }
 rift-ollama = { path = "../rift-ollama" }
 tokio.workspace = true
 tokio-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 anyhow.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.29"

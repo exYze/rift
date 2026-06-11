@@ -45,21 +45,27 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
 
+      # Archives for the install script + raw binaries for `rift update`.
       - name: package (unix)
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar czf "$GITHUB_WORKSPACE/rift-${{ matrix.target }}.tar.gz" rift
+          cp rift "$GITHUB_WORKSPACE/rift-${{ matrix.target }}"
 
       - name: package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "target/${{ matrix.target }}/release/rift.exe" -DestinationPath "rift-${{ matrix.target }}.zip"
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/rift.exe" -DestinationPath "rift-${{ matrix.target }}.zip"
+          Copy-Item "target/${{ matrix.target }}/release/rift.exe" "rift-${{ matrix.target }}.exe"
 
       - uses: actions/upload-artifact@v4
         with:
           name: rift-${{ matrix.target }}
-          path: rift-${{ matrix.target }}.*
+          path: |
+            rift-${{ matrix.target }}.*
+            rift-${{ matrix.target }}
           if-no-files-found: error
 
   release:

@@ -587,6 +587,19 @@ pub async fn run_tui(
     let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<UiMsg>();
 
+    // Non-blocking update check: at most one network call per 24h, silent
+    // unless a newer release actually exists.
+    let fx_update = fx_tx.clone();
+    tokio::spawn(async move {
+        let current = env!("CARGO_PKG_VERSION");
+        if let Some(latest) = crate::update::check_for_update(current).await {
+            let _ = fx_update.send(UiEffect::Out(
+                Kind::Info,
+                format!("⬆ rift v{latest} is available (you have v{current}) — run /update or `rift update`"),
+            ));
+        }
+    });
+
     let cwd = std::env::current_dir()?;
     let agent_task = tokio::spawn(async move {
         let mut agent = agent;
