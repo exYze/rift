@@ -1,0 +1,4 @@
+/target
+.rift/
+__pycache__/
+*.pyc

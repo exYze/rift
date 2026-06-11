@@ -1,0 +1,26 @@
+[package]
+name = "rift-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rift agent engine: tool registry, agent loop, session state"
+
+[dependencies]
+rift-ollama = { path = "../rift-ollama" }
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+regex = "1"
+ignore = "0.4"
+globset = "0.4"
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"

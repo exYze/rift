@@ -1,0 +1,1 @@
+config.py: Settings.get crashes on missing keys instead of returning the default as its docstring promises. Fix it and verify by running python3 config.py (expected output: 1 42 None).

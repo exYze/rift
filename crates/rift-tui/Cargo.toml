@@ -1,0 +1,21 @@
+[package]
+name = "rift-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rift: a fast, flicker-free terminal coding agent for local Ollama models"
+
+[[bin]]
+name = "rift"
+path = "src/main.rs"
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+rift-ollama = { path = "../rift-ollama" }
+tokio.workspace = true
+tokio-util.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+ratatui = "0.29"
+textwrap = "0.16"

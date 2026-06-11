@@ -1,0 +1,1 @@
+stats.py has a bug: the mean of 2, 4, 6 must be 4.0 but is not. Fix it minimally and verify by running python3 stats.py.

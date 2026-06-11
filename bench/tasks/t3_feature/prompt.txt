@@ -1,0 +1,1 @@
+cart.py: the total() function does not implement the discount its docstring describes. Implement it and verify by running python3 cart.py (expected output: 50 108.0).
