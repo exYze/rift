@@ -62,6 +62,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 |---|---|
 | `/model [name]` | list models on the server, or switch (capability-checked, num_ctx clamped) |
 | `/clear` | wipe the conversation |
+| `/copy [all]` | copy the last reply (or whole transcript) to the clipboard |
 | `/compact` | force history compaction now |
 | `/tokens` | context budget, usage estimate, estimator calibration |
 | `/sessions [n]` | list saved sessions, or resume the nth |

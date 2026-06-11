@@ -279,6 +279,9 @@ struct App {
     palette_idx: usize,
     /// Popup dismissed with Esc; cleared on the next input change.
     palette_off: bool,
+    /// Mouse capture on = wheel scrolls panes; off = the terminal's native
+    /// text selection works (Ctrl+T toggles).
+    mouse_capture: bool,
 }
 
 /// Indices into `commands::COMMANDS` whose names start with the input.
@@ -308,11 +311,12 @@ impl App {
             history: vec![],
             history_idx: None,
             busy: false,
-            status: "Enter send · /help commands · Ctrl+J newline · Tab focus · Ctrl+L log · Esc cancel · Ctrl+C quit".into(),
+            status: "Enter send · /help commands · Ctrl+T select/copy · Ctrl+L log · Esc cancel · Ctrl+C quit".into(),
             cancel: None,
             quit: false,
             palette_idx: 0,
             palette_off: false,
+            mouse_capture: true,
         }
     }
 
@@ -426,6 +430,8 @@ impl App {
                 self.seed_from_messages(&messages);
             }
             UiEffect::Model(name) => self.model = name,
+            // Handled by the event loop (needs stdout); never reaches here.
+            UiEffect::Osc52(_) => {}
             UiEffect::Done(status) => {
                 self.busy = false;
                 self.cancel = None;
@@ -637,7 +643,16 @@ pub async fn run_tui(
                 needs_redraw = true;
             }
             while let Ok(fx) = fx_rx.try_recv() {
-                app.handle_ui_effect(fx);
+                if let UiEffect::Osc52(text) = fx {
+                    // Clipboard escape goes straight to the terminal; it
+                    // doesn't move the cursor so the frame stays intact.
+                    use std::io::Write;
+                    let mut out = stdout();
+                    let _ = out.write_all(crate::clipboard::osc52(&text).as_bytes());
+                    let _ = out.flush();
+                } else {
+                    app.handle_ui_effect(fx);
+                }
                 needs_redraw = true;
             }
             if needs_redraw {
@@ -663,6 +678,17 @@ pub async fn run_tui(
                         app.show_log = !app.show_log;
                         if !app.show_log {
                             app.focus = Focus::Transcript;
+                        }
+                    }
+                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.mouse_capture = !app.mouse_capture;
+                        if app.mouse_capture {
+                            let _ = execute!(stdout(), EnableMouseCapture);
+                            app.status = "mouse capture on — wheel scrolls panes".into();
+                        } else {
+                            let _ = execute!(stdout(), DisableMouseCapture);
+                            app.status =
+                                "mouse capture off — select & copy text natively · Ctrl+T to re-enable scrolling".into();
                         }
                     }
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {

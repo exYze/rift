@@ -29,6 +29,9 @@ pub enum UiEffect {
     Seed(Vec<Message>),
     /// Model name changed; update the status bar.
     Model(String),
+    /// Ask the terminal to set the clipboard (OSC 52) — emitted by the UI
+    /// loop, which owns stdout.
+    Osc52(String),
     /// Command finished; status-line text. Always the final effect.
     Done(String),
 }
@@ -47,6 +50,7 @@ pub struct CmdCx {
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/clear", "", "wipe the conversation (keeps the session file)"),
     ("/compact", "", "force history compaction now"),
+    ("/copy", "[all]", "copy the last reply (or whole transcript) to the clipboard"),
     ("/diff", "", "git diff of the working tree"),
     ("/export", "", "save the transcript as markdown"),
     ("/help", "", "list commands and keys"),
@@ -71,7 +75,10 @@ fn help_text() -> String {
         let left = if args.is_empty() { (*name).to_string() } else { format!("{name} {args}") };
         out.push_str(&format!("  {left:<30}{desc}\n"));
     }
-    out.push_str("\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Esc cancel · Ctrl+C quit");
+    out.push_str(
+        "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+T toggle mouse capture \
+         (off = select/copy text natively) · Esc cancel · Ctrl+C quit",
+    );
     out
 }
 
@@ -96,6 +103,7 @@ pub async fn run_command(
         "/model" => cmd_model(rest, agent, fx).await,
         "/clear" => cmd_clear(agent, cx, fx),
         "/compact" => cmd_compact(agent, fx, cancel).await,
+        "/copy" => cmd_copy(rest, agent, fx).await,
         "/tokens" => cmd_tokens(agent, fx),
         "/sessions" => cmd_sessions(rest, agent, cx, fx),
         "/tools" => cmd_tools(agent, fx),
@@ -462,6 +470,48 @@ async fn cmd_merge(rest: &str, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Re
     }
     let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
     Ok(msg)
+}
+
+async fn cmd_copy(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let text = match arg {
+        "" => agent
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant && !m.content.trim().is_empty())
+            .map(|m| m.content.clone())
+            .ok_or_else(|| anyhow!("nothing to copy yet — no assistant reply in this session"))?,
+        "all" => {
+            let mut out = String::new();
+            for m in &agent.messages {
+                match m.role {
+                    Role::User if !m.content.starts_with("[system]") => {
+                        out.push_str(&format!("USER: {}\n\n", m.content));
+                    }
+                    Role::Assistant if !m.content.is_empty() => {
+                        out.push_str(&format!("ASSISTANT: {}\n\n", m.content));
+                    }
+                    _ => {}
+                }
+            }
+            if out.is_empty() {
+                bail!("nothing to copy yet");
+            }
+            out
+        }
+        other => bail!("usage: /copy [all] — got '{other}'"),
+    };
+    let chars = text.chars().count();
+    let status = match crate::clipboard::copy_via_tool(&text).await {
+        Some(tool) => format!("copied {chars} chars to the clipboard (via {tool})"),
+        None => {
+            // No clipboard tool — ask the terminal itself (OSC 52).
+            let _ = fx.send(UiEffect::Osc52(text));
+            format!("sent {chars} chars to the terminal clipboard (OSC 52)")
+        }
+    };
+    let _ = fx.send(UiEffect::Out(Kind::Info, status.clone()));
+    Ok(status)
 }
 
 async fn cmd_update(fx: &UnboundedSender<UiEffect>, cancel: &CancellationToken) -> Result<String> {

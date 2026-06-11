@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod commands;
 mod swarm_ui;
 mod update;
