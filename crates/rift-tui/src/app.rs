@@ -30,7 +30,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -275,6 +275,25 @@ struct App {
     status: String,
     cancel: Option<CancellationToken>,
     quit: bool,
+    /// Selected row in the slash-command palette popup.
+    palette_idx: usize,
+    /// Popup dismissed with Esc; cleared on the next input change.
+    palette_off: bool,
+}
+
+/// Indices into `commands::COMMANDS` whose names start with the input.
+/// The palette is live while the user is typing the command word itself
+/// (a space or newline means they've moved on to arguments).
+fn palette_matches(input: &str) -> Vec<usize> {
+    if !input.starts_with('/') || input.contains(char::is_whitespace) {
+        return vec![];
+    }
+    commands::COMMANDS
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _, _))| name.starts_with(input))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 impl App {
@@ -292,6 +311,17 @@ impl App {
             status: "Enter send · /help commands · Ctrl+J newline · Tab focus · Ctrl+L log · Esc cancel · Ctrl+C quit".into(),
             cancel: None,
             quit: false,
+            palette_idx: 0,
+            palette_off: false,
+        }
+    }
+
+    /// Matches currently shown in the palette popup (empty = hidden).
+    fn palette(&self) -> Vec<usize> {
+        if self.palette_off {
+            vec![]
+        } else {
+            palette_matches(&self.input)
         }
     }
 
@@ -498,6 +528,48 @@ fn draw(frame: &mut Frame, app: &mut App) {
         lines.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(lines), input_inner);
+
+    // Slash-command palette: overlay anchored above the input pane, filtered
+    // live by what's typed; Up/Down select, Tab completes, Enter runs.
+    let palette = app.palette();
+    if !palette.is_empty() {
+        app.palette_idx = app.palette_idx.min(palette.len() - 1);
+        let rows = palette.len().min(8);
+        let height = (rows + 2) as u16;
+        let width = (frame.area().width.saturating_sub(2)).min(72);
+        let area = Rect {
+            x: input_area.x,
+            y: input_area.y.saturating_sub(height),
+            width,
+            height,
+        };
+        // Keep the selection inside the visible window when the list scrolls.
+        let start = (app.palette_idx + 1).saturating_sub(rows);
+        let mut lines: Vec<Line> = Vec::with_capacity(rows);
+        for (row, &ci) in palette.iter().enumerate().skip(start).take(rows) {
+            let (name, args, desc) = commands::COMMANDS[ci];
+            let selected = row == app.palette_idx;
+            let left = if args.is_empty() { name.to_string() } else { format!("{name} {args}") };
+            let base = if selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            let pad = (width as usize).saturating_sub(2 + 30 + desc.len());
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {left:<29} "), base.add_modifier(Modifier::BOLD)),
+                Span::styled(desc.to_string(), if selected { base } else { Style::default().fg(Color::DarkGray) }),
+                Span::styled(" ".repeat(pad), base),
+            ]));
+        }
+        let block = Block::bordered()
+            .title(" commands — ↑↓ select · Tab complete · Enter run · Esc dismiss ")
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
 }
 
 /// The `/init` command body — a normal agent turn with a canned prompt.
@@ -568,7 +640,9 @@ pub async fn run_tui(
             }
             needs_redraw = true;
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    let palette = app.palette();
+                    match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.quit = true;
                     }
@@ -582,13 +656,22 @@ pub async fn run_tui(
                         app.input.push('\n');
                     }
                     KeyCode::Tab => {
-                        app.focus = match app.focus {
-                            Focus::Transcript if app.show_log => Focus::Log,
-                            _ => Focus::Transcript,
-                        };
+                        if let Some(&ci) = palette.get(app.palette_idx.min(palette.len().saturating_sub(1))) {
+                            // Complete to the selected command; trailing space
+                            // if it takes arguments (which also hides the popup).
+                            let (name, args, _) = commands::COMMANDS[ci];
+                            app.input = if args.is_empty() { name.to_string() } else { format!("{name} ") };
+                        } else {
+                            app.focus = match app.focus {
+                                Focus::Transcript if app.show_log => Focus::Log,
+                                _ => Focus::Transcript,
+                            };
+                        }
                     }
                     KeyCode::Esc => {
-                        if app.busy {
+                        if !palette.is_empty() {
+                            app.palette_off = true;
+                        } else if app.busy {
                             if let Some(cancel) = &app.cancel {
                                 cancel.cancel();
                                 app.status = "cancelling…".into();
@@ -604,6 +687,11 @@ pub async fn run_tui(
                         if app.busy {
                             app.status = "agent is running — Esc to cancel first".into();
                         } else if !app.input.trim().is_empty() {
+                            // With the palette open, Enter runs the selected
+                            // command (completing any partial prefix first).
+                            if let Some(&ci) = palette.get(app.palette_idx.min(palette.len().saturating_sub(1))) {
+                                app.input = commands::COMMANDS[ci].0.to_string();
+                            }
                             let raw = std::mem::take(&mut app.input);
                             app.history.push(raw.clone());
                             app.history_idx = None;
@@ -629,6 +717,8 @@ pub async fn run_tui(
                     }
                     KeyCode::Backspace => {
                         app.input.pop();
+                        app.palette_off = false;
+                        app.palette_idx = 0;
                     }
                     KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
                         if !app.history.is_empty() {
@@ -639,6 +729,8 @@ pub async fn run_tui(
                             };
                             app.history_idx = Some(idx);
                             app.input = app.history[idx].clone();
+                            app.palette_off = false;
+                            app.palette_idx = 0;
                         }
                     }
                     KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -662,16 +754,33 @@ pub async fn run_tui(
                         let page = app.focused_pane().view_height.saturating_sub(1).max(1);
                         app.focused_pane().scroll_down(page);
                     }
-                    KeyCode::Up => app.focused_pane().scroll_up(1),
-                    KeyCode::Down => app.focused_pane().scroll_down(1),
+                    KeyCode::Up => {
+                        if palette.is_empty() {
+                            app.focused_pane().scroll_up(1);
+                        } else {
+                            app.palette_idx = app.palette_idx.min(palette.len() - 1).saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if palette.is_empty() {
+                            app.focused_pane().scroll_down(1);
+                        } else {
+                            app.palette_idx = (app.palette_idx + 1).min(palette.len() - 1);
+                        }
+                    }
                     KeyCode::Home => {
                         let max = app.focused_pane().max_scroll();
                         app.focused_pane().scroll_from_bottom = max;
                     }
                     KeyCode::End => app.focused_pane().scroll_from_bottom = 0,
-                    KeyCode::Char(c) => app.input.push(c),
+                    KeyCode::Char(c) => {
+                        app.input.push(c);
+                        app.palette_off = false;
+                        app.palette_idx = 0;
+                    }
                     _ => {}
-                },
+                    }
+                }
                 Event::Mouse(mouse) => {
                     // Route the wheel to the pane under the cursor.
                     let pane = if app.log.contains(mouse.column, mouse.row) {

@@ -75,6 +75,12 @@ One Rust TUI combining three concepts: **GhostWriter** (flawless multi-pane TUI,
 - [x] /model /host /think all capability-preflighted via /api/show (same hardening as startup)
 - [x] Live PTY E2E: /help, /tokens, /model (13 real models listed), /think, unknown-command error — all rendered, clean exit
 
+### Iteration 9 — command palette + release pipeline (done)
+- [x] v0.1.0 published: GH Actions release workflow (5 targets: mac arm64/x64, linux arm64/x64 static-musl, win x64), curl-able install.sh, CI (test+clippy); reqwest switched to rustls for static musl builds; Intel mac cross-compiled from arm64 runner (macos-13 runners are dead — queue forever)
+- [x] Slash-command palette: typing `/` pops an overlay above the input listing all commands, filtered live by prefix; ↑↓ select, Tab completes (adds trailing space for arg commands), Enter runs selection, Esc dismisses (re-arms on next keystroke); COMMANDS table in commands.rs is the single source of truth for palette + /help
+- [x] PTY-verified: open on /, filter on /c, ↓+Enter ran /compact, /to+Tab+Enter ran /tokens
+- Lesson: in expect scripts a lone ESC byte gets paired by crossterm with the next byte as an Alt-chord — don't test Esc-then-type sequences in the same PTY breath
+
 ### Possible future work (roadmap complete; not scheduled)
 - Streaming-diff pane in main chat TUI; session picker; syntax highlighting via syntect (binary budget!)
 - Compactor v2: hydrate-on-demand line ranges, persistent repo map cache

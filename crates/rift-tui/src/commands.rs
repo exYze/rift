@@ -42,27 +42,37 @@ pub struct CmdCx {
     pub config_path: Option<PathBuf>,
 }
 
-const HELP: &str = "\
-commands:
-  /help                       this list
-  /model [name]               list models on the server, or switch model
-  /clear                      wipe the conversation (keeps the session file)
-  /compact                    force history compaction now
-  /tokens                     context budget, usage estimate, calibration
-  /sessions [n]               list saved sessions, or resume the nth
-  /tools                      tools the model can call (builtin + MCP)
-  /mcp                        connected MCP servers
-  /permissions                active shell deny patterns
-  /swarm <task> [--models a,b] [--explore]   WarpDrive race in worktrees
-  /merge <name> [--cleanup]   apply a swarm candidate's patch
-  /undo                       revert last turn's write/edit changes
-  /diff                       git diff of the working tree
-  /init                       generate a RIFT.md project guide
-  /host [url]                 show or switch the Ollama server
-  /think [on|off|auto]        thinking mode (capability-checked)
-  /export                     save the transcript as markdown
+/// (name, argument hint, one-line description) — the single source of truth
+/// driving both `/help` and the input popup palette.
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("/clear", "", "wipe the conversation (keeps the session file)"),
+    ("/compact", "", "force history compaction now"),
+    ("/diff", "", "git diff of the working tree"),
+    ("/export", "", "save the transcript as markdown"),
+    ("/help", "", "list commands and keys"),
+    ("/host", "[url]", "show or switch the Ollama server"),
+    ("/init", "", "generate a RIFT.md project guide"),
+    ("/mcp", "", "connected MCP servers"),
+    ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
+    ("/model", "[name]", "list models on the server, or switch model"),
+    ("/permissions", "", "active shell deny patterns"),
+    ("/sessions", "[n]", "list saved sessions, or resume the nth"),
+    ("/swarm", "<task> [--models a,b]", "WarpDrive race in isolated worktrees"),
+    ("/think", "[on|off|auto]", "thinking mode (capability-checked)"),
+    ("/tokens", "", "context budget, usage estimate, calibration"),
+    ("/tools", "", "tools the model can call (builtin + MCP)"),
+    ("/undo", "", "revert last turn's write/edit changes"),
+];
 
-keys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Esc cancel · Ctrl+C quit";
+fn help_text() -> String {
+    let mut out = String::from("commands:\n");
+    for (name, args, desc) in COMMANDS {
+        let left = if args.is_empty() { (*name).to_string() } else { format!("{name} {args}") };
+        out.push_str(&format!("  {left:<30}{desc}\n"));
+    }
+    out.push_str("\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Esc cancel · Ctrl+C quit");
+    out
+}
 
 /// Execute one slash-command line. Always emits `UiEffect::Done` last.
 pub async fn run_command(
@@ -79,7 +89,7 @@ pub async fn run_command(
     };
     let result = match cmd {
         "/help" => {
-            let _ = fx.send(UiEffect::Out(Kind::Info, HELP.into()));
+            let _ = fx.send(UiEffect::Out(Kind::Info, help_text()));
             Ok("ready".into())
         }
         "/model" => cmd_model(rest, agent, fx).await,
