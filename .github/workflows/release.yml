@@ -17,7 +17,8 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
+          # Intel runners are deprecated/scarce — cross-compile from arm64.
+          - os: macos-14
             target: x86_64-apple-darwin
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl

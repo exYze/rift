@@ -638,7 +638,7 @@ impl Tool for RepoMapTool {
             if files.is_empty() {
                 return Ok("no supported source files found (.rs .py .js .jsx .ts .tsx .go)".to_string());
             }
-            files.sort_by(|a, b| b.0.cmp(&a.0));
+            files.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
             let total_found = files.len();
             let mut out = String::new();
             let mut included = 0;
