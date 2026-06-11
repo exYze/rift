@@ -25,7 +25,7 @@ use ratatui::Frame;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{Kind, Pane};
+use crate::app::{diff_kind, Kind, Pane};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
@@ -121,20 +121,6 @@ impl SwarmApp {
         }
         self.race_done = true;
         self.message = "race finished — m merges the selected candidate".into();
-    }
-}
-
-fn diff_kind(line: &str) -> Kind {
-    if line.starts_with("diff ") || line.starts_with("index ") || line.starts_with("+++") || line.starts_with("---") || line.starts_with("new file") || line.starts_with("deleted file") {
-        Kind::DiffMeta
-    } else if line.starts_with("@@") {
-        Kind::DiffHunk
-    } else if line.starts_with('+') {
-        Kind::DiffAdd
-    } else if line.starts_with('-') {
-        Kind::DiffDel
-    } else {
-        Kind::Assistant
     }
 }
 

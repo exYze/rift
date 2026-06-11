@@ -12,7 +12,7 @@ pub use config::Config;
 pub use mcp::{McpClient, McpTool};
 pub use session::{SavedSession, SessionStore};
 pub use swarm::{run_swarm, Candidate, CandidateOutcome, Swarm};
-pub use tools::{Tool, ToolCtx, ToolRegistry};
+pub use tools::{builtin_bash_deny, EditRecord, Tool, ToolCtx, ToolRegistry};
 
 /// System prompt tuned for local models: short (every token counts against
 /// num_ctx), explicit about tool mechanics, and firm that tool calls must be

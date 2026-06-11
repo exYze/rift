@@ -14,11 +14,14 @@
 //! - only End (or Esc when idle) re-enters follow mode
 
 use std::io::stdout;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
 use rift_core::{Agent, AgentEvent, SessionStore, TurnStats};
 use rift_ollama::{Message, Role};
+
+use crate::commands::{self, CmdCx, UiEffect};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseEventKind,
@@ -214,6 +217,34 @@ impl Pane {
     }
 }
 
+/// Classify a unified-diff line for coloring (shared with the swarm TUI).
+pub(crate) fn diff_kind(line: &str) -> Kind {
+    if line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("+++")
+        || line.starts_with("---")
+        || line.starts_with("new file")
+        || line.starts_with("deleted file")
+    {
+        Kind::DiffMeta
+    } else if line.starts_with("@@") {
+        Kind::DiffHunk
+    } else if line.starts_with('+') {
+        Kind::DiffAdd
+    } else if line.starts_with('-') {
+        Kind::DiffDel
+    } else {
+        Kind::Assistant
+    }
+}
+
+/// What the TUI sends to the agent task: a normal prompt for the model, or a
+/// slash command handled locally.
+enum UiMsg {
+    Prompt(String, CancellationToken),
+    Command(String, CancellationToken),
+}
+
 fn floor_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
         return s.len();
@@ -258,7 +289,7 @@ impl App {
             history: vec![],
             history_idx: None,
             busy: false,
-            status: "Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Esc cancel · Ctrl+C quit".into(),
+            status: "Enter send · /help commands · Ctrl+J newline · Tab focus · Ctrl+L log · Esc cancel · Ctrl+C quit".into(),
             cancel: None,
             quit: false,
         }
@@ -341,6 +372,34 @@ impl App {
                     "done — {} steps · {} prompt tok · {} out tok · {:.1} tok/s",
                     stats.iterations, stats.prompt_tokens, stats.output_tokens, stats.tokens_per_sec
                 );
+            }
+        }
+    }
+
+    fn handle_ui_effect(&mut self, fx: UiEffect) {
+        match fx {
+            UiEffect::Out(kind, text) => self.transcript.push_block(kind, text),
+            UiEffect::Log(kind, text) => self.log.push_block(kind, text),
+            UiEffect::Diff(text) => {
+                for line in text.lines() {
+                    self.transcript.push_line(diff_kind(line), line.to_string());
+                }
+                self.transcript.push_line(Kind::Info, String::new());
+            }
+            UiEffect::Clear => {
+                self.transcript = Pane::new();
+                self.log = Pane::new();
+            }
+            UiEffect::Seed(messages) => {
+                self.transcript = Pane::new();
+                self.log = Pane::new();
+                self.seed_from_messages(&messages);
+            }
+            UiEffect::Model(name) => self.model = name,
+            UiEffect::Done(status) => {
+                self.busy = false;
+                self.cancel = None;
+                self.status = status;
             }
         }
     }
@@ -441,21 +500,40 @@ fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), input_inner);
 }
 
-pub async fn run_tui(agent: Agent, model: String, store: SessionStore, resumed: Vec<Message>) -> Result<()> {
-    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<(String, CancellationToken)>();
+/// The `/init` command body — a normal agent turn with a canned prompt.
+const INIT_PROMPT: &str = "Explore this repository (use repo_map and outline to stay cheap; read key files only as needed) and write a RIFT.md file at the project root: a concise guide for AI coding agents working here. Cover: what the project does, how the code is laid out, how to build/test/run it, and any conventions or gotchas you noticed. Keep it under 60 lines.";
 
-    let cwd = std::env::current_dir()?.display().to_string();
-    let agent_model = model.clone();
+pub async fn run_tui(
+    agent: Agent,
+    model: String,
+    store: SessionStore,
+    resumed: Vec<Message>,
+    mcp: Vec<(String, usize)>,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
+    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<UiMsg>();
+
+    let cwd = std::env::current_dir()?;
     let agent_task = tokio::spawn(async move {
         let mut agent = agent;
-        while let Some((prompt, cancel)) = prompt_rx.recv().await {
-            if let Err(e) = agent.run_turn(&prompt, &ev_tx, &cancel).await {
-                let _ = ev_tx.send(AgentEvent::Warning(format!("error: {e:#}")));
-                let _ = ev_tx.send(AgentEvent::Done(TurnStats::default()));
-            }
-            if let Err(e) = store.save(&agent_model, &cwd, &agent.messages) {
-                let _ = ev_tx.send(AgentEvent::Warning(format!("session save failed: {e:#}")));
+        let mut cx = CmdCx { store, cwd: cwd.clone(), mcp, config_path };
+        let cwd_str = cwd.display().to_string();
+        while let Some(msg) = prompt_rx.recv().await {
+            match msg {
+                UiMsg::Prompt(prompt, cancel) => {
+                    if let Err(e) = agent.run_turn(&prompt, &ev_tx, &cancel).await {
+                        let _ = ev_tx.send(AgentEvent::Warning(format!("error: {e:#}")));
+                        let _ = ev_tx.send(AgentEvent::Done(TurnStats::default()));
+                    }
+                    if let Err(e) = cx.store.save(&agent.cfg.model, &cwd_str, &agent.messages) {
+                        let _ = ev_tx.send(AgentEvent::Warning(format!("session save failed: {e:#}")));
+                    }
+                }
+                UiMsg::Command(line, cancel) => {
+                    commands::run_command(&line, &mut agent, &mut cx, &fx_tx, &cancel).await;
+                }
             }
         }
     });
@@ -471,6 +549,10 @@ pub async fn run_tui(agent: Agent, model: String, store: SessionStore, resumed: 
         loop {
             while let Ok(ev) = ev_rx.try_recv() {
                 app.handle_agent_event(ev);
+                needs_redraw = true;
+            }
+            while let Ok(fx) = fx_rx.try_recv() {
+                app.handle_ui_effect(fx);
                 needs_redraw = true;
             }
             if needs_redraw {
@@ -522,17 +604,27 @@ pub async fn run_tui(agent: Agent, model: String, store: SessionStore, resumed: 
                         if app.busy {
                             app.status = "agent is running — Esc to cancel first".into();
                         } else if !app.input.trim().is_empty() {
-                            let prompt = std::mem::take(&mut app.input);
-                            app.history.push(prompt.clone());
+                            let raw = std::mem::take(&mut app.input);
+                            app.history.push(raw.clone());
                             app.history_idx = None;
-                            app.transcript.push_block(Kind::User, prompt.clone());
+                            app.transcript.push_block(Kind::User, raw.clone());
                             app.busy = true;
                             app.transcript.scroll_from_bottom = 0;
                             app.log.scroll_from_bottom = 0;
-                            app.status = "sending…".into();
                             let cancel = CancellationToken::new();
                             app.cancel = Some(cancel.clone());
-                            let _ = prompt_tx.send((prompt, cancel));
+                            let trimmed = raw.trim().to_string();
+                            if trimmed == "/init" {
+                                // Syntactic sugar: a canned prompt through the normal agent loop.
+                                app.status = "generating RIFT.md…".into();
+                                let _ = prompt_tx.send(UiMsg::Prompt(INIT_PROMPT.to_string(), cancel));
+                            } else if trimmed.starts_with('/') {
+                                app.status = "running command…".into();
+                                let _ = prompt_tx.send(UiMsg::Command(trimmed, cancel));
+                            } else {
+                                app.status = "sending…".into();
+                                let _ = prompt_tx.send(UiMsg::Prompt(raw, cancel));
+                            }
                         }
                     }
                     KeyCode::Backspace => {

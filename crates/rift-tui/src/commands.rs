@@ -1,0 +1,587 @@
+//! Slash commands: lines starting with `/` are intercepted by the TUI and
+//! handled here instead of being sent to the model. Commands run inside the
+//! agent task (which owns the `Agent`); output flows back to the UI as
+//! `UiEffect`s. Esc cancels long-running commands (`/compact`, `/swarm`)
+//! through the same CancellationToken as normal turns.
+
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, bail, Context, Result};
+use rift_core::{builtin_bash_deny, compact, run_swarm, Agent, AgentEvent, Candidate, SessionStore, Swarm};
+use rift_ollama::{Message, OllamaClient, Role};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
+
+use crate::app::Kind;
+
+/// UI mutations a command can request; drained by the TUI event loop.
+pub enum UiEffect {
+    /// Styled block appended to the transcript pane.
+    Out(Kind, String),
+    /// Styled block appended to the activity-log pane.
+    Log(Kind, String),
+    /// Raw unified diff — the UI classifies and colors each line.
+    Diff(String),
+    /// Wipe both panes (e.g. `/clear`).
+    Clear,
+    /// Wipe both panes and rebuild the transcript from message history.
+    Seed(Vec<Message>),
+    /// Model name changed; update the status bar.
+    Model(String),
+    /// Command finished; status-line text. Always the final effect.
+    Done(String),
+}
+
+/// State owned by the agent task that commands need beyond the Agent itself.
+pub struct CmdCx {
+    pub store: SessionStore,
+    pub cwd: PathBuf,
+    /// (server name, registered tool count) for each configured MCP server.
+    pub mcp: Vec<(String, usize)>,
+    pub config_path: Option<PathBuf>,
+}
+
+const HELP: &str = "\
+commands:
+  /help                       this list
+  /model [name]               list models on the server, or switch model
+  /clear                      wipe the conversation (keeps the session file)
+  /compact                    force history compaction now
+  /tokens                     context budget, usage estimate, calibration
+  /sessions [n]               list saved sessions, or resume the nth
+  /tools                      tools the model can call (builtin + MCP)
+  /mcp                        connected MCP servers
+  /permissions                active shell deny patterns
+  /swarm <task> [--models a,b] [--explore]   WarpDrive race in worktrees
+  /merge <name> [--cleanup]   apply a swarm candidate's patch
+  /undo                       revert last turn's write/edit changes
+  /diff                       git diff of the working tree
+  /init                       generate a RIFT.md project guide
+  /host [url]                 show or switch the Ollama server
+  /think [on|off|auto]        thinking mode (capability-checked)
+  /export                     save the transcript as markdown
+
+keys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Esc cancel · Ctrl+C quit";
+
+/// Execute one slash-command line. Always emits `UiEffect::Done` last.
+pub async fn run_command(
+    line: &str,
+    agent: &mut Agent,
+    cx: &mut CmdCx,
+    fx: &UnboundedSender<UiEffect>,
+    cancel: &CancellationToken,
+) {
+    let line = line.trim();
+    let (cmd, rest) = match line.split_once(char::is_whitespace) {
+        Some((c, r)) => (c, r.trim()),
+        None => (line, ""),
+    };
+    let result = match cmd {
+        "/help" => {
+            let _ = fx.send(UiEffect::Out(Kind::Info, HELP.into()));
+            Ok("ready".into())
+        }
+        "/model" => cmd_model(rest, agent, fx).await,
+        "/clear" => cmd_clear(agent, cx, fx),
+        "/compact" => cmd_compact(agent, fx, cancel).await,
+        "/tokens" => cmd_tokens(agent, fx),
+        "/sessions" => cmd_sessions(rest, agent, cx, fx),
+        "/tools" => cmd_tools(agent, fx),
+        "/mcp" => cmd_mcp(cx, fx),
+        "/permissions" => cmd_permissions(agent, cx, fx),
+        "/swarm" => cmd_swarm(rest, agent, cx, fx, cancel).await,
+        "/merge" => cmd_merge(rest, cx, fx).await,
+        "/undo" => cmd_undo(agent, fx),
+        "/diff" => cmd_diff(cx, fx).await,
+        "/host" => cmd_host(rest, agent, fx, cancel).await,
+        "/think" => cmd_think(rest, agent, fx).await,
+        "/export" => cmd_export(agent, cx, fx),
+        other => Err(anyhow!("unknown command '{other}' — /help lists available commands")),
+    };
+    let status = match result {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = fx.send(UiEffect::Out(Kind::Warn, format!("! {e:#}")));
+            "command failed".into()
+        }
+    };
+    let _ = fx.send(UiEffect::Done(status));
+}
+
+async fn cmd_model(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.is_empty() {
+        let models = agent.client().tags().await.context("listing models")?;
+        if models.is_empty() {
+            bail!("no models installed on {}", agent.client().base_url());
+        }
+        let mut out = format!("models on {}:\n", agent.client().base_url());
+        for m in &models {
+            let marker = if m.name == agent.cfg.model { "▸" } else { " " };
+            out.push_str(&format!("{marker} {}\n", m.name));
+        }
+        out.push_str("\nswitch with /model <name>");
+        let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+        return Ok(format!("{} model(s)", models.len()));
+    }
+
+    // Same preflight as startup: capability check + num_ctx clamp.
+    let show = agent
+        .client()
+        .show(arg)
+        .await
+        .map_err(|e| anyhow!("model '{arg}' not usable: {e}"))?;
+    if !show.supports("tools") {
+        bail!("model '{arg}' does not have the 'tools' capability");
+    }
+    agent.cfg.think = if show.supports("thinking") { None } else { Some(false) };
+    let mut note = String::new();
+    if let Some(max) = show.context_length() {
+        if agent.cfg.num_ctx > max {
+            note = format!(" (num_ctx clamped {} → {max})", agent.cfg.num_ctx);
+            agent.cfg.num_ctx = agent.cfg.num_ctx.min(max);
+        }
+    }
+    agent.cfg.model = arg.to_string();
+    let _ = fx.send(UiEffect::Model(arg.to_string()));
+    let _ = fx.send(UiEffect::Out(Kind::Info, format!("switched to {arg}{note}")));
+    Ok(format!("model: {arg}"))
+}
+
+fn cmd_clear(agent: &mut Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    agent.messages.truncate(1); // keep the system prompt
+    let cwd = cx.cwd.display().to_string();
+    cx.store.save(&agent.cfg.model, &cwd, &agent.messages)?;
+    let _ = fx.send(UiEffect::Clear);
+    Ok("conversation cleared".into())
+}
+
+async fn cmd_compact(
+    agent: &mut Agent,
+    fx: &UnboundedSender<UiEffect>,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    if agent.messages.len() <= 2 {
+        bail!("nothing to compact yet");
+    }
+    let overhead = compact::estimate_tokens(
+        &serde_json::to_string(&agent.registry().tool_defs()).unwrap_or_default(),
+    );
+    let cal = agent.calibration();
+    let before = compact::estimate_prompt_tokens(&agent.messages, overhead, cal);
+    let touched = compact::prune_old_turns(&mut agent.messages);
+    let after_prune = compact::estimate_prompt_tokens(&agent.messages, overhead, cal);
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        format!("pruned {touched} old output(s): ~{before} → ~{after_prune} tok\nsummarizing earlier history…"),
+    ));
+    let rebuilt = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => bail!("cancelled"),
+        r = compact::summarize_history(agent.client(), &agent.cfg.model, agent.cfg.num_ctx, &agent.messages) => r?,
+    };
+    agent.messages = rebuilt;
+    let after = compact::estimate_prompt_tokens(&agent.messages, overhead, cal);
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        format!("compacted: ~{before} → ~{after} tok ({} messages)", agent.messages.len()),
+    ));
+    Ok(format!("compacted to ~{after} tok"))
+}
+
+fn cmd_tokens(agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let overhead = compact::estimate_tokens(
+        &serde_json::to_string(&agent.registry().tool_defs()).unwrap_or_default(),
+    );
+    let cal = agent.calibration();
+    let est = compact::estimate_prompt_tokens(&agent.messages, overhead, cal);
+    let budget = compact::usable_budget(agent.cfg.num_ctx);
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        format!(
+            "model:       {} @ {}\n\
+             num_ctx:     {} ({} usable after output reserve + safety margin)\n\
+             history:     {} messages, ~{est} tok estimated (tool schemas ~{overhead} tok)\n\
+             headroom:    ~{} tok\n\
+             calibration: {cal:.2}× (actual/estimated, learned from prompt_eval_count)",
+            agent.cfg.model,
+            agent.client().base_url(),
+            agent.cfg.num_ctx,
+            budget,
+            agent.messages.len(),
+            budget.saturating_sub(est),
+        ),
+    ));
+    Ok(format!("~{est}/{budget} tok"))
+}
+
+fn fmt_age(saved_at: u64) -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(saved_at);
+    let secs = now.saturating_sub(saved_at);
+    match secs {
+        0..=59 => format!("{secs}s ago"),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
+fn cmd_sessions(
+    arg: &str,
+    agent: &mut Agent,
+    cx: &mut CmdCx,
+    fx: &UnboundedSender<UiEffect>,
+) -> Result<String> {
+    let paths = SessionStore::list()?;
+    if paths.is_empty() {
+        bail!("no saved sessions");
+    }
+
+    if arg.is_empty() {
+        let mut out = String::from("saved sessions (newest first):\n");
+        for (i, path) in paths.iter().take(15).enumerate() {
+            let line = match SessionStore::load(path) {
+                Ok(s) => format!(
+                    "{:>2}. {:<9} {:<16} {:>3} msgs  {}",
+                    i + 1,
+                    fmt_age(s.saved_at),
+                    s.model,
+                    s.messages.len(),
+                    if path == cx.store.path() { "← current" } else { "" }
+                ),
+                Err(_) => format!("{:>2}. (unreadable) {}", i + 1, path.display()),
+            };
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        if paths.len() > 15 {
+            out.push_str(&format!("… and {} more\n", paths.len() - 15));
+        }
+        out.push_str("\nresume with /sessions <n>");
+        let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+        return Ok(format!("{} session(s)", paths.len()));
+    }
+
+    let n: usize = arg.parse().context("usage: /sessions <number>")?;
+    let path = paths.get(n.saturating_sub(1)).ok_or_else(|| anyhow!("no session #{n}"))?;
+    let saved = SessionStore::load(path)?;
+    let mut messages = saved.messages;
+    // Keep the freshly composed system prompt (cwd may differ from then).
+    if messages.first().is_some_and(|m| m.role == Role::System) {
+        messages[0] = agent.messages[0].clone();
+    }
+    agent.messages = messages.clone();
+    cx.store = SessionStore::at(path.clone());
+    let count = messages.len();
+    let _ = fx.send(UiEffect::Seed(messages));
+    Ok(format!("resumed session #{n} ({count} messages)"))
+}
+
+fn cmd_tools(agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let defs = agent.registry().tool_defs();
+    let mut out = String::from("tools the model can call:\n");
+    for def in &defs {
+        let desc: String = def.function.description.chars().take(70).collect();
+        out.push_str(&format!("  {:<14} {desc}\n", def.function.name));
+    }
+    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+    Ok(format!("{} tool(s)", defs.len()))
+}
+
+fn cmd_mcp(cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let mut out = String::new();
+    match &cx.config_path {
+        Some(p) => out.push_str(&format!("config: {}\n", p.display())),
+        None => out.push_str("config: none found (.rift.json or ~/.config/rift/config.json)\n"),
+    }
+    if cx.mcp.is_empty() {
+        out.push_str("no MCP servers connected");
+    } else {
+        out.push_str("MCP servers:\n");
+        for (name, count) in &cx.mcp {
+            out.push_str(&format!("  {name}: {count} tool(s), exposed as {name}_<tool>\n"));
+        }
+        out.push_str("(config changes need a restart)");
+    }
+    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+    Ok(format!("{} server(s)", cx.mcp.len()))
+}
+
+fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let user = agent.ctx().user_deny_patterns();
+    let mut out = String::from("shell commands matching these patterns are refused:\n\nbuilt-in (always on):\n");
+    for pat in builtin_bash_deny() {
+        out.push_str(&format!("  {pat}\n"));
+    }
+    if user.is_empty() {
+        out.push_str("\nuser (permissions.bash_deny): none configured");
+    } else {
+        out.push_str("\nuser (permissions.bash_deny):\n");
+        for pat in user {
+            out.push_str(&format!("  {pat}\n"));
+        }
+    }
+    if let Some(p) = &cx.config_path {
+        out.push_str(&format!("\nconfig: {}", p.display()));
+    }
+    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+    Ok(format!("{} builtin + {} user pattern(s)", builtin_bash_deny().len(), user.len()))
+}
+
+async fn cmd_swarm(
+    rest: &str,
+    agent: &Agent,
+    cx: &CmdCx,
+    fx: &UnboundedSender<UiEffect>,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    // Parse: task words, optional `--models a,b`, optional `--explore`.
+    let mut task_words: Vec<&str> = vec![];
+    let mut models = agent.cfg.model.clone();
+    let mut explore = false;
+    let mut words = rest.split_whitespace().peekable();
+    while let Some(w) = words.next() {
+        match w {
+            "--models" => {
+                models = words.next().ok_or_else(|| anyhow!("--models needs a value"))?.to_string();
+            }
+            "--explore" => explore = true,
+            _ => task_words.push(w),
+        }
+    }
+    let task = task_words.join(" ");
+    if task.is_empty() {
+        bail!("usage: /swarm <task> [--models a,b] [--explore]");
+    }
+
+    let swarm = Swarm::discover(&cx.cwd).await?;
+    let mut candidates: Vec<Candidate> = models
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .enumerate()
+        .map(|(i, m)| Candidate::from_model(m, i))
+        .collect();
+    if explore {
+        let extra: Vec<Candidate> = candidates
+            .iter()
+            .map(|c| Candidate {
+                name: format!("{}-hot", c.name),
+                model: c.model.clone(),
+                temperature: Some(0.8),
+            })
+            .collect();
+        candidates.extend(extra);
+    }
+    let names: Vec<String> = candidates.iter().map(|c| c.name.clone()).collect();
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        format!("WarpDrive: racing {} candidate(s) in isolated worktrees — Esc cancels\n  {}", names.len(), names.join("\n  ")),
+    ));
+
+    // Forward race progress (not content streams) into the activity log.
+    let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel::<(usize, AgentEvent)>();
+    let fx2 = fx.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some((idx, ev)) = erx.recv().await {
+            let effect = match ev {
+                AgentEvent::Iteration(i) => Some((Kind::Info, format!("[{idx}] step {i}"))),
+                AgentEvent::ToolStart { name, .. } => Some((Kind::Tool, format!("[{idx}] → {name}"))),
+                AgentEvent::ToolResult { name, ok, .. } => Some((
+                    if ok { Kind::Tool } else { Kind::ToolErr },
+                    format!("[{idx}] {} {name}", if ok { '✓' } else { '✗' }),
+                )),
+                AgentEvent::Warning(w) => Some((Kind::Warn, format!("[{idx}] ! {w}"))),
+                AgentEvent::Done(s) => Some((Kind::Info, format!("[{idx}] finished — {} steps", s.iterations))),
+                _ => None,
+            };
+            if let Some((kind, text)) = effect {
+                let _ = fx2.send(UiEffect::Log(kind, text));
+            }
+        }
+    });
+
+    let base_cfg = agent.cfg.clone();
+    let outcomes = run_swarm(agent.client(), &base_cfg, &swarm, candidates, &task, etx, cancel).await;
+    let _ = forwarder.await;
+
+    let mut out = String::from("race results:\n");
+    let mut mergeable = 0;
+    for o in &outcomes {
+        out.push_str(&format!("\n● {} ({})\n", o.candidate.name, o.candidate.model));
+        if let Some(e) = &o.error {
+            out.push_str(&format!("  failed: {e}\n"));
+            continue;
+        }
+        if o.patch_path.is_some() {
+            mergeable += 1;
+            out.push_str(&format!("  changes: {}\n", o.diff_stat.trim().replace('\n', "\n  ")));
+        } else {
+            out.push_str(&format!("  {}\n", o.diff_stat.trim()));
+        }
+        let summary: String = o.summary.chars().take(300).collect();
+        if !summary.is_empty() {
+            out.push_str(&format!("  says: {}\n", summary.replace('\n', " ")));
+        }
+    }
+    if mergeable > 0 {
+        out.push_str("\napply a winner with /merge <name> [--cleanup]");
+    }
+    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+    Ok(format!("race done — {mergeable} candidate(s) produced changes"))
+}
+
+async fn cmd_merge(rest: &str, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let mut name = None;
+    let mut cleanup = false;
+    for w in rest.split_whitespace() {
+        match w {
+            "--cleanup" => cleanup = true,
+            other => name = Some(other.to_string()),
+        }
+    }
+    let name = name.ok_or_else(|| anyhow!("usage: /merge <candidate-name> [--cleanup]"))?;
+    let swarm = Swarm::discover(&cx.cwd).await?;
+    swarm.apply_patch(&name).await?;
+    let mut msg = format!("applied patch '{name}' to {}", swarm.root().display());
+    if cleanup {
+        let n = swarm.cleanup_all().await?;
+        msg.push_str(&format!(", removed {n} worktree(s)"));
+    }
+    let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+    Ok(msg)
+}
+
+fn cmd_undo(agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let restored = agent.ctx().undo_last_turn()?;
+    if restored.is_empty() {
+        bail!("nothing to undo (only write/edit tool changes are tracked)");
+    }
+    let mut out = String::from("restored to pre-turn state:\n");
+    for p in &restored {
+        out.push_str(&format!("  {}\n", p.display()));
+    }
+    out.push_str("(note: changes made via bash are not tracked)");
+    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+    Ok(format!("undid {} file(s)", restored.len()))
+}
+
+async fn cmd_diff(cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let run = |args: &'static [&'static str]| {
+        let cwd = cx.cwd.clone();
+        async move {
+            let out = tokio::process::Command::new("git").args(args).current_dir(&cwd).output().await?;
+            anyhow::Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()))
+        }
+    };
+    // HEAD form shows staged + unstaged; fall back for repos with no commits.
+    let (ok, text) = run(&["diff", "HEAD"]).await?;
+    let text = if ok { text } else { run(&["diff"]).await?.1 };
+    if text.trim().is_empty() {
+        let _ = fx.send(UiEffect::Out(Kind::Info, "working tree clean".into()));
+        return Ok("no changes".into());
+    }
+    let lines = text.lines().count();
+    let _ = fx.send(UiEffect::Diff(text));
+    Ok(format!("diff: {lines} lines"))
+}
+
+async fn cmd_host(
+    arg: &str,
+    agent: &mut Agent,
+    fx: &UnboundedSender<UiEffect>,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    if arg.is_empty() {
+        let _ = fx.send(UiEffect::Out(
+            Kind::Info,
+            format!("Ollama server: {}\nswitch with /host <url>", agent.client().base_url()),
+        ));
+        return Ok("host shown".into());
+    }
+    let candidate = OllamaClient::new(arg);
+    let models = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => bail!("cancelled"),
+        r = candidate.tags() => r.map_err(|e| anyhow!("cannot reach {}: {e}", candidate.base_url()))?,
+    };
+    let url = candidate.base_url().to_string();
+    let has_model = models.iter().any(|m| m.name == agent.cfg.model);
+    agent.set_client(candidate);
+    let mut msg = format!("switched to {url} ({} model(s))", models.len());
+    if !has_model {
+        msg.push_str(&format!("\n! current model '{}' not found there — pick one with /model", agent.cfg.model));
+    }
+    let _ = fx.send(UiEffect::Out(if has_model { Kind::Info } else { Kind::Warn }, msg));
+    Ok(format!("host: {url}"))
+}
+
+async fn cmd_think(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let state = match arg {
+        "" => {
+            let now = match agent.cfg.think {
+                None => "auto (server default)",
+                Some(true) => "on",
+                Some(false) => "off",
+            };
+            let _ = fx.send(UiEffect::Out(Kind::Info, format!("thinking: {now}\nset with /think on|off|auto")));
+            return Ok(format!("thinking: {now}"));
+        }
+        "on" => {
+            let show = agent.client().show(&agent.cfg.model).await?;
+            if !show.supports("thinking") {
+                bail!("model '{}' does not have the 'thinking' capability", agent.cfg.model);
+            }
+            agent.cfg.think = Some(true);
+            "on"
+        }
+        "off" => {
+            agent.cfg.think = Some(false);
+            "off"
+        }
+        "auto" => {
+            let show = agent.client().show(&agent.cfg.model).await?;
+            agent.cfg.think = if show.supports("thinking") { None } else { Some(false) };
+            "auto (server default)"
+        }
+        other => bail!("unknown value '{other}' — use on, off, or auto"),
+    };
+    let _ = fx.send(UiEffect::Out(Kind::Info, format!("thinking: {state}")));
+    Ok(format!("thinking: {state}"))
+}
+
+fn cmd_export(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let path = cx.cwd.join(format!("rift-export-{stamp}.md"));
+    let mut out = format!("# Rift transcript — {}\n", agent.cfg.model);
+    for m in &agent.messages {
+        match m.role {
+            Role::System => {}
+            Role::User => {
+                if !m.content.starts_with("[system]") {
+                    out.push_str(&format!("\n## User\n\n{}\n", m.content));
+                }
+            }
+            Role::Assistant => {
+                if !m.content.is_empty() {
+                    out.push_str(&format!("\n## Assistant\n\n{}\n", m.content));
+                }
+                for tc in &m.tool_calls {
+                    out.push_str(&format!(
+                        "\n> tool call: `{}` `{}`\n",
+                        tc.function.name,
+                        serde_json::to_string(&tc.function.arguments).unwrap_or_default()
+                    ));
+                }
+            }
+            Role::Tool => {
+                let name = m.tool_name.as_deref().unwrap_or("?");
+                let preview: String = m.content.chars().take(600).collect();
+                out.push_str(&format!("\n> `{name}` returned:\n>\n> ```\n{}\n> ```\n", preview.trim_end()));
+            }
+        }
+    }
+    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    let _ = fx.send(UiEffect::Out(Kind::Info, format!("exported to {}", path.display())));
+    Ok(format!("exported {}", path.display()))
+}

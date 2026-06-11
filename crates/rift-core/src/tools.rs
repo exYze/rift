@@ -27,10 +27,28 @@ const BASH_DENY_BUILTIN: &[&str] = &[
     ":(){*", "chmod -R 777 /*", "chown -R * /",
 ];
 
+/// The built-in shell deny list (for display, e.g. `/permissions`).
+pub fn builtin_bash_deny() -> &'static [&'static str] {
+    BASH_DENY_BUILTIN
+}
+
+/// One file mutation made by the write/edit tools, with enough state to
+/// restore the file to how it was before (`prior` = None means the file
+/// didn't exist).
+#[derive(Debug, Clone)]
+pub struct EditRecord {
+    pub path: PathBuf,
+    pub prior: Option<String>,
+    pub turn: u64,
+}
+
 #[derive(Clone)]
 pub struct ToolCtx {
     pub cwd: PathBuf,
     bash_deny: std::sync::Arc<globset::GlobSet>,
+    user_deny: std::sync::Arc<Vec<String>>,
+    journal: std::sync::Arc<std::sync::Mutex<Vec<EditRecord>>>,
+    turn: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ToolCtx {
@@ -47,12 +65,66 @@ impl ToolCtx {
             }
         }
         let set = builder.build().unwrap_or_else(|_| globset::GlobSet::empty());
-        Self { cwd: cwd.into(), bash_deny: std::sync::Arc::new(set) }
+        Self {
+            cwd: cwd.into(),
+            bash_deny: std::sync::Arc::new(set),
+            user_deny: std::sync::Arc::new(extra_deny.to_vec()),
+            journal: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// User-configured deny patterns (without the built-ins).
+    pub fn user_deny_patterns(&self) -> &[String] {
+        &self.user_deny
     }
 
     fn bash_denied(&self, command: &str) -> bool {
         let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
         self.bash_deny.is_match(&normalized)
+    }
+
+    /// Mark the start of a new agent turn; edits recorded after this group
+    /// under the new turn for `undo_last_turn`.
+    pub fn begin_turn(&self) {
+        self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn record_edit(&self, path: PathBuf, prior: Option<String>) {
+        let turn = self.turn.load(std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut j) = self.journal.lock() {
+            // One snapshot per (turn, path) is enough — the FIRST prior state
+            // of the turn is what undo must restore.
+            if !j.iter().any(|r| r.turn == turn && r.path == path) {
+                j.push(EditRecord { path, prior, turn });
+            }
+        }
+    }
+
+    /// Revert every file the write/edit tools touched in the most recent turn
+    /// that made changes. Returns the restored paths (empty = nothing to undo).
+    pub fn undo_last_turn(&self) -> Result<Vec<PathBuf>> {
+        let records: Vec<EditRecord> = {
+            let mut j = self.journal.lock().map_err(|_| anyhow!("edit journal poisoned"))?;
+            let Some(last_turn) = j.iter().map(|r| r.turn).max() else {
+                return Ok(vec![]);
+            };
+            let taken = j.iter().filter(|r| r.turn == last_turn).cloned().collect();
+            j.retain(|r| r.turn != last_turn);
+            taken
+        };
+        let mut restored = Vec::with_capacity(records.len());
+        for rec in records {
+            match &rec.prior {
+                Some(content) => std::fs::write(&rec.path, content)
+                    .with_context(|| format!("restoring {}", rec.path.display()))?,
+                None => {
+                    let _ = std::fs::remove_file(&rec.path);
+                }
+            }
+            restored.push(rec.path);
+        }
+        Ok(restored)
     }
 
     fn resolve(&self, path: &str) -> PathBuf {
@@ -272,6 +344,7 @@ impl Tool for WriteTool {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        ctx.record_edit(path.clone(), tokio::fs::read_to_string(&path).await.ok());
         tokio::fs::write(&path, content).await.with_context(|| format!("cannot write {}", path.display()))?;
         Ok(format!("Wrote {} bytes to {}", content.len(), path.display()))
     }
@@ -321,6 +394,7 @@ impl Tool for EditTool {
             bail!("old_string occurs {count} times in {}; include more surrounding context to make it unique, or set replace_all", path.display());
         }
         let updated = if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) };
+        ctx.record_edit(path.clone(), Some(text.clone()));
         tokio::fs::write(&path, &updated).await?;
         Ok(format!("Edited {} ({} replacement{})", path.display(), count, if count == 1 { "" } else { "s" }))
     }
@@ -660,5 +734,33 @@ mod tests {
         assert!(!ctx.bash_denied("echo sudo is a word"));
         assert!(!ctx.bash_denied("ls -la"));
         assert!(!ctx.bash_denied("rm -rf ./build")); // only / and /* are blocked
+    }
+
+    #[test]
+    fn undo_restores_prior_content_and_deletes_new_files() {
+        let dir = std::env::temp_dir().join(format!("rift-undo-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("existing.txt");
+        let created = dir.join("created.txt");
+        std::fs::write(&existing, "original").unwrap();
+
+        let ctx = ToolCtx::new(&dir);
+        ctx.begin_turn();
+        ctx.record_edit(existing.clone(), Some("original".into()));
+        std::fs::write(&existing, "modified").unwrap();
+        ctx.record_edit(created.clone(), None);
+        std::fs::write(&created, "new file").unwrap();
+        // A second snapshot of the same path in the same turn must not
+        // overwrite the first prior state.
+        ctx.record_edit(existing.clone(), Some("modified".into()));
+        std::fs::write(&existing, "modified twice").unwrap();
+
+        let restored = ctx.undo_last_turn().unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
+        assert!(!created.exists());
+        // Journal drained: a second undo is a no-op.
+        assert!(ctx.undo_last_turn().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

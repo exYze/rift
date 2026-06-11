@@ -50,6 +50,25 @@ impl SessionStore {
         &self.path
     }
 
+    /// All saved sessions, newest first.
+    pub fn list() -> Result<Vec<PathBuf>> {
+        let dir = sessions_dir()?;
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut entries: Vec<(SystemTime, PathBuf)> = vec![];
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            entries.push((entry.metadata()?.modified()?, path));
+        }
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(entries.into_iter().map(|(_, p)| p).collect())
+    }
+
     /// Most recently saved session file, if any.
     pub fn latest() -> Result<Option<PathBuf>> {
         let dir = sessions_dir()?;

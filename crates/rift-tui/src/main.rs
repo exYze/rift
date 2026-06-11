@@ -1,4 +1,5 @@
 mod app;
+mod commands;
 mod swarm_ui;
 
 use std::path::PathBuf;
@@ -124,6 +125,7 @@ async fn main() -> Result<()> {
         eprintln!("config: {}", p.display());
     }
     let mut registry = ToolRegistry::standard();
+    let mut mcp_status: Vec<(String, usize)> = vec![];
     for (name, server_cfg) in &config.mcp {
         match McpClient::spawn(name, server_cfg).await {
             Ok(mcp) => match mcp.list_tools().await {
@@ -132,6 +134,7 @@ async fn main() -> Result<()> {
                     for info in tools {
                         registry.register(Box::new(McpTool::new(mcp.clone(), info)));
                     }
+                    mcp_status.push((name.clone(), count));
                     eprintln!("mcp '{name}': {count} tool(s) registered");
                 }
                 Err(e) => eprintln!("warning: mcp '{name}' tools/list failed: {e:#}"),
@@ -177,7 +180,7 @@ async fn main() -> Result<()> {
 
     match cli.prompt {
         Some(prompt) => run_headless(agent, prompt, store).await,
-        None => app::run_tui(agent, cli.model, store, resumed_messages).await,
+        None => app::run_tui(agent, cli.model, store, resumed_messages, mcp_status, config_path).await,
     }
 }
 

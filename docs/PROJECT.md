@@ -1,6 +1,6 @@
-# GhostWriter — project state
+# Rift — project state
 
-Updated: 2026-06-11 (iteration 7 — ROADMAP COMPLETE)
+Updated: 2026-06-11 (iteration 8 — slash commands; renamed GhostWriter → Rift, published to github.com/exYze/rift)
 
 ## Vision
 
@@ -66,6 +66,14 @@ One Rust TUI combining three concepts: **GhostWriter** (flawless multi-pane TUI,
 - [x] RESULT: both 5/5; GhostWriter used **80.4% fewer prompt tokens** (54,431 vs 277,110) and was **2.3× faster** (128.8s vs 300.4s) — target was ≥10%
 - [x] docs/BENCHMARKS.md published with methodology + honest caveats
 - Hard-won harness lessons: opencode trusts $PWD over real cwd (subprocess must set PWD or it roots in the wrong dir — it edited our fixtures!); silent exit-0 on ProviderModelNotFoundError; global-config provider merge collisions → per-task throwaway HOME is the only reliable isolation
+
+### Iteration 8 — slash commands (done)
+- [x] 16 in-TUI commands intercepted before the model sees them: /help /model /clear /compact /tokens /sessions /tools /mcp /permissions /swarm /merge /undo /diff /init /host /think /export
+- [x] Architecture: commands run inside the agent task (owns the Agent); results flow back over a dedicated UiEffect channel (Out/Log/Diff/Clear/Seed/Model/Done) so they never race AgentEvents; Esc cancels long commands (/compact, /swarm) via the same CancellationToken as turns
+- [x] /undo backed by an edit journal in ToolCtx: write/edit snapshot the first prior state per (turn, path); restores files or deletes created ones; bash changes explicitly not tracked (unit tested)
+- [x] /swarm runs a full WarpDrive race inside the chat TUI — progress streams to the activity pane, results + /merge hint to the transcript
+- [x] /model /host /think all capability-preflighted via /api/show (same hardening as startup)
+- [x] Live PTY E2E: /help, /tokens, /model (13 real models listed), /think, unknown-command error — all rendered, clean exit
 
 ### Possible future work (roadmap complete; not scheduled)
 - Streaming-diff pane in main chat TUI; session picker; syntax highlighting via syntect (binary budget!)

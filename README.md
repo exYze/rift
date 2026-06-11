@@ -30,6 +30,25 @@ rift merge 0-gemma4-26b --cleanup
 
 Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-iterations`, `-c/--continue` (resume last session).
 
+## Slash commands (inside the TUI)
+
+| command | what it does |
+|---|---|
+| `/model [name]` | list models on the server, or switch (capability-checked, num_ctx clamped) |
+| `/clear` | wipe the conversation |
+| `/compact` | force history compaction now |
+| `/tokens` | context budget, usage estimate, estimator calibration |
+| `/sessions [n]` | list saved sessions, or resume the nth |
+| `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, shell deny list |
+| `/swarm <task> [--models a,b] [--explore]` | WarpDrive race without leaving the chat |
+| `/merge <name> [--cleanup]` | apply a swarm candidate's patch |
+| `/undo` | revert the last turn's write/edit changes |
+| `/diff` | colored git diff of the working tree |
+| `/init` | generate a RIFT.md project guide for agents |
+| `/host [url]` | show or switch the Ollama server |
+| `/think [on\|off\|auto]` | thinking mode (capability-checked) |
+| `/export` | save the transcript as markdown |
+
 ## Config (`.rift.json` in the project, or `~/.config/rift/config.json`)
 
 ```json

@@ -86,6 +86,28 @@ impl Agent {
         Self { client, cfg, registry, ctx, messages: vec![Message::system(system_prompt)], calibration: 1.0 }
     }
 
+    pub fn client(&self) -> &OllamaClient {
+        &self.client
+    }
+
+    /// Swap the backing Ollama server (e.g. the `/host` command).
+    pub fn set_client(&mut self, client: OllamaClient) {
+        self.client = client;
+    }
+
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+
+    pub fn ctx(&self) -> &ToolCtx {
+        &self.ctx
+    }
+
+    /// Current actual/estimated prompt-token ratio of the estimator.
+    pub fn calibration(&self) -> f64 {
+        self.calibration
+    }
+
     /// Enforce the context budget before a request. Stage 1 prunes old tool
     /// outputs; stage 2 (LLM summarization) collapses old history entirely.
     async fn enforce_budget(&mut self, tools_overhead: u64, tx: &UnboundedSender<AgentEvent>) {
@@ -128,6 +150,7 @@ impl Agent {
         cancel: &CancellationToken,
     ) -> Result<TurnStats> {
         self.messages.push(Message::user(user_input));
+        self.ctx.begin_turn();
 
         let tools = self.registry.tool_defs();
         let known = self.registry.names();
