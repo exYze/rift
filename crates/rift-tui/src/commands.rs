@@ -50,7 +50,7 @@ pub struct CmdCx {
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/clear", "", "wipe the conversation (keeps the session file)"),
     ("/compact", "", "force history compaction now"),
-    ("/copy", "[all]", "copy the last reply (or whole transcript) to the clipboard"),
+    ("/copy", "[all|log]", "copy last reply / whole transcript / activity log"),
     ("/diff", "", "git diff of the working tree"),
     ("/export", "", "save the transcript as markdown"),
     ("/help", "", "list commands and keys"),
@@ -499,7 +499,7 @@ async fn cmd_copy(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> R
             }
             out
         }
-        other => bail!("usage: /copy [all] — got '{other}'"),
+        other => bail!("usage: /copy [all|log] — got '{other}'"),
     };
     let chars = text.chars().count();
     let status = match crate::clipboard::copy_via_tool(&text).await {

@@ -131,6 +131,11 @@ impl Pane {
         self.blocks.is_empty()
     }
 
+    /// The pane's full content as plain text (for clipboard export).
+    pub(crate) fn raw_text(&self) -> String {
+        self.blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
     pub(crate) fn rebuild(&mut self, width: u16) {
         if !self.dirty && width == self.wrap_width {
             return;
@@ -607,6 +612,8 @@ pub async fn run_tui(
     });
 
     let cwd = std::env::current_dir()?;
+    // UI-side effect sender: for commands the UI handles itself (/copy log).
+    let fx_ui = fx_tx.clone();
     let agent_task = tokio::spawn(async move {
         let mut agent = agent;
         let mut cx = CmdCx { store, cwd: cwd.clone(), mcp, config_path };
@@ -745,6 +752,29 @@ pub async fn run_tui(
                                 // Syntactic sugar: a canned prompt through the normal agent loop.
                                 app.status = "generating RIFT.md…".into();
                                 let _ = prompt_tx.send(UiMsg::Prompt(INIT_PROMPT.to_string(), cancel));
+                            } else if trimmed.strip_prefix("/copy").is_some_and(|r| r.trim() == "log") {
+                                // Handled UI-side: the activity pane lives here,
+                                // not in the agent's message history.
+                                app.busy = false;
+                                app.cancel = None;
+                                let text = app.log.raw_text();
+                                if text.trim().is_empty() {
+                                    app.transcript.push_block(Kind::Warn, "! activity log is empty".into());
+                                } else {
+                                    let fx2 = fx_ui.clone();
+                                    tokio::spawn(async move {
+                                        let chars = text.chars().count();
+                                        let msg = match crate::clipboard::copy_via_tool(&text).await {
+                                            Some(tool) => format!("copied {chars} chars of activity log (via {tool})"),
+                                            None => {
+                                                let _ = fx2.send(UiEffect::Osc52(text));
+                                                format!("sent {chars} chars to the terminal clipboard (OSC 52)")
+                                            }
+                                        };
+                                        let _ = fx2.send(UiEffect::Out(Kind::Info, msg.clone()));
+                                        let _ = fx2.send(UiEffect::Done(msg));
+                                    });
+                                }
                             } else if trimmed.starts_with('/') {
                                 app.status = "running command…".into();
                                 let _ = prompt_tx.send(UiMsg::Command(trimmed, cancel));
