@@ -65,7 +65,7 @@ pub(crate) fn style_for(kind: Kind) -> Style {
         Kind::Assistant => Style::default(),
         Kind::Code => Style::default().fg(Color::Green),
         Kind::Thinking => Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        Kind::Tool => Style::default().fg(Color::Blue),
+        Kind::Tool => Style::default().fg(Color::White),
         Kind::ToolErr => Style::default().fg(Color::Red),
         Kind::Warn => Style::default().fg(Color::Yellow),
         Kind::Info => Style::default().fg(Color::DarkGray),
