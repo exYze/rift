@@ -220,6 +220,45 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)
 }
 
+/// Remove ANSI escape sequences (CSI + OSC) and stray control characters
+/// from command output, keeping newlines and tabs.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for n in chars.by_ref() {
+                        if ('@'..='~').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' || (n == '\x1b' && chars.peek() == Some(&'\\')) {
+                            if n == '\x1b' {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            },
+            '\n' | '\t' => out.push(c),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Largest index <= max that lands on a char boundary.
 fn floor_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
@@ -441,8 +480,10 @@ impl Tool for BashTool {
             .map_err(|_| anyhow!("command timed out after {timeout}s"))??;
 
         let mut text = String::new();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Strip ANSI color/control sequences (npm, cargo, git…): they corrupt
+        // the TUI if rendered and waste the model's tokens either way.
+        let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
+        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
         if !stdout.trim().is_empty() {
             text.push_str(stdout.trim_end());
         }
@@ -734,6 +775,14 @@ mod tests {
         assert!(!ctx.bash_denied("echo sudo is a word"));
         assert!(!ctx.bash_denied("ls -la"));
         assert!(!ctx.bash_denied("rm -rf ./build")); // only / and /* are blocked
+    }
+
+    #[test]
+    fn strip_ansi_removes_colors_and_osc() {
+        assert_eq!(strip_ansi("\x1b[32madded\x1b[0m 13 packages"), "added 13 packages");
+        assert_eq!(strip_ansi("\x1b]0;title\x07plain"), "plain");
+        assert_eq!(strip_ansi("keep\nnewlines\tand tabs"), "keep\nnewlines\tand tabs");
+        assert_eq!(strip_ansi("no escapes"), "no escapes");
     }
 
     #[test]

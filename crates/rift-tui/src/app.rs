@@ -15,7 +15,7 @@
 
 use std::io::stdout;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rift_core::{Agent, AgentEvent, SessionStore, TurnStats};
@@ -23,8 +23,8 @@ use rift_ollama::{Message, Role};
 
 use crate::commands::{self, CmdCx, UiEffect};
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -95,6 +95,51 @@ pub(crate) struct Pane {
     pub(crate) area: Rect,
 }
 
+/// Strip ANSI escape sequences and control characters before text enters a
+/// pane. Tool output (npm, cargo, git…) is full of color codes; written raw
+/// into the terminal they desync the cursor and corrupt the whole frame.
+/// Tabs become spaces, \r is dropped, \n survives.
+pub(crate) fn sanitize_for_pane(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.peek() {
+                // CSI: ESC [ … final byte in @..=~
+                Some('[') => {
+                    chars.next();
+                    for n in chars.by_ref() {
+                        if ('@'..='~').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: ESC ] … BEL or ESC \
+                Some(']') => {
+                    chars.next();
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' || (n == '\x1b' && chars.peek() == Some(&'\\')) {
+                            if n == '\x1b' {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                // Two-char escapes (ESC c, ESC 7, …)
+                _ => {
+                    chars.next();
+                }
+            },
+            '\t' => out.push_str("    "),
+            '\n' => out.push('\n'),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl Pane {
     pub(crate) fn new() -> Self {
         Self {
@@ -109,20 +154,21 @@ impl Pane {
     }
 
     pub(crate) fn push_block(&mut self, kind: Kind, text: String) {
-        self.blocks.push(BlockEntry { kind, text, gap: true });
+        self.blocks.push(BlockEntry { kind, text: sanitize_for_pane(&text), gap: true });
         self.dirty = true;
     }
 
     /// Dense single line, no blank separator after it (tool logs, diffs).
     pub(crate) fn push_line(&mut self, kind: Kind, text: String) {
-        self.blocks.push(BlockEntry { kind, text, gap: false });
+        self.blocks.push(BlockEntry { kind, text: sanitize_for_pane(&text), gap: false });
         self.dirty = true;
     }
 
     pub(crate) fn append_stream(&mut self, kind: Kind, text: &str) {
+        let text = sanitize_for_pane(text);
         match self.blocks.last_mut() {
-            Some(last) if last.kind == kind => last.text.push_str(text),
-            _ => self.blocks.push(BlockEntry { kind, text: text.to_string(), gap: true }),
+            Some(last) if last.kind == kind => last.text.push_str(&text),
+            _ => self.blocks.push(BlockEntry { kind, text, gap: true }),
         }
         self.dirty = true;
     }
@@ -261,6 +307,21 @@ fn floor_boundary(s: &str, max: usize) -> usize {
     i.max(1) // always make progress even on a pathological boundary
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_ansi_and_controls_expands_tabs() {
+        assert_eq!(sanitize_for_pane("\x1b[1;32m✓\x1b[0m ok"), "✓ ok");
+        assert_eq!(sanitize_for_pane("a\tb"), "a    b");
+        assert_eq!(sanitize_for_pane("line1\r\nline2"), "line1\nline2");
+        assert_eq!(sanitize_for_pane("\x1b]0;win title\x07text"), "text");
+        assert_eq!(sanitize_for_pane("bell\x07backspace\x08"), "bellbackspace");
+        assert_eq!(sanitize_for_pane("plain text"), "plain text");
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Transcript,
@@ -287,6 +348,9 @@ struct App {
     /// Mouse capture on = wheel scrolls panes; off = the terminal's native
     /// text selection works (Ctrl+T toggles).
     mouse_capture: bool,
+    /// When the in-flight turn/command started (drives the spinner + elapsed
+    /// time so long prompt-processing waits visibly aren't a hang).
+    turn_started: Option<Instant>,
 }
 
 /// Indices into `commands::COMMANDS` whose names start with the input.
@@ -322,6 +386,7 @@ impl App {
             palette_idx: 0,
             palette_off: false,
             mouse_capture: true,
+            turn_started: None,
         }
     }
 
@@ -407,6 +472,7 @@ impl App {
             AgentEvent::Done(stats) => {
                 self.busy = false;
                 self.cancel = None;
+                self.turn_started = None;
                 self.status = format!(
                     "done — {} steps · {} prompt tok · {} out tok · {:.1} tok/s",
                     stats.iterations, stats.prompt_tokens, stats.output_tokens, stats.tokens_per_sec
@@ -440,6 +506,7 @@ impl App {
             UiEffect::Done(status) => {
                 self.busy = false;
                 self.cancel = None;
+                self.turn_started = None;
                 self.status = status;
             }
         }
@@ -511,17 +578,34 @@ fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         String::new()
     };
-    let busy_marker = if app.busy { " ◐ " } else { " ● " };
+    let elapsed = app.turn_started.map(|t| t.elapsed());
+    let busy_marker = if app.busy {
+        const FRAMES: [&str; 4] = [" ◐ ", " ◓ ", " ◑ ", " ◒ "];
+        FRAMES[(elapsed.map_or(0, |e| e.as_millis() / 250) % 4) as usize]
+    } else {
+        " ● "
+    };
+    let elapsed_note = match (app.busy, elapsed) {
+        (true, Some(e)) => format!(" · {}s", e.as_secs()),
+        _ => String::new(),
+    };
     let status = Line::from(vec![
         Span::styled(format!(" {} ", app.model), Style::default().fg(Color::Black).bg(Color::Cyan)),
         Span::styled(busy_marker, Style::default().fg(if app.busy { Color::Yellow } else { Color::Green })),
-        Span::styled(app.status.clone(), Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}{elapsed_note}", app.status), Style::default().fg(Color::DarkGray)),
         Span::styled(scroll_note, Style::default().fg(Color::Yellow)),
     ]);
     frame.render_widget(Paragraph::new(status), status_area);
 
     // Input pane.
-    let input_title = if app.busy { " input (Esc cancels the running turn) " } else { " input " };
+    let line_count = app.input.lines().count();
+    let input_title = if app.busy {
+        " input (Esc cancels the running turn) ".to_string()
+    } else if line_count > 1 {
+        format!(" input ({line_count} lines — all will be sent) ")
+    } else {
+        " input ".to_string()
+    };
     let input_block = Block::bordered().title(input_title).border_style(unfocused_style);
     let input_inner = input_block.inner(input_area);
     frame.render_widget(input_block, input_area);
@@ -637,13 +721,14 @@ pub async fn run_tui(
     });
 
     let mut terminal = ratatui::init();
-    let _ = execute!(stdout(), EnableMouseCapture);
+    let _ = execute!(stdout(), EnableMouseCapture, EnableBracketedPaste);
 
     let mut app = App::new(model);
     app.seed_from_messages(&resumed);
 
     let result = (|| -> Result<()> {
         let mut needs_redraw = true;
+        let mut last_tick = Instant::now();
         loop {
             while let Ok(ev) = ev_rx.try_recv() {
                 app.handle_agent_event(ev);
@@ -671,6 +756,12 @@ pub async fn run_tui(
             }
 
             if !event::poll(Duration::from_millis(16))? {
+                // No input — but while a turn runs, tick the spinner/elapsed
+                // display at 4Hz so long model waits visibly aren't a hang.
+                if app.busy && last_tick.elapsed() >= Duration::from_millis(250) {
+                    last_tick = Instant::now();
+                    needs_redraw = true;
+                }
                 continue;
             }
             needs_redraw = true;
@@ -743,6 +834,7 @@ pub async fn run_tui(
                             app.history_idx = None;
                             app.transcript.push_block(Kind::User, raw.clone());
                             app.busy = true;
+                            app.turn_started = Some(Instant::now());
                             app.transcript.scroll_from_bottom = 0;
                             app.log.scroll_from_bottom = 0;
                             let cancel = CancellationToken::new();
@@ -757,6 +849,7 @@ pub async fn run_tui(
                                 // not in the agent's message history.
                                 app.busy = false;
                                 app.cancel = None;
+                                app.turn_started = None;
                                 let text = app.log.raw_text();
                                 if text.trim().is_empty() {
                                     app.transcript.push_block(Kind::Warn, "! activity log is empty".into());
@@ -850,6 +943,14 @@ pub async fn run_tui(
                     _ => {}
                     }
                 }
+                Event::Paste(data) => {
+                    // Bracketed paste: the whole clipboard arrives as ONE event,
+                    // so embedded newlines never act as Enter presses mid-paste.
+                    // Terminals encode paste newlines as \r — normalize to \n.
+                    app.input.push_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+                    app.palette_off = false;
+                    app.palette_idx = 0;
+                }
                 Event::Mouse(mouse) => {
                     // Route the wheel to the pane under the cursor.
                     let pane = if app.log.contains(mouse.column, mouse.row) {
@@ -874,7 +975,7 @@ pub async fn run_tui(
         }
     })();
 
-    let _ = execute!(stdout(), DisableMouseCapture);
+    let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     agent_task.abort();
     result
