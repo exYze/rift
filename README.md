@@ -12,6 +12,12 @@ Rift is a ground-up Rust answer to opencode/Crush-style agents, designed around 
 
 Plus **WarpDrive**: parallel agent exploration in isolated git worktrees with side-by-side diff merge.
 
+## Roadmap
+
+![rift roadmap](docs/assets/roadmap.svg)
+
+Full details and rationale in [docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## Install
 
 **macOS / Linux** (one line, no dependencies):
