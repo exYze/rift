@@ -19,6 +19,9 @@ const GLOB_MAX_RESULTS: usize = 200;
 const BASH_MAX_OUTPUT: usize = 30_000;
 const BASH_DEFAULT_TIMEOUT_SECS: u64 = 60;
 const BASH_MAX_TIMEOUT_SECS: u64 = 300;
+/// Default cap for commands that look like dev servers/watchers — they never
+/// exit, so waiting the full default timeout just wastes the model's time.
+const SERVER_PROBE_SECS: u64 = 15;
 
 /// Shell patterns refused regardless of configuration.
 const BASH_DENY_BUILTIN: &[&str] = &[
@@ -289,6 +292,86 @@ fn truncate_middle(s: &str, max: usize) -> String {
     format!("{head}\n... [output truncated: {} of {} bytes shown] ...\n{tail}", max, s.len())
 }
 
+/// When a path doesn't exist, find real files with the same (or similar)
+/// name so the model can correct itself in one step instead of exploring.
+fn suggest_similar_paths(cwd: &Path, missing: &Path) -> Vec<String> {
+    let Some(want) = missing.file_name().and_then(|n| n.to_str()) else {
+        return vec![];
+    };
+    let want_lower = want.to_lowercase();
+    let stem_lower = missing
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_else(|| want_lower.clone());
+    let mut exact = vec![];
+    let mut close = vec![];
+    for entry in ignore::WalkBuilder::new(cwd).build().take(5000).flatten() {
+        let Some(name) = entry.file_name().to_str() else { continue };
+        let name_lower = name.to_lowercase();
+        let shown = entry.path().strip_prefix(cwd).unwrap_or(entry.path()).display().to_string();
+        if name_lower == want_lower {
+            exact.push(shown);
+        } else if name_lower.contains(&stem_lower) && entry.file_type().is_some_and(|t| t.is_file()) {
+            close.push(shown);
+        }
+        if exact.len() >= 5 {
+            break;
+        }
+    }
+    exact.extend(close);
+    exact.truncate(5);
+    exact
+}
+
+fn enoent_hint(cwd: &Path, path: &Path) -> String {
+    let found = suggest_similar_paths(cwd, path);
+    if found.is_empty() {
+        format!("{} does not exist. Use ls or glob to find the right path.", path.display())
+    } else {
+        format!("{} does not exist. Did you mean: {}?", path.display(), found.join(", "))
+    }
+}
+
+/// Character-bigram Dice similarity — cheap, no deps, good enough to point
+/// the model at the line it was probably trying to edit.
+fn bigram_similarity(a: &str, b: &str) -> f64 {
+    fn bigrams(s: &str) -> Vec<(char, char)> {
+        let chars: Vec<char> = s.chars().collect();
+        chars.windows(2).map(|w| (w[0], w[1])).collect()
+    }
+    let (mut a_grams, b_grams) = (bigrams(a), bigrams(b));
+    if a_grams.is_empty() || b_grams.is_empty() {
+        return 0.0;
+    }
+    let total = a_grams.len() + b_grams.len();
+    let mut hits = 0usize;
+    for g in &b_grams {
+        if let Some(pos) = a_grams.iter().position(|x| x == g) {
+            a_grams.swap_remove(pos);
+            hits += 1;
+        }
+    }
+    (2.0 * hits as f64) / total as f64
+}
+
+/// Best-matching line in `text` for the first substantial line of `target`.
+fn closest_line(text: &str, target: &str) -> Option<(usize, String)> {
+    let probe = target.lines().map(str::trim).find(|l| l.len() >= 8)?;
+    let mut best: Option<(f64, usize, &str)> = None;
+    for (i, line) in text.lines().enumerate() {
+        let score = bigram_similarity(line.trim(), probe);
+        if score > best.map_or(0.5, |(s, _, _)| s) {
+            best = Some((score, i + 1, line));
+        }
+    }
+    best.map(|(_, no, line)| {
+        let line = line.trim();
+        let cut = floor_boundary(line, 120);
+        (no, line[..cut].to_string())
+    })
+}
+
 // ---------------------------------------------------------------- read
 
 struct ReadTool;
@@ -314,7 +397,11 @@ impl Tool for ReadTool {
     }
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
         let path = ctx.resolve(req_str(args, "path")?);
-        let bytes = tokio::fs::read(&path).await.with_context(|| format!("cannot read {}", path.display()))?;
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", enoent_hint(&ctx.cwd, &path)),
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        };
         if looks_binary(&bytes) {
             bail!("{} appears to be a binary file", path.display());
         }
@@ -424,9 +511,30 @@ impl Tool for EditTool {
             bail!("old_string and new_string are identical");
         }
         let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
-        let text = tokio::fs::read_to_string(&path).await.with_context(|| format!("cannot read {}", path.display()))?;
+        let text = match tokio::fs::read_to_string(&path).await {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", enoent_hint(&ctx.cwd, &path)),
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        };
         let count = text.matches(old).count();
         if count == 0 {
+            // Diagnose WHY it didn't match so the model can fix the call in
+            // one step instead of re-reading and guessing.
+            let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+            if norm(&text).contains(&norm(old)) {
+                bail!(
+                    "old_string not found in {}, but the same text DOES exist with different whitespace/indentation. \
+                     Re-read those lines and copy them exactly (tabs vs spaces, line breaks).",
+                    path.display()
+                );
+            }
+            if let Some((line_no, line)) = closest_line(&text, old) {
+                bail!(
+                    "old_string not found in {}. Closest match is line {line_no}: `{line}`. \
+                     Read around that line and use its exact text.",
+                    path.display()
+                );
+            }
             bail!("old_string not found in {}. Read the file again and match the text exactly.", path.display());
         }
         if count > 1 && !replace_all {
@@ -449,7 +557,9 @@ impl Tool for BashTool {
         "bash"
     }
     fn description(&self) -> &str {
-        "Run a shell command in the working directory and return its output and exit code."
+        "Run a shell command in the working directory and return its output and exit code. \
+         Long-running servers/watchers (npm run dev, vite, …) are auto-killed after a short probe \
+         and their startup output returned — prefer build/test commands for verification."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -466,24 +576,73 @@ impl Tool for BashTool {
         if ctx.bash_denied(command) {
             bail!("command blocked by permission policy: {command}");
         }
-        let timeout = opt_u64(args, "timeout_secs")
-            .unwrap_or(BASH_DEFAULT_TIMEOUT_SECS)
-            .min(BASH_MAX_TIMEOUT_SECS);
-        let fut = tokio::process::Command::new("sh")
-            .arg("-c")
+        let explicit_timeout = opt_u64(args, "timeout_secs");
+        let server_like = looks_like_server_command(command);
+        let mut timeout = explicit_timeout.unwrap_or(BASH_DEFAULT_TIMEOUT_SECS).min(BASH_MAX_TIMEOUT_SECS);
+        if server_like && explicit_timeout.is_none() {
+            timeout = timeout.min(SERVER_PROBE_SECS);
+        }
+
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
             .arg(command)
             .current_dir(&ctx.cwd)
-            .kill_on_drop(true)
-            .output();
-        let output = tokio::time::timeout(Duration::from_secs(timeout), fut)
-            .await
-            .map_err(|_| anyhow!("command timed out after {timeout}s"))??;
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        // Own process group so a timeout can kill the whole tree
+        // (sh → npm → node → vite), not just the shell.
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let mut child = cmd.spawn().context("spawning shell")?;
+        let pid = child.id();
+
+        // Read pipes concurrently so output survives a timeout kill.
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        let out_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(p) = stdout_pipe.as_mut() {
+                use tokio::io::AsyncReadExt;
+                let _ = p.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+        let err_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(p) = stderr_pipe.as_mut() {
+                use tokio::io::AsyncReadExt;
+                let _ = p.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+
+        let status = match tokio::time::timeout(Duration::from_secs(timeout), child.wait()).await {
+            Ok(s) => Some(s?),
+            Err(_) => {
+                #[cfg(unix)]
+                if let Some(pid) = pid {
+                    let _ = tokio::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(format!("kill -9 -{pid} 2>/dev/null"))
+                        .output()
+                        .await;
+                }
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                None
+            }
+        };
+        let stdout_bytes = out_task.await.unwrap_or_default();
+        let stderr_bytes = err_task.await.unwrap_or_default();
 
         let mut text = String::new();
         // Strip ANSI color/control sequences (npm, cargo, git…): they corrupt
         // the TUI if rendered and waste the model's tokens either way.
-        let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
-        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+        let stdout = strip_ansi(&String::from_utf8_lossy(&stdout_bytes));
+        let stderr = strip_ansi(&String::from_utf8_lossy(&stderr_bytes));
         if !stdout.trim().is_empty() {
             text.push_str(stdout.trim_end());
         }
@@ -497,11 +656,52 @@ impl Tool for BashTool {
             text = "(no output)".into();
         }
         let mut text = truncate_middle(&text, BASH_MAX_OUTPUT);
-        if !output.status.success() {
-            text.push_str(&format!("\n[exit code: {}]", output.status.code().unwrap_or(-1)));
+        match status {
+            Some(s) if !s.success() => {
+                text.push_str(&format!("\n[exit code: {}]", s.code().unwrap_or(-1)));
+            }
+            None if server_like => {
+                text.push_str(&format!(
+                    "\n[process killed after {timeout}s — this looks like a dev server/watcher that never exits. \
+                     If the output above shows it started (e.g. 'ready', 'listening', a local URL), treat that as \
+                     SUCCESS and do NOT run it again. Verify code changes with a build or test command instead.]"
+                ));
+            }
+            None => {
+                text.push_str(&format!(
+                    "\n[process killed after {timeout}s timeout — the output above is everything it printed. \
+                     If this is a server/watcher that runs forever, don't re-run it; verify with a build or test \
+                     command. If it's genuinely slow, retry with a larger timeout_secs (max {BASH_MAX_TIMEOUT_SECS}).]"
+                ));
+            }
+            Some(_) => {}
         }
         Ok(text)
     }
+}
+
+/// Commands that start a long-running server or watcher — they never exit,
+/// so the default timeout only delays the inevitable.
+fn looks_like_server_command(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    if c.contains("build") {
+        return false;
+    }
+    const PHRASES: &[&str] = &[
+        "npm run dev", "npm start", "npm run start", "npm run serve", "yarn dev", "yarn start",
+        "pnpm dev", "pnpm run dev", "pnpm start", "bun dev", "bun run dev", "next dev", "nuxt dev",
+        "astro dev", "webpack serve", "webpack-dev-server", "flask run", "rails server", "rails s ",
+        "python -m http.server", "python3 -m http.server", "tail -f", "--watch", "http-server",
+        "live-server", "nodemon", "uvicorn", "gunicorn", "cargo run --bin server", "cargo watch",
+    ];
+    if PHRASES.iter().any(|p| c.contains(p)) {
+        return true;
+    }
+    // Bare binaries that are servers (token match avoids "vitest" etc.)
+    c.split_whitespace().any(|w| {
+        let w = w.rsplit('/').next().unwrap_or(w);
+        matches!(w, "vite" | "serve")
+    })
 }
 
 // ---------------------------------------------------------------- ls
@@ -775,6 +975,67 @@ mod tests {
         assert!(!ctx.bash_denied("echo sudo is a word"));
         assert!(!ctx.bash_denied("ls -la"));
         assert!(!ctx.bash_denied("rm -rf ./build")); // only / and /* are blocked
+    }
+
+    #[test]
+    fn server_command_detection() {
+        assert!(looks_like_server_command("npm run dev"));
+        assert!(looks_like_server_command("cd app && npm run dev"));
+        assert!(looks_like_server_command("npx vite"));
+        assert!(looks_like_server_command("python3 -m http.server 8080"));
+        assert!(looks_like_server_command("cargo watch -x test"));
+        assert!(looks_like_server_command("tsc --watch"));
+        assert!(!looks_like_server_command("npm run build"));
+        assert!(!looks_like_server_command("vite build"));
+        assert!(!looks_like_server_command("npx vitest run"));
+        assert!(!looks_like_server_command("cargo test"));
+        assert!(!looks_like_server_command("ls -la"));
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_returns_partial_output() {
+        let ctx = ToolCtx::new(std::env::temp_dir());
+        let mut args = Map::new();
+        args.insert("command".into(), Value::String("echo server-started; sleep 30".into()));
+        args.insert("timeout_secs".into(), Value::from(1));
+        let out = BashTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("server-started"), "partial output must survive the kill: {out}");
+        assert!(out.contains("killed after 1s"), "timeout note missing: {out}");
+    }
+
+    #[tokio::test]
+    async fn bash_server_probe_caps_default_timeout() {
+        // No explicit timeout + server-like command → capped probe, output kept.
+        let ctx = ToolCtx::new(std::env::temp_dir());
+        let mut args = Map::new();
+        args.insert(
+            "command".into(),
+            Value::String("echo ready; tail -f /dev/null".into()),
+        );
+        let start = std::time::Instant::now();
+        let out = BashTool.execute(&args, &ctx).await.unwrap();
+        assert!(start.elapsed().as_secs() < SERVER_PROBE_SECS + 10);
+        assert!(out.contains("ready"));
+        assert!(out.contains("dev server/watcher"), "server guidance missing: {out}");
+    }
+
+    #[test]
+    fn closest_line_points_at_near_match() {
+        let text = "fn alpha() {}\nconst products = [ { id: 1, name: 'Classic' } ];\nfn omega() {}";
+        let (no, line) = closest_line(text, "const products = [ { id: 1, name: \"Classic\" } ]").unwrap();
+        assert_eq!(no, 2);
+        assert!(line.contains("products"));
+        assert!(closest_line(text, "zzz qqq totally unrelated www").is_none());
+    }
+
+    #[test]
+    fn enoent_suggests_similar_paths() {
+        let dir = std::env::temp_dir().join(format!("rift-enoent-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/App.jsx"), "x").unwrap();
+        let hint = enoent_hint(&dir, &dir.join("App.jsx"));
+        assert!(hint.contains("src/App.jsx"), "should suggest the real path: {hint}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

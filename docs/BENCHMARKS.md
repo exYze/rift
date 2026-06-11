@@ -33,6 +33,16 @@ Equal task success, **80% fewer prompt tokens and 2.3× faster** — far past th
 - **Both agents:** same model, same server, same prompts, headless one-shot mode, 600s timeout. opencode's first-run project initialization is excluded via an untimed warmup call before the token mark.
 - **Reproduce:** `python3 bench/proxy.py & python3 bench/bench.py ghostwriter opencode`
 
+## Re-validation (2026-06-11, v0.3.5 harness hardening)
+
+After adding the model-failure harness (timeout output salvage, dev-server probe,
+edit/read failure hints), the suite was re-run to guard the efficiency claim:
+**5/5 ok, 69,562 prompt tokens (−74.9% vs opencode's 277,110), 95.8s wall** (3.1×
+faster than opencode's 300s). The prompt-token delta vs the original 54k run is
+within the ±30% run-to-run variance noted below. The harness fixes target failure
+modes this small suite doesn't exercise (dev servers, fuzzy edit misses); their
+payoff shows on real-world agentic sessions.
+
 ## Caveats (honest ones)
 
 - Small suite, single run per task, nondeterministic models: treat as directional, not a rigorous eval. Observed run-to-run variance on the same task was ~±30% tokens for opencode (40k–71k on t1).

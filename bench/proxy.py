@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 11435
 UPSTREAM = sys.argv[2] if len(sys.argv) > 2 else "http://localhost:11434"
-LOGFILE = sys.argv[3] if len(sys.argv) > 3 else "/tmp/gw-bench-tokens.jsonl"
+LOGFILE = sys.argv[3] if len(sys.argv) > 3 else "/tmp/rift-bench-tokens.jsonl"
 
 PROMPT_RE = re.compile(rb'"(?:prompt_eval_count|prompt_tokens)":\s*(\d+)')
 OUTPUT_RE = re.compile(rb'"(?:eval_count|completion_tokens)":\s*(\d+)')

@@ -19,9 +19,9 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-TOKEN_LOG = "/tmp/gw-bench-tokens.jsonl"
+TOKEN_LOG = "/tmp/rift-bench-tokens.jsonl"
 PROXY = "http://127.0.0.1:11435"
-GW = os.path.join(ROOT, "..", "target", "release", "gw")
+GW = os.path.join(ROOT, "..", "target", "release", "rift")
 MODEL = "gemma4:26b"
 TIMEOUT = 600
 
