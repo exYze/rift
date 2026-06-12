@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "rift-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "rift-ollama"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "rift-tui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "clap",

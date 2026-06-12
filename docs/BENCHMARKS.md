@@ -1,6 +1,6 @@
 # GhostWriter vs opencode — token efficiency benchmark
 
-**Date:** 2026-06-11 · **Model:** gemma4:26b (Q4_K_M) · **Server:** Ollama at localhost:11434 (single GPU)
+**Date:** 2026-06-11 · **Model:** gemma4:26b (Q4_K_M) · **Server:** a private single-GPU Ollama server on the local network
 **Baseline:** opencode v1.14.48 (installed via Homebrew) · **GhostWriter:** v0.1.0 release build
 
 ## Headline

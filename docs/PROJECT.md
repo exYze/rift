@@ -4,7 +4,7 @@ Updated: 2026-06-11 (iteration 8 — slash commands; renamed GhostWriter → Rif
 
 ## Vision
 
-One Rust TUI combining three concepts: **GhostWriter** (flawless multi-pane TUI, sub-10MB binary), **Compactor** (AST-skeleton context minimization), **WarpDrive** (parallel agents in git worktrees with side-by-side diff merge). Backend: Ollama native API at `http://localhost:11434`, test model `gemma4:26b`. Goal: beat current agent-TUI baselines on token efficiency by ≥10% (benchmark harness TBD).
+One Rust TUI combining three concepts: **GhostWriter** (flawless multi-pane TUI, sub-10MB binary), **Compactor** (AST-skeleton context minimization), **WarpDrive** (parallel agents in git worktrees with side-by-side diff merge). Backend: Ollama native API on a private server, test model `gemma4:26b`. Goal: beat current agent-TUI baselines on token efficiency by ≥10% (benchmark harness TBD).
 
 ## Status — iteration 1 (done)
 

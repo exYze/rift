@@ -1,6 +1,6 @@
 # Research digest (verified 2026-06-10)
 
-## Ollama native /api/chat protocol — verified live against localhost:11434
+## Ollama native /api/chat protocol — verified live against a real Ollama server
 
 - Tools: `tools: [{type:"function", function:{name, description, parameters:<JSON Schema>}}]`.
 - Tool results: `{"role":"tool", "tool_name":"<name>", "content":"..."}` — correlation by NAME, not id. The native API historically has no tool-call ids, but **this server returns `id: "call_xxx"` on tool calls** (newer Ollama) — modeled as `Option<String>`, preserved round-trip.
@@ -13,7 +13,7 @@
 - `format` (structured outputs) conflicts with tools — don't combine in one request.
 - Changing `num_ctx` between requests forces model reload (slow first call). `keep_alive: "10m"` used.
 
-## Server inventory (localhost:11434)
+## Server inventory (the test server)
 
 Tools-capable models: gemma4:12b (tools,thinking,vision), gemma4:26b (tools,thinking), gemma4:31b, qwen3.6:27b, qwen3.6:35b (vision,tools,thinking), nemotron3:33b. Embeddings: nomic-embed-text:v1.5. gemma4:26b verified working end-to-end (62 tok/s eval).
 
