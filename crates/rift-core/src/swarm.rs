@@ -53,16 +53,27 @@ impl Swarm {
         &self.root
     }
 
-    /// Keep `.rift/` out of `git status` without touching the repo's .gitignore.
+    /// Keep swarm scratch space out of `git status` without touching the
+    /// repo's .gitignore. Only worktrees/ and patches/ — the rest of `.rift/`
+    /// (skills, prompts) is meant to be committed.
     async fn ensure_excluded(&self) -> Result<()> {
         let git_dir = git_in(&self.root, &["rev-parse", "--git-common-dir"]).await?;
         let exclude = self.root.join(git_dir.trim()).join("info/exclude");
         let current = tokio::fs::read_to_string(&exclude).await.unwrap_or_default();
-        if !current.lines().any(|l| l.trim() == ".rift/") {
+        // Drop the old blanket `.rift/` exclusion from earlier versions.
+        let mut lines: Vec<&str> = current.lines().filter(|l| l.trim() != ".rift/").collect();
+        let mut changed = lines.len() != current.lines().count();
+        for needed in [".rift/worktrees/", ".rift/patches/"] {
+            if !lines.iter().any(|l| l.trim() == needed) {
+                lines.push(needed);
+                changed = true;
+            }
+        }
+        if changed {
             if let Some(parent) = exclude.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            tokio::fs::write(&exclude, format!("{current}\n.rift/\n")).await?;
+            tokio::fs::write(&exclude, format!("{}\n", lines.join("\n"))).await?;
         }
         Ok(())
     }
@@ -228,7 +239,7 @@ pub async fn run_swarm(
                 cfg,
                 ToolRegistry::standard(),
                 ToolCtx::new(&worktree),
-                crate::system_prompt(&worktree.display().to_string()),
+                crate::system_prompt_with_guide(&worktree).0,
             );
 
             // Forward this candidate's events tagged with its index.

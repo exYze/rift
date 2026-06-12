@@ -17,7 +17,13 @@ own. Principles that don't change along the way:
 
 The agent should *show its plan* and *ask before dangerous things*.
 
-- [ ] **Plan tool + activity-pane checklist** (the to-do list)
+- [x] **Interactive pickers** (shipped 0.4.0) — `/model` and `/sessions` open
+  ↑↓/Enter list overlays; direct `/model <name>` still works
+- [x] **Elicitation** (shipped 0.4.0) — `ask_user` tool: the model asks
+  clarifying questions mid-turn; choices reuse the picker, free-text answers
+  go through the input box; headless/swarm runs stay autonomous
+
+- [x] **Plan tool + activity-pane checklist** (the to-do list)
   - New built-in `plan` tool the model calls to set/update its task list:
     `plan(set=["fix parser", "add test", "run tests"])`, `plan(done=1)`
   - Rendered pinned at the top of the activity pane: `☑ fix parser`,
@@ -26,16 +32,23 @@ The agent should *show its plan* and *ask before dangerous things*.
     check items off as it goes — also measurably helps local models stay
     on track
   - `/plan` command to view/clear it
-- [ ] **Write/bash approval mode**
+- [x] **Write/bash approval mode**
   - Today rift auto-executes everything. Add `--approve` mode (and config
     default) where `write`/`edit`/`bash` pause for y/n in the TUI, with a
     per-session "always allow" memory; deny list stays as the hard floor
-- [ ] **Input editing basics** — cursor movement (←/→, word jumps,
+- [x] **Input editing basics** — cursor movement (←/→, word jumps,
   Home/End), insert anywhere, bracketed paste. Today input is
   append/backspace only; this is the biggest day-one UX gap
-- [ ] **Load RIFT.md automatically** — `/init` generates it, but the agent
+- [x] **Load RIFT.md automatically** — `/init` generates it, but the agent
   doesn't read it back yet. Inject it into the system prompt when present
-  (that's the whole point of the file)
+  (that's the whole point of the file). Also loads AGENTS.md and CLAUDE.md
+  (the cross-tool standards), concatenated and capped
+- [x] **Skills** (Agent Skills standard, pi/Claude-style) — `.rift/skills/`
+  + `~/.config/rift/skills/` SKILL.md files with frontmatter; listed to the
+  model by name+description, bodies loaded on demand via the `skill` tool;
+  user-invocable as `/skill:<name> [task]` with palette completion; /skills
+- [x] **/config + /approve** — view config, edit in $EDITOR with hot-reload
+  of permissions, session-level approval toggle
 
 ## v0.5 — Command + UX expansion
 

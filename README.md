@@ -66,13 +66,17 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 
 | command | what it does |
 |---|---|
-| `/model [name]` | list models on the server, or switch (capability-checked, num_ctx clamped) |
+| `/model [name]` | interactive model picker (↑↓/Enter), or switch directly by name |
 | `/clear` | wipe the conversation |
+| `/config [edit]` | show or edit `.rift.json` in `$EDITOR` (permissions hot-reload) |
+| `/approve [on\|off]` | toggle approval mode without touching the config |
 | `/copy [all\|log]` | copy the last reply, whole transcript, or activity log to the clipboard |
 | `/compact` | force history compaction now |
 | `/tokens` | context budget, usage estimate, estimator calibration |
-| `/sessions [n]` | list saved sessions, or resume the nth |
-| `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, shell deny list |
+| `/sessions [n]` | interactive session picker, or resume the nth directly |
+| `/skills` · `/skill:<name> [task]` | list packaged skills, or run one |
+| `/plan [clear]` | the agent's task checklist (also pinned live in the activity pane) |
+| `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, deny list + approval state |
 | `/swarm <task> [--models a,b] [--explore]` | WarpDrive race without leaving the chat |
 | `/merge <name> [--cleanup]` | apply a swarm candidate's patch |
 | `/undo` | revert the last turn's write/edit changes |
@@ -89,11 +93,36 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
   "mcp": {
     "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}
   },
-  "permissions": {"bash_deny": ["docker push *"]}
+  "permissions": {"bash_deny": ["docker push *"], "approve": false}
 }
 ```
 
+Set `"approve": true` (or launch with `--approve`) to pause for a y/n picker before every write/edit/shell action, with per-session "always allow". Project context files (`RIFT.md`, `AGENTS.md`, `CLAUDE.md`) at the repo root are loaded into the system prompt automatically (`/init` writes a RIFT.md for you). On multi-step tasks the agent maintains a visible task checklist, pinned at the top of the activity pane.
+
+## Skills
+
+Package reusable instructions as [Agent Skills](https://agentskills.io)-style `SKILL.md` files:
+
+```
+.rift/skills/<name>/SKILL.md        # project (commit them)
+~/.config/rift/skills/<name>.md     # user-wide
+```
+
+```markdown
+---
+name: release-check
+description: checklist to verify the project is ready for release
+---
+1. Run the test suite ...
+```
+
+Skills are listed to the model by name + description only (progressive disclosure — bodies stay out of context); the model loads one with its `skill` tool when relevant, or you invoke one directly with `/skill:<name> [task]` (they autocomplete in the `/` palette). `/skills` lists what's available.
+
 MCP server tools are exposed to the model as `<server>_<tool>`. A built-in deny list (sudo, `rm -rf /`, mkfs, …) always applies to shell commands.
+
+## Elicitation
+
+In interactive sessions the model gets an `ask_user` tool: when a task is ambiguous it pauses and asks you a clarifying question instead of guessing — multiple-choice questions open the same ↑↓/Enter picker, free-text questions turn the input box into an answer field (Esc skips, and the model proceeds on its own judgment). Headless and swarm runs stay fully autonomous.
 
 ## Workspace layout
 

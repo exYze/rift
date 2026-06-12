@@ -45,13 +45,43 @@ pub struct EditRecord {
     pub turn: u64,
 }
 
+/// A clarifying question from the model (the `ask_user` tool), answered by
+/// whatever frontend is attached. `choices` empty = free-text answer.
+pub struct AskRequest {
+    pub question: String,
+    pub choices: Vec<String>,
+    pub reply: tokio::sync::oneshot::Sender<String>,
+}
+
+/// One step of the model's self-declared task checklist (the `plan` tool).
+#[derive(Debug, Clone)]
+pub struct PlanItem {
+    pub text: String,
+    pub done: bool,
+}
+
 #[derive(Clone)]
 pub struct ToolCtx {
     pub cwd: PathBuf,
-    bash_deny: std::sync::Arc<globset::GlobSet>,
-    user_deny: std::sync::Arc<Vec<String>>,
+    deny: std::sync::Arc<std::sync::Mutex<(globset::GlobSet, Vec<String>)>>,
     journal: std::sync::Arc<std::sync::Mutex<Vec<EditRecord>>>,
     turn: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ask: Option<tokio::sync::mpsc::UnboundedSender<AskRequest>>,
+    plan: std::sync::Arc<std::sync::Mutex<Vec<PlanItem>>>,
+    /// Approval mode: mutating tools (write/edit/bash) pause for a y/n.
+    /// Atomic so /approve and /config reload can flip it mid-session.
+    approve: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    approved_kinds: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+fn build_deny_set(extra: &[String]) -> globset::GlobSet {
+    let mut builder = globset::GlobSetBuilder::new();
+    for pat in BASH_DENY_BUILTIN.iter().copied().map(str::to_string).chain(extra.iter().cloned()) {
+        if let Ok(glob) = globset::GlobBuilder::new(&pat).literal_separator(false).build() {
+            builder.add(glob);
+        }
+    }
+    builder.build().unwrap_or_else(|_| globset::GlobSet::empty())
 }
 
 impl ToolCtx {
@@ -61,30 +91,98 @@ impl ToolCtx {
 
     /// `extra_deny`: additional glob patterns from user config.
     pub fn with_extra_deny(cwd: impl Into<PathBuf>, extra_deny: &[String]) -> Self {
-        let mut builder = globset::GlobSetBuilder::new();
-        for pat in BASH_DENY_BUILTIN.iter().copied().map(str::to_string).chain(extra_deny.iter().cloned()) {
-            if let Ok(glob) = globset::GlobBuilder::new(&pat).literal_separator(false).build() {
-                builder.add(glob);
-            }
-        }
-        let set = builder.build().unwrap_or_else(|_| globset::GlobSet::empty());
         Self {
             cwd: cwd.into(),
-            bash_deny: std::sync::Arc::new(set),
-            user_deny: std::sync::Arc::new(extra_deny.to_vec()),
+            deny: std::sync::Arc::new(std::sync::Mutex::new((build_deny_set(extra_deny), extra_deny.to_vec()))),
             journal: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
             turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            ask: None,
+            plan: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            approve: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            approved_kinds: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
+    /// Require user approval before write/edit/bash execute. Only effective
+    /// when an interactive frontend is attached via `with_interaction`.
+    pub fn with_approval(self, approve: bool) -> Self {
+        self.set_approval(approve);
+        self
+    }
+
+    /// Flip approval mode at runtime (/approve, /config reload).
+    pub fn set_approval(&self, on: bool) {
+        self.approve.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn approval_enabled(&self) -> bool {
+        self.approve.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Replace the user deny patterns at runtime (/config reload). The
+    /// built-in list is always merged back in.
+    pub fn set_deny(&self, extra: &[String]) {
+        if let Ok(mut d) = self.deny.lock() {
+            *d = (build_deny_set(extra), extra.to_vec());
+        }
+    }
+
+    /// Gate a mutating action behind user approval. Returns Err when denied —
+    /// the model sees that as a tool error and adjusts course.
+    async fn check_approval(&self, kind: &str, summary: &str) -> Result<()> {
+        if !self.approval_enabled() {
+            return Ok(());
+        }
+        if self.approved_kinds.lock().map(|k| k.contains(kind)).unwrap_or(false) {
+            return Ok(());
+        }
+        // Approval requires an interactive user; without one the mode is moot.
+        let Some(ask) = &self.ask else { return Ok(()) };
+        let always = format!("always allow {kind} this session");
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let _ = ask.send(AskRequest {
+            question: format!("Allow {kind}: {summary}"),
+            choices: vec!["allow".into(), always.clone(), "deny".into()],
+            reply: reply_tx,
+        });
+        match reply_rx.await.as_deref() {
+            Ok("allow") => Ok(()),
+            Ok(a) if a == always => {
+                if let Ok(mut kinds) = self.approved_kinds.lock() {
+                    kinds.insert(kind.to_string());
+                }
+                Ok(())
+            }
+            _ => bail!("the user DENIED this {kind} action. Do not retry it; ask them how to proceed or choose another approach."),
+        }
+    }
+
+    pub fn plan_snapshot(&self) -> Vec<PlanItem> {
+        self.plan.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    pub fn clear_plan(&self) {
+        if let Ok(mut p) = self.plan.lock() {
+            p.clear();
+        }
+    }
+
+    /// Attach an interactive frontend that can answer `ask_user` questions.
+    /// Without one (headless, swarm candidates) the tool reports itself
+    /// unavailable so the model proceeds on its own judgment.
+    pub fn with_interaction(mut self, ask: tokio::sync::mpsc::UnboundedSender<AskRequest>) -> Self {
+        self.ask = Some(ask);
+        self
+    }
+
     /// User-configured deny patterns (without the built-ins).
-    pub fn user_deny_patterns(&self) -> &[String] {
-        &self.user_deny
+    pub fn user_deny_patterns(&self) -> Vec<String> {
+        self.deny.lock().map(|d| d.1.clone()).unwrap_or_default()
     }
 
     fn bash_denied(&self, command: &str) -> bool {
         let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
-        self.bash_deny.is_match(&normalized)
+        self.deny.lock().map(|d| d.0.is_match(&normalized)).unwrap_or(false)
     }
 
     /// Mark the start of a new agent turn; edits recorded after this group
@@ -165,6 +263,7 @@ impl ToolRegistry {
                 Box::new(GlobTool),
                 Box::new(OutlineTool),
                 Box::new(RepoMapTool),
+                Box::new(PlanTool),
             ],
         }
     }
@@ -467,6 +566,7 @@ impl Tool for WriteTool {
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
         let path = ctx.resolve(req_str(args, "path")?);
         let content = req_str(args, "content")?;
+        ctx.check_approval("write", &format!("{} ({} bytes)", path.display(), content.len())).await?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -540,6 +640,7 @@ impl Tool for EditTool {
         if count > 1 && !replace_all {
             bail!("old_string occurs {count} times in {}; include more surrounding context to make it unique, or set replace_all", path.display());
         }
+        ctx.check_approval("edit", &path.display().to_string()).await?;
         let updated = if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) };
         ctx.record_edit(path.clone(), Some(text.clone()));
         tokio::fs::write(&path, &updated).await?;
@@ -576,6 +677,8 @@ impl Tool for BashTool {
         if ctx.bash_denied(command) {
             bail!("command blocked by permission policy: {command}");
         }
+        let preview: String = command.chars().take(120).collect();
+        ctx.check_approval("bash", &preview).await?;
         let explicit_timeout = opt_u64(args, "timeout_secs");
         let server_like = looks_like_server_command(command);
         let mut timeout = explicit_timeout.unwrap_or(BASH_DEFAULT_TIMEOUT_SECS).min(BASH_MAX_TIMEOUT_SECS);
@@ -677,6 +780,121 @@ impl Tool for BashTool {
             Some(_) => {}
         }
         Ok(text)
+    }
+}
+
+// ---------------------------------------------------------------- plan
+
+/// The model's visible task checklist. Steps render pinned in the activity
+/// pane, so the user always sees what the agent intends and where it is.
+struct PlanTool;
+
+fn render_plan(items: &[PlanItem]) -> String {
+    if items.is_empty() {
+        return "(plan is empty)".into();
+    }
+    let mut out = String::from("Current plan:\n");
+    for (i, item) in items.iter().enumerate() {
+        out.push_str(&format!("{} {}. {}\n", if item.done { "[x]" } else { "[ ]" }, i + 1, item.text));
+    }
+    out
+}
+
+#[async_trait]
+impl Tool for PlanTool {
+    fn name(&self) -> &str {
+        "plan"
+    }
+    fn description(&self) -> &str {
+        "Maintain your visible task checklist. Pass `set` (array of short step descriptions) to create or \
+         replace the plan before starting multi-step work; pass `done` (1-based step number) to check a step \
+         off as you complete it. Returns the current checklist."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "set": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Replace the plan with these steps"
+                },
+                "done": {"type": "integer", "description": "Mark this step (1-based) as completed"}
+            }
+        })
+    }
+    async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
+        let set = args.get("set").and_then(|v| v.as_array());
+        let done = opt_u64(args, "done");
+        if set.is_none() && done.is_none() {
+            bail!("pass `set` (array of steps) and/or `done` (step number)");
+        }
+        let mut plan = ctx.plan.lock().map_err(|_| anyhow!("plan state poisoned"))?;
+        if let Some(steps) = set {
+            *plan = steps
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| PlanItem { text: s.to_string(), done: false })
+                .collect();
+        }
+        if let Some(n) = done {
+            let idx = (n as usize).saturating_sub(1);
+            match plan.get_mut(idx) {
+                Some(item) => item.done = true,
+                None => bail!("step {n} does not exist; the plan has {} steps", plan.len()),
+            }
+        }
+        Ok(render_plan(&plan))
+    }
+}
+
+// ---------------------------------------------------------------- ask_user
+
+/// Elicitation: lets the model pause and ask the user a clarifying question.
+/// Registered only when an interactive frontend is attached.
+pub struct AskUserTool;
+
+#[async_trait]
+impl Tool for AskUserTool {
+    fn name(&self) -> &str {
+        "ask_user"
+    }
+    fn description(&self) -> &str {
+        "Ask the user a clarifying question when the task is ambiguous or a decision needs their input. \
+         Provide 2-5 choices when the answer is a selection; omit choices for a free-text answer. \
+         Blocks until the user responds. Use sparingly — only when guessing would risk doing the wrong work."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["question"],
+            "properties": {
+                "question": {"type": "string", "description": "The question to ask the user"},
+                "choices": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of answers the user picks from"
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
+        let question = req_str(args, "question")?.to_string();
+        let choices: Vec<String> = args
+            .get("choices")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let Some(ask) = &ctx.ask else {
+            bail!("ask_user is not available in this session (no interactive user); decide using your best judgment");
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        ask.send(AskRequest { question, choices, reply: reply_tx })
+            .map_err(|_| anyhow!("the interactive session is gone"))?;
+        match reply_rx.await {
+            Ok(answer) => Ok(format!("User answered: {answer}")),
+            Err(_) => Ok("[the user dismissed the question without answering; proceed on your best judgment]".into()),
+        }
     }
 }
 

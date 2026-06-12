@@ -79,6 +79,10 @@ impl SwarmApp {
                 );
             }
             AgentEvent::Info(i) => c.log.push_line(Kind::Info, format!("· {i}")),
+            AgentEvent::Plan(items) => {
+                let done = items.iter().filter(|p| p.done).count();
+                c.log.push_line(Kind::Info, format!("· plan updated ({done}/{} done)", items.len()));
+            }
             AgentEvent::Warning(w) => c.log.push_line(Kind::Warn, format!("! {w}")),
             AgentEvent::Done(stats) => {
                 c.status = Status::Done;

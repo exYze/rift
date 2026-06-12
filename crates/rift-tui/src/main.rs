@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use rift_core::{
-    run_swarm, system_prompt, Agent, AgentConfig, AgentEvent, Candidate, Config, McpClient,
-    McpTool, SessionStore, Swarm, ToolCtx, ToolRegistry,
+    run_swarm, Agent, AgentConfig, AgentEvent, AskRequest, AskUserTool, Candidate, Config,
+    McpClient, McpTool, SessionStore, Swarm, ToolCtx, ToolRegistry,
 };
 use rift_ollama::OllamaClient;
 use tokio::sync::mpsc;
@@ -40,6 +40,9 @@ struct Cli {
     /// Resume a specific session file
     #[arg(long)]
     resume: Option<PathBuf>,
+    /// Ask before every write/edit/bash action (also: permissions.approve in config)
+    #[arg(long)]
+    approve: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -151,13 +154,37 @@ async fn main() -> Result<()> {
         }
     }
 
-    let mut agent = Agent::new(
-        client,
-        cfg,
-        registry,
-        ToolCtx::with_extra_deny(&cwd, &config.permissions.bash_deny),
-        system_prompt(&cwd.display().to_string()),
-    );
+    // Elicitation: in interactive mode the model gets an ask_user tool wired
+    // to the TUI; headless runs stay non-interactive (no tool registered).
+    let interactive = cli.prompt.is_none();
+    let approve = cli.approve || config.permissions.approve;
+    let mut ctx = ToolCtx::with_extra_deny(&cwd, &config.permissions.bash_deny).with_approval(approve);
+    let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
+    if interactive {
+        ctx = ctx.with_interaction(ask_tx);
+        registry.register(Box::new(AskUserTool));
+        if approve {
+            eprintln!("approval mode: write/edit/bash will ask before running");
+        }
+    } else if approve {
+        eprintln!("note: approval mode needs the interactive TUI; running headless without it");
+    }
+
+    let (mut prompt_text, guide_files) = rift_core::system_prompt_with_guide(&cwd);
+    if !guide_files.is_empty() {
+        eprintln!("loaded project context: {}", guide_files.join(", "));
+    }
+
+    // Skills (Agent Skills standard): listed in the system prompt, bodies
+    // loaded on demand via the skill tool or /skill:<name>.
+    let skills = rift_core::load_skills(&cwd);
+    if !skills.is_empty() {
+        prompt_text.push_str(&rift_core::skills_prompt_section(&skills));
+        registry.register(Box::new(rift_core::SkillTool::new(skills.clone())));
+        eprintln!("skills: {}", skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
+    }
+
+    let mut agent = Agent::new(client, cfg, registry, ctx, prompt_text);
 
     // Session: resume an existing file or start a new one.
     let resume_path = if let Some(p) = cli.resume {
@@ -188,7 +215,21 @@ async fn main() -> Result<()> {
 
     match cli.prompt {
         Some(prompt) => run_headless(agent, prompt, store).await,
-        None => app::run_tui(agent, cli.model, store, resumed_messages, mcp_status, config_path).await,
+        None => {
+            app::run_tui(
+                agent,
+                app::TuiOptions {
+                    model: cli.model,
+                    store,
+                    resumed: resumed_messages,
+                    mcp: mcp_status,
+                    config_path,
+                    ask_rx,
+                    skills,
+                },
+            )
+            .await
+        }
     }
 }
 
@@ -343,6 +384,11 @@ async fn run_headless(mut agent: Agent, prompt: String, store: SessionStore) -> 
                     println!("\x1b[36m{mark} {name}\x1b[0m {preview}");
                 }
                 AgentEvent::Info(i) => eprintln!("\x1b[2m· {i}\x1b[0m"),
+                AgentEvent::Plan(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        eprintln!("\x1b[2m  {} {}. {}\x1b[0m", if item.done { "[x]" } else { "[ ]" }, i + 1, item.text);
+                    }
+                }
                 AgentEvent::Warning(w) => eprintln!("\n\x1b[33m! {w}\x1b[0m"),
                 AgentEvent::Done(stats) => {
                     if in_thinking {

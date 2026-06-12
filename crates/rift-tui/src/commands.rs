@@ -15,8 +15,19 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::Kind;
 
+/// One row of an interactive picker: `value` is substituted into the
+/// command template; `label`/`detail` are what the user sees.
+pub struct PickerItem {
+    pub value: String,
+    pub label: String,
+    pub detail: String,
+}
+
 /// UI mutations a command can request; drained by the TUI event loop.
 pub enum UiEffect {
+    /// Open an interactive list; Enter runs `template` with `{}` replaced by
+    /// the chosen item's value (e.g. "/model {}").
+    Picker { title: String, items: Vec<PickerItem>, template: String },
     /// Styled block appended to the transcript pane.
     Out(Kind, String),
     /// Styled block appended to the activity-log pane.
@@ -29,6 +40,10 @@ pub enum UiEffect {
     Seed(Vec<Message>),
     /// Model name changed; update the status bar.
     Model(String),
+    /// Replace the pinned plan checklist (e.g. /plan clear).
+    Plan(Vec<rift_core::PlanItem>),
+    /// Suspend the TUI, open the file in $EDITOR, then hot-reload config.
+    EditFile(PathBuf),
     /// Ask the terminal to set the clipboard (OSC 52) — emitted by the UI
     /// loop, which owns stdout.
     Osc52(String),
@@ -48,7 +63,9 @@ pub struct CmdCx {
 /// (name, argument hint, one-line description) — the single source of truth
 /// driving both `/help` and the input popup palette.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("/approve", "[on|off]", "toggle approval mode for write/edit/bash"),
     ("/clear", "", "wipe the conversation (keeps the session file)"),
+    ("/config", "[edit]", "show or edit .rift.json (hot-reloads permissions)"),
     ("/compact", "", "force history compaction now"),
     ("/copy", "[all|log]", "copy last reply / whole transcript / activity log"),
     ("/diff", "", "git diff of the working tree"),
@@ -60,7 +77,9 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
     ("/permissions", "", "active shell deny patterns"),
+    ("/plan", "[clear]", "show or clear the agent's task checklist"),
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
+    ("/skills", "", "list available skills (run with /skill:<name>)"),
     ("/swarm", "<task> [--models a,b]", "WarpDrive race in isolated worktrees"),
     ("/think", "[on|off|auto]", "thinking mode (capability-checked)"),
     ("/tokens", "", "context budget, usage estimate, calibration"),
@@ -100,6 +119,8 @@ pub async fn run_command(
             let _ = fx.send(UiEffect::Out(Kind::Info, help_text()));
             Ok("ready".into())
         }
+        "/approve" => cmd_approve(rest, agent, fx),
+        "/config" => cmd_config(rest, agent, cx, fx),
         "/model" => cmd_model(rest, agent, fx).await,
         "/clear" => cmd_clear(agent, cx, fx),
         "/compact" => cmd_compact(agent, fx, cancel).await,
@@ -109,6 +130,7 @@ pub async fn run_command(
         "/tools" => cmd_tools(agent, fx),
         "/mcp" => cmd_mcp(cx, fx),
         "/permissions" => cmd_permissions(agent, cx, fx),
+        "/plan" => cmd_plan(rest, agent, fx),
         "/swarm" => cmd_swarm(rest, agent, cx, fx, cancel).await,
         "/merge" => cmd_merge(rest, cx, fx).await,
         "/undo" => cmd_undo(agent, fx),
@@ -135,14 +157,24 @@ async fn cmd_model(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>)
         if models.is_empty() {
             bail!("no models installed on {}", agent.client().base_url());
         }
-        let mut out = format!("models on {}:\n", agent.client().base_url());
-        for m in &models {
-            let marker = if m.name == agent.cfg.model { "▸" } else { " " };
-            out.push_str(&format!("{marker} {}\n", m.name));
-        }
-        out.push_str("\nswitch with /model <name>");
-        let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
-        return Ok(format!("{} model(s)", models.len()));
+        let count = models.len();
+        let items = models
+            .into_iter()
+            .map(|m| {
+                let detail = if m.name == agent.cfg.model {
+                    "current".to_string()
+                } else {
+                    m.capabilities.join(", ")
+                };
+                PickerItem { value: m.name.clone(), label: m.name, detail }
+            })
+            .collect();
+        let _ = fx.send(UiEffect::Picker {
+            title: format!("select model — {}", agent.client().base_url()),
+            items,
+            template: "/model {}".into(),
+        });
+        return Ok(format!("{count} model(s) — ↑↓ select, Enter switch, Esc cancel"));
     }
 
     // Same preflight as startup: capability check + num_ctx clamp.
@@ -258,28 +290,30 @@ fn cmd_sessions(
     }
 
     if arg.is_empty() {
-        let mut out = String::from("saved sessions (newest first):\n");
-        for (i, path) in paths.iter().take(15).enumerate() {
-            let line = match SessionStore::load(path) {
-                Ok(s) => format!(
-                    "{:>2}. {:<9} {:<16} {:>3} msgs  {}",
-                    i + 1,
-                    fmt_age(s.saved_at),
-                    s.model,
-                    s.messages.len(),
-                    if path == cx.store.path() { "← current" } else { "" }
-                ),
-                Err(_) => format!("{:>2}. (unreadable) {}", i + 1, path.display()),
-            };
-            out.push_str(line.trim_end());
-            out.push('\n');
-        }
-        if paths.len() > 15 {
-            out.push_str(&format!("… and {} more\n", paths.len() - 15));
-        }
-        out.push_str("\nresume with /sessions <n>");
-        let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
-        return Ok(format!("{} session(s)", paths.len()));
+        let items: Vec<PickerItem> = paths
+            .iter()
+            .take(20)
+            .enumerate()
+            .map(|(i, path)| match SessionStore::load(path) {
+                Ok(s) => PickerItem {
+                    value: (i + 1).to_string(),
+                    label: format!("{:<9} {:<16} {:>3} msgs", fmt_age(s.saved_at), s.model, s.messages.len()),
+                    detail: if path == cx.store.path() { "current".into() } else { String::new() },
+                },
+                Err(_) => PickerItem {
+                    value: (i + 1).to_string(),
+                    label: format!("(unreadable) {}", path.display()),
+                    detail: String::new(),
+                },
+            })
+            .collect();
+        let count = paths.len();
+        let _ = fx.send(UiEffect::Picker {
+            title: "resume session".into(),
+            items,
+            template: "/sessions {}".into(),
+        });
+        return Ok(format!("{count} session(s) — ↑↓ select, Enter resume, Esc cancel"));
     }
 
     let n: usize = arg.parse().context("usage: /sessions <number>")?;
@@ -329,7 +363,12 @@ fn cmd_mcp(cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
 
 fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     let user = agent.ctx().user_deny_patterns();
-    let mut out = String::from("shell commands matching these patterns are refused:\n\nbuilt-in (always on):\n");
+    let mut out = format!(
+        "approval mode: {} (write/edit/bash {}; --approve or permissions.approve in config)\n\n",
+        if agent.ctx().approval_enabled() { "ON" } else { "off" },
+        if agent.ctx().approval_enabled() { "ask before running" } else { "run without asking" },
+    );
+    out.push_str("shell commands matching these patterns are refused:\n\nbuilt-in (always on):\n");
     for pat in builtin_bash_deny() {
         out.push_str(&format!("  {pat}\n"));
     }
@@ -337,7 +376,7 @@ fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) ->
         out.push_str("\nuser (permissions.bash_deny): none configured");
     } else {
         out.push_str("\nuser (permissions.bash_deny):\n");
-        for pat in user {
+        for pat in &user {
             out.push_str(&format!("  {pat}\n"));
         }
     }
@@ -470,6 +509,98 @@ async fn cmd_merge(rest: &str, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Re
     }
     let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
     Ok(msg)
+}
+
+fn cmd_approve(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    match arg {
+        "on" => agent.ctx().set_approval(true),
+        "off" => agent.ctx().set_approval(false),
+        "" => {}
+        other => bail!("usage: /approve [on|off] — got '{other}'"),
+    }
+    let state = if agent.ctx().approval_enabled() { "ON — write/edit/bash ask first" } else { "off" };
+    let _ = fx.send(UiEffect::Out(Kind::Info, format!("approval mode: {state}")));
+    Ok(format!("approval: {state}"))
+}
+
+const CONFIG_TEMPLATE: &str = "{\n  \"mcp\": {},\n  \"permissions\": {\"bash_deny\": [], \"approve\": false}\n}\n";
+
+fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    match arg {
+        "" => {
+            let mut out = String::new();
+            match &cx.config_path {
+                Some(p) => {
+                    out.push_str(&format!("config: {}\n\n", p.display()));
+                    let body = std::fs::read_to_string(p).unwrap_or_else(|e| format!("(unreadable: {e})"));
+                    let capped: String = body.chars().take(1500).collect();
+                    out.push_str(capped.trim_end());
+                    if capped.len() < body.len() {
+                        out.push_str("\n[truncated]");
+                    }
+                }
+                None => out.push_str(
+                    "no config file found — checked .rift.json (project) and ~/.config/rift/config.json (user)\ncreate one with /config edit",
+                ),
+            }
+            out.push_str(&format!(
+                "\n\nruntime: approval {}, {} user deny pattern(s)\nedit with /config edit (permissions hot-reload; MCP changes need a restart)",
+                if agent.ctx().approval_enabled() { "ON" } else { "off" },
+                agent.ctx().user_deny_patterns().len(),
+            ));
+            let _ = fx.send(UiEffect::Out(Kind::Info, out.trim().into()));
+            Ok("config shown".into())
+        }
+        "edit" => {
+            let path = cx.config_path.clone().unwrap_or_else(|| cx.cwd.join(".rift.json"));
+            if !path.exists() {
+                std::fs::write(&path, CONFIG_TEMPLATE).with_context(|| format!("creating {}", path.display()))?;
+                let _ = fx.send(UiEffect::Out(Kind::Info, format!("created {}", path.display())));
+            }
+            let _ = fx.send(UiEffect::EditFile(path));
+            Ok("opening config in $EDITOR…".into())
+        }
+        // Internal: dispatched by the UI after $EDITOR exits.
+        "reload" => {
+            let (config, path) = rift_core::Config::load(&cx.cwd)?;
+            agent.ctx().set_deny(&config.permissions.bash_deny);
+            agent.ctx().set_approval(config.permissions.approve);
+            cx.config_path = path;
+            let msg = format!(
+                "config reloaded — approval {}, {} user deny pattern(s) (MCP server changes need a restart)",
+                if config.permissions.approve { "ON" } else { "off" },
+                config.permissions.bash_deny.len(),
+            );
+            let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+            Ok(msg)
+        }
+        other => bail!("usage: /config [edit] — got '{other}'"),
+    }
+}
+
+fn cmd_plan(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    match arg {
+        "clear" => {
+            agent.ctx().clear_plan();
+            let _ = fx.send(UiEffect::Plan(vec![]));
+            let _ = fx.send(UiEffect::Out(Kind::Info, "plan cleared".into()));
+            Ok("plan cleared".into())
+        }
+        "" => {
+            let items = agent.ctx().plan_snapshot();
+            if items.is_empty() {
+                bail!("no plan yet — the agent sets one with its plan tool on multi-step tasks");
+            }
+            let done = items.iter().filter(|i| i.done).count();
+            let mut out = format!("plan ({done}/{} done):\n", items.len());
+            for item in &items {
+                out.push_str(&format!("  {} {}\n", if item.done { "☑" } else { "☐" }, item.text));
+            }
+            let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+            Ok(format!("{done}/{} done", items.len()))
+        }
+        other => bail!("usage: /plan [clear] — got '{other}'"),
+    }
 }
 
 async fn cmd_copy(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {

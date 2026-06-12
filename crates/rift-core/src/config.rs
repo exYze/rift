@@ -32,6 +32,9 @@ pub struct Permissions {
     /// built-in deny list).
     #[serde(default)]
     pub bash_deny: Vec<String>,
+    /// Pause for user approval before write/edit/bash (TUI sessions only).
+    #[serde(default)]
+    pub approve: bool,
 }
 
 impl Config {

@@ -66,6 +66,8 @@ pub enum AgentEvent {
     /// Informational note (compaction activity, budget state) — not a problem.
     Info(String),
     Warning(String),
+    /// The model updated its task checklist (the `plan` tool).
+    Plan(Vec<crate::tools::PlanItem>),
     /// Turn finished (success or abort); always the final event of a turn.
     Done(TurnStats),
 }
@@ -312,10 +314,13 @@ impl Agent {
                 };
 
                 let _ = tx.send(AgentEvent::ToolResult {
-                    name: canonical,
+                    name: canonical.clone(),
                     ok,
                     preview: preview(&result, 200),
                 });
+                if canonical == "plan" && ok {
+                    let _ = tx.send(AgentEvent::Plan(self.ctx.plan_snapshot()));
+                }
 
                 // Correlate by the name the model used, per the native protocol.
                 self.messages.push(Message::tool_result(requested_name, result));

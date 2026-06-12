@@ -18,10 +18,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use rift_core::{Agent, AgentEvent, SessionStore, TurnStats};
+use rift_core::{Agent, AgentEvent, AskRequest, PlanItem, SessionStore, Skill, TurnStats};
 use rift_ollama::{Message, Role};
+use tokio::sync::oneshot;
 
-use crate::commands::{self, CmdCx, UiEffect};
+use crate::commands::{self, CmdCx, PickerItem, UiEffect};
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -296,6 +297,22 @@ enum UiMsg {
     Command(String, CancellationToken),
 }
 
+/// Interactive list overlay: command pickers (/model, /sessions) and
+/// elicitation choices share the same widget and key handling.
+struct PickerState {
+    title: String,
+    items: Vec<PickerItem>,
+    selected: usize,
+    kind: PickerKind,
+}
+
+enum PickerKind {
+    /// Enter runs `template` with `{}` replaced by the chosen value.
+    Command { template: String },
+    /// Enter answers a pending ask_user question.
+    Elicit { reply: Option<oneshot::Sender<String>> },
+}
+
 fn floor_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
         return s.len();
@@ -305,6 +322,48 @@ fn floor_boundary(s: &str, max: usize) -> usize {
         i -= 1;
     }
     i.max(1) // always make progress even on a pathological boundary
+}
+
+// ---- input cursor helpers (byte offsets, always on char boundaries) ----
+
+fn prev_char(s: &str, i: usize) -> usize {
+    s[..i].char_indices().next_back().map(|(j, _)| j).unwrap_or(0)
+}
+
+fn next_char(s: &str, i: usize) -> usize {
+    s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
+}
+
+fn prev_word(s: &str, i: usize) -> usize {
+    let mut j = i;
+    while j > 0 && !s[..j].chars().next_back().unwrap().is_alphanumeric() {
+        j = prev_char(s, j);
+    }
+    while j > 0 && s[..j].chars().next_back().unwrap().is_alphanumeric() {
+        j = prev_char(s, j);
+    }
+    j
+}
+
+fn next_word(s: &str, i: usize) -> usize {
+    let mut j = i;
+    while j < s.len() && !s[j..].chars().next().unwrap().is_alphanumeric() {
+        j = next_char(s, j);
+    }
+    while j < s.len() && s[j..].chars().next().unwrap().is_alphanumeric() {
+        j = next_char(s, j);
+    }
+    j
+}
+
+/// Start of the line containing byte offset `i`.
+fn line_start(s: &str, i: usize) -> usize {
+    s[..i].rfind('\n').map(|p| p + 1).unwrap_or(0)
+}
+
+/// End of the line containing byte offset `i` (before its newline).
+fn line_end(s: &str, i: usize) -> usize {
+    i + s[i..].find('\n').unwrap_or(s.len() - i)
 }
 
 #[cfg(test)]
@@ -335,6 +394,8 @@ struct App {
     show_log: bool,
     focus: Focus,
     input: String,
+    /// Byte offset of the input cursor (always on a char boundary).
+    cursor: usize,
     history: Vec<String>,
     history_idx: Option<usize>,
     busy: bool,
@@ -351,25 +412,18 @@ struct App {
     /// When the in-flight turn/command started (drives the spinner + elapsed
     /// time so long prompt-processing waits visibly aren't a hang).
     turn_started: Option<Instant>,
-}
-
-/// Indices into `commands::COMMANDS` whose names start with the input.
-/// The palette is live while the user is typing the command word itself
-/// (a space or newline means they've moved on to arguments).
-fn palette_matches(input: &str) -> Vec<usize> {
-    if !input.starts_with('/') || input.contains(char::is_whitespace) {
-        return vec![];
-    }
-    commands::COMMANDS
-        .iter()
-        .enumerate()
-        .filter(|(_, (name, _, _))| name.starts_with(input))
-        .map(|(i, _)| i)
-        .collect()
+    /// Open interactive list (model picker, session picker, elicit choices).
+    picker: Option<PickerState>,
+    /// Pending free-text ask_user question; Enter sends the input as the answer.
+    answering: Option<oneshot::Sender<String>>,
+    /// The model's task checklist, pinned at the top of the activity pane.
+    plan: Vec<PlanItem>,
+    /// Discovered skills — palette entries (/skill:<name>) and prompt bodies.
+    skills: Vec<Skill>,
 }
 
 impl App {
-    fn new(model: String) -> Self {
+    fn new(model: String, skills: Vec<Skill>) -> Self {
         Self {
             model,
             transcript: Pane::new(),
@@ -377,6 +431,7 @@ impl App {
             show_log: true,
             focus: Focus::Transcript,
             input: String::new(),
+            cursor: 0,
             history: vec![],
             history_idx: None,
             busy: false,
@@ -387,15 +442,54 @@ impl App {
             palette_off: false,
             mouse_capture: true,
             turn_started: None,
+            picker: None,
+            answering: None,
+            plan: vec![],
+            skills,
         }
     }
 
-    /// Matches currently shown in the palette popup (empty = hidden).
-    fn palette(&self) -> Vec<usize> {
-        if self.palette_off {
-            vec![]
+    /// Entries currently shown in the palette popup (empty = hidden):
+    /// (completion text, argument hint, description). Built-in commands plus
+    /// discovered skills as /skill:<name>. Live while the user is typing the
+    /// command word itself (whitespace = they've moved on to arguments).
+    fn palette(&self) -> Vec<(String, String, String)> {
+        if self.palette_off || self.picker.is_some() || self.answering.is_some() {
+            return vec![];
+        }
+        if !self.input.starts_with('/') || self.input.contains(char::is_whitespace) {
+            return vec![];
+        }
+        let mut entries: Vec<(String, String, String)> = commands::COMMANDS
+            .iter()
+            .map(|(n, a, d)| (n.to_string(), a.to_string(), d.to_string()))
+            .collect();
+        for s in &self.skills {
+            entries.push((format!("/skill:{}", s.name), "[task]".into(), s.description.clone()));
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.retain(|e| e.0.starts_with(&self.input));
+        entries
+    }
+
+    /// Route an incoming ask_user question to the right surface: choices get
+    /// the picker overlay, free-text questions switch the input into answer mode.
+    fn handle_ask(&mut self, req: AskRequest) {
+        self.transcript.push_block(Kind::Warn, format!("? {}", req.question));
+        if req.choices.is_empty() {
+            self.answering = Some(req.reply);
+            self.status = "the agent is asking — type your answer, Enter to send, Esc to skip".into();
         } else {
-            palette_matches(&self.input)
+            self.picker = Some(PickerState {
+                title: req.question,
+                items: req
+                    .choices
+                    .into_iter()
+                    .map(|c| PickerItem { value: c.clone(), label: c, detail: String::new() })
+                    .collect(),
+                selected: 0,
+                kind: PickerKind::Elicit { reply: Some(req.reply) },
+            });
         }
     }
 
@@ -465,6 +559,7 @@ impl App {
             AgentEvent::Info(i) => {
                 self.log.push_block(Kind::Info, format!("· {i}"));
             }
+            AgentEvent::Plan(items) => self.plan = items,
             AgentEvent::Warning(w) => {
                 self.log.push_block(Kind::Warn, format!("! {w}"));
                 self.transcript.push_block(Kind::Warn, format!("! {w}"));
@@ -483,6 +578,14 @@ impl App {
 
     fn handle_ui_effect(&mut self, fx: UiEffect) {
         match fx {
+            UiEffect::Picker { title, items, template } => {
+                self.picker = Some(PickerState {
+                    title,
+                    items,
+                    selected: 0,
+                    kind: PickerKind::Command { template },
+                });
+            }
             UiEffect::Out(kind, text) => self.transcript.push_block(kind, text),
             UiEffect::Log(kind, text) => self.log.push_block(kind, text),
             UiEffect::Diff(text) => {
@@ -501,8 +604,10 @@ impl App {
                 self.seed_from_messages(&messages);
             }
             UiEffect::Model(name) => self.model = name,
-            // Handled by the event loop (needs stdout); never reaches here.
+            UiEffect::Plan(items) => self.plan = items,
+            // Handled by the event loop (need stdout/terminal); never reach here.
             UiEffect::Osc52(_) => {}
+            UiEffect::EditFile(_) => {}
             UiEffect::Done(status) => {
                 self.busy = false;
                 self.cancel = None;
@@ -551,19 +656,57 @@ fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
-    // Tool-log pane.
+    // Tool-log pane, with the model's plan checklist pinned on top.
     if let Some(log_area) = log_area {
         let focused = app.focus == Focus::Log;
         let block = Block::bordered()
             .title(" activity ")
             .border_style(if focused { focused_style } else { unfocused_style });
         let inner = block.inner(log_area);
-        app.log.area = inner;
-        app.log.rebuild(inner.width);
-        app.log.view_height = inner.height as usize;
-        let lines = app.log.visible_lines();
         frame.render_widget(block, log_area);
-        frame.render_widget(Paragraph::new(lines), inner);
+
+        let plan_rows = if app.plan.is_empty() { 0 } else { app.plan.len().min(6) };
+        let plan_h = if plan_rows > 0 { (plan_rows + 1) as u16 } else { 0 }.min(inner.height / 2);
+        if plan_h > 0 {
+            let rows = (plan_h - 1) as usize;
+            let done = app.plan.iter().filter(|i| i.done).count();
+            let current = app.plan.iter().position(|i| !i.done);
+            // Window the list around the active step when it overflows.
+            let start = current
+                .unwrap_or(0)
+                .saturating_sub(1)
+                .min(app.plan.len().saturating_sub(rows));
+            let mut plines: Vec<Line> = Vec::with_capacity(rows + 1);
+            for (i, item) in app.plan.iter().enumerate().skip(start).take(rows) {
+                let (mark, style) = if item.done {
+                    ("☑", Style::default().fg(Color::DarkGray))
+                } else if Some(i) == current {
+                    ("◐", Style::default().fg(Color::Yellow))
+                } else {
+                    ("☐", Style::default().fg(Color::White))
+                };
+                plines.push(Line::from(Span::styled(format!("{mark} {}", item.text), style)));
+            }
+            let bar = format!("─ plan {done}/{} {}", app.plan.len(), "─".repeat(inner.width as usize));
+            plines.push(Line::from(Span::styled(
+                bar.chars().take(inner.width as usize).collect::<String>(),
+                Style::default().fg(Color::DarkGray),
+            )));
+            let plan_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: plan_h };
+            frame.render_widget(Paragraph::new(plines), plan_area);
+        }
+
+        let log_inner = Rect {
+            x: inner.x,
+            y: inner.y + plan_h,
+            width: inner.width,
+            height: inner.height.saturating_sub(plan_h),
+        };
+        app.log.area = log_inner;
+        app.log.rebuild(log_inner.width);
+        app.log.view_height = log_inner.height as usize;
+        let lines = app.log.visible_lines();
+        frame.render_widget(Paragraph::new(lines), log_inner);
     } else {
         app.log.area = Rect::default();
     }
@@ -599,7 +742,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
     // Input pane.
     let line_count = app.input.lines().count();
-    let input_title = if app.busy {
+    let input_title = if app.answering.is_some() {
+        " your answer (Enter send · Esc skip) ".to_string()
+    } else if app.busy {
         " input (Esc cancels the running turn) ".to_string()
     } else if line_count > 1 {
         format!(" input ({line_count} lines — all will be sent) ")
@@ -610,15 +755,30 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let input_inner = input_block.inner(input_area);
     frame.render_widget(input_block, input_area);
     let mut lines: Vec<Line> = Vec::new();
+    app.cursor = app.cursor.min(app.input.len());
+    let cur_line_idx = app.input[..app.cursor].matches('\n').count();
+    let col = app.cursor - line_start(&app.input, app.cursor);
     let input_lines: Vec<&str> = if app.input.is_empty() { vec![""] } else { app.input.split('\n').collect() };
     let shown = input_lines.len().min(input_inner.height as usize).max(1);
-    let start = input_lines.len() - shown;
-    for (i, l) in input_lines[start..].iter().enumerate() {
-        let prefix = if start + i == 0 { "❯ " } else { "… " };
-        let is_last = start + i == input_lines.len() - 1;
-        let mut spans = vec![Span::styled(prefix, Style::default().fg(Color::Cyan)), Span::raw((*l).to_string())];
-        if is_last {
-            spans.push(Span::styled("█", Style::default().fg(Color::DarkGray)));
+    // Window follows the cursor, not just the tail.
+    let start = (input_lines.len() - shown).min(cur_line_idx);
+    for (i, l) in input_lines[start..].iter().take(shown).enumerate() {
+        let abs = start + i;
+        let prefix = if abs == 0 { "❯ " } else { "… " };
+        let mut spans = vec![Span::styled(prefix, Style::default().fg(Color::Cyan))];
+        if abs == cur_line_idx {
+            // Split the line at the cursor; render the char under it reversed.
+            let split = col.min(l.len());
+            let (before, rest) = l.split_at(split);
+            let (under, after) = match rest.chars().next() {
+                Some(c) => (c.to_string(), &rest[c.len_utf8()..]),
+                None => (" ".to_string(), rest),
+            };
+            spans.push(Span::raw(before.to_string()));
+            spans.push(Span::styled(under, Style::default().add_modifier(Modifier::REVERSED)));
+            spans.push(Span::raw(after.to_string()));
+        } else {
+            spans.push(Span::raw((*l).to_string()));
         }
         lines.push(Line::from(spans));
     }
@@ -641,8 +801,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         // Keep the selection inside the visible window when the list scrolls.
         let start = (app.palette_idx + 1).saturating_sub(rows);
         let mut lines: Vec<Line> = Vec::with_capacity(rows);
-        for (row, &ci) in palette.iter().enumerate().skip(start).take(rows) {
-            let (name, args, desc) = commands::COMMANDS[ci];
+        for (row, (name, args, desc)) in palette.iter().enumerate().skip(start).take(rows) {
             let selected = row == app.palette_idx;
             let left = if args.is_empty() { name.to_string() } else { format!("{name} {args}") };
             let base = if selected {
@@ -665,19 +824,70 @@ fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(lines), inner);
     }
+
+    // Interactive picker overlay (model/session selection, elicit choices) —
+    // drawn last so it sits on top of everything.
+    if let Some(p) = &mut app.picker {
+        p.selected = p.selected.min(p.items.len().saturating_sub(1));
+        let rows = p.items.len().min(10);
+        let height = (rows + 2) as u16;
+        let width = (frame.area().width.saturating_sub(8)).clamp(40, 90);
+        let area = Rect {
+            x: (frame.area().width.saturating_sub(width)) / 2,
+            y: input_area.y.saturating_sub(height),
+            width,
+            height,
+        };
+        let start = (p.selected + 1).saturating_sub(rows);
+        let inner_w = width.saturating_sub(2) as usize;
+        let mut lines: Vec<Line> = Vec::with_capacity(rows);
+        for (row, item) in p.items.iter().enumerate().skip(start).take(rows) {
+            let selected = row == p.selected;
+            let base = if selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            let label: String = item.label.chars().take(inner_w.saturating_sub(4)).collect();
+            let detail: String = item.detail.chars().take(inner_w.saturating_sub(label.len() + 5)).collect();
+            let pad = inner_w.saturating_sub(2 + label.chars().count() + if detail.is_empty() { 0 } else { detail.chars().count() + 2 });
+            let mut spans = vec![Span::styled(format!(" {label} "), base.add_modifier(Modifier::BOLD))];
+            if !detail.is_empty() {
+                spans.push(Span::styled(
+                    format!(" {detail}"),
+                    if selected { base } else { Style::default().fg(Color::DarkGray) },
+                ));
+            }
+            spans.push(Span::styled(" ".repeat(pad), base));
+            lines.push(Line::from(spans));
+        }
+        let title: String = p.title.chars().take(inner_w.saturating_sub(28)).collect();
+        let block = Block::bordered()
+            .title(format!(" {title} — ↑↓ · Enter · Esc "))
+            .border_style(Style::default().fg(Color::Yellow));
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
 }
 
 /// The `/init` command body — a normal agent turn with a canned prompt.
 const INIT_PROMPT: &str = "Explore this repository (use repo_map and outline to stay cheap; read key files only as needed) and write a RIFT.md file at the project root: a concise guide for AI coding agents working here. Cover: what the project does, how the code is laid out, how to build/test/run it, and any conventions or gotchas you noticed. Keep it under 60 lines.";
 
-pub async fn run_tui(
-    agent: Agent,
-    model: String,
-    store: SessionStore,
-    resumed: Vec<Message>,
-    mcp: Vec<(String, usize)>,
-    config_path: Option<PathBuf>,
-) -> Result<()> {
+/// Everything run_tui needs beyond the agent itself.
+pub struct TuiOptions {
+    pub model: String,
+    pub store: SessionStore,
+    pub resumed: Vec<Message>,
+    pub mcp: Vec<(String, usize)>,
+    pub config_path: Option<PathBuf>,
+    pub ask_rx: mpsc::UnboundedReceiver<AskRequest>,
+    pub skills: Vec<Skill>,
+}
+
+pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
+    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills } = opts;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<UiMsg>();
@@ -723,7 +933,7 @@ pub async fn run_tui(
     let mut terminal = ratatui::init();
     let _ = execute!(stdout(), EnableMouseCapture, EnableBracketedPaste);
 
-    let mut app = App::new(model);
+    let mut app = App::new(model, skills);
     app.seed_from_messages(&resumed);
 
     let result = (|| -> Result<()> {
@@ -734,6 +944,10 @@ pub async fn run_tui(
                 app.handle_agent_event(ev);
                 needs_redraw = true;
             }
+            while let Ok(req) = ask_rx.try_recv() {
+                app.handle_ask(req);
+                needs_redraw = true;
+            }
             while let Ok(fx) = fx_rx.try_recv() {
                 if let UiEffect::Osc52(text) = fx {
                     // Clipboard escape goes straight to the terminal; it
@@ -742,6 +956,33 @@ pub async fn run_tui(
                     let mut out = stdout();
                     let _ = out.write_all(crate::clipboard::osc52(&text).as_bytes());
                     let _ = out.flush();
+                } else if let UiEffect::EditFile(path) = fx {
+                    // Hand the terminal to $EDITOR, then take it back.
+                    let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
+                    ratatui::restore();
+                    let editor = std::env::var("EDITOR")
+                        .or_else(|_| std::env::var("VISUAL"))
+                        .unwrap_or_else(|_| "vi".into());
+                    let status = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(format!("{editor} '{}'", path.display()))
+                        .status();
+                    terminal = ratatui::init();
+                    let _ = execute!(stdout(), EnableBracketedPaste);
+                    if app.mouse_capture {
+                        let _ = execute!(stdout(), EnableMouseCapture);
+                    }
+                    app.transcript.dirty = true;
+                    app.log.dirty = true;
+                    match status {
+                        Ok(s) if s.success() => {
+                            let _ = prompt_tx
+                                .send(UiMsg::Command("/config reload".into(), CancellationToken::new()));
+                        }
+                        _ => app
+                            .transcript
+                            .push_block(Kind::Warn, "! editor exited with an error; config not reloaded".into()),
+                    }
                 } else {
                     app.handle_ui_effect(fx);
                 }
@@ -768,6 +1009,67 @@ pub async fn run_tui(
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let palette = app.palette();
+                    // An open picker owns the keyboard.
+                    if app.picker.is_some() {
+                        match key.code {
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.quit = true;
+                            }
+                            KeyCode::Up => {
+                                if let Some(p) = app.picker.as_mut() {
+                                    p.selected = p.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down => {
+                                if let Some(p) = app.picker.as_mut() {
+                                    p.selected = (p.selected + 1).min(p.items.len().saturating_sub(1));
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(p) = app.picker.take() {
+                                    let value =
+                                        p.items.get(p.selected).map(|i| i.value.clone()).unwrap_or_default();
+                                    match p.kind {
+                                        PickerKind::Command { template } => {
+                                            if app.busy {
+                                                app.status = "agent is running — Esc to cancel first".into();
+                                            } else if !value.is_empty() {
+                                                let line = template.replace("{}", &value);
+                                                app.transcript.push_block(Kind::User, line.clone());
+                                                app.history.push(line.clone());
+                                                app.history_idx = None;
+                                                app.busy = true;
+                                                app.turn_started = Some(Instant::now());
+                                                app.status = "running command…".into();
+                                                let cancel = CancellationToken::new();
+                                                app.cancel = Some(cancel.clone());
+                                                let _ = prompt_tx.send(UiMsg::Command(line, cancel));
+                                            }
+                                        }
+                                        PickerKind::Elicit { mut reply } => {
+                                            app.transcript.push_block(Kind::User, value.clone());
+                                            if let Some(tx) = reply.take() {
+                                                let _ = tx.send(value);
+                                            }
+                                            app.status = "answer sent".into();
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if let Some(p) = app.picker.take() {
+                                    // Dropping an Elicit reply sender tells the tool
+                                    // the user dismissed the question.
+                                    if matches!(p.kind, PickerKind::Elicit { .. }) {
+                                        app.transcript.push_block(Kind::Info, "(question dismissed)".into());
+                                    }
+                                    app.status = "picker closed".into();
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.quit = true;
@@ -790,14 +1092,32 @@ pub async fn run_tui(
                         }
                     }
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.input.push('\n');
+                        app.input.insert(app.cursor, '\n');
+                        app.cursor += 1;
+                    }
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.cursor = line_start(&app.input, app.cursor);
+                    }
+                    KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.cursor = line_end(&app.input, app.cursor);
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.input.clear();
+                        app.cursor = 0;
+                        app.palette_off = false;
+                        app.palette_idx = 0;
+                    }
+                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let from = prev_word(&app.input, app.cursor);
+                        app.input.replace_range(from..app.cursor, "");
+                        app.cursor = from;
                     }
                     KeyCode::Tab => {
-                        if let Some(&ci) = palette.get(app.palette_idx.min(palette.len().saturating_sub(1))) {
+                        if let Some((name, args, _)) = palette.get(app.palette_idx.min(palette.len().saturating_sub(1))) {
                             // Complete to the selected command; trailing space
                             // if it takes arguments (which also hides the popup).
-                            let (name, args, _) = commands::COMMANDS[ci];
-                            app.input = if args.is_empty() { name.to_string() } else { format!("{name} ") };
+                            app.input = if args.is_empty() { name.clone() } else { format!("{name} ") };
+                            app.cursor = app.input.len();
                         } else {
                             app.focus = match app.focus {
                                 Focus::Transcript if app.show_log => Focus::Log,
@@ -808,6 +1128,13 @@ pub async fn run_tui(
                     KeyCode::Esc => {
                         if !palette.is_empty() {
                             app.palette_off = true;
+                        } else if app.answering.is_some() {
+                            // Dropping the sender tells the tool the user skipped.
+                            app.answering = None;
+                            app.input.clear();
+                            app.cursor = 0;
+                            app.transcript.push_block(Kind::Info, "(question dismissed)".into());
+                            app.status = "question dismissed — the agent will proceed".into();
                         } else if app.busy {
                             if let Some(cancel) = &app.cancel {
                                 cancel.cancel();
@@ -818,18 +1145,47 @@ pub async fn run_tui(
                         }
                     }
                     KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                        app.input.push('\n');
+                        app.input.insert(app.cursor, '\n');
+                        app.cursor += 1;
+                    }
+                    KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.cursor = prev_word(&app.input, app.cursor);
+                    }
+                    KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.cursor = next_word(&app.input, app.cursor);
+                    }
+                    KeyCode::Left => app.cursor = prev_char(&app.input, app.cursor),
+                    KeyCode::Right => app.cursor = next_char(&app.input, app.cursor),
+                    KeyCode::Delete => {
+                        if app.cursor < app.input.len() {
+                            let to = next_char(&app.input, app.cursor);
+                            app.input.replace_range(app.cursor..to, "");
+                            app.palette_off = false;
+                            app.palette_idx = 0;
+                        }
                     }
                     KeyCode::Enter => {
-                        if app.busy {
+                        if app.answering.is_some() {
+                            // The input is the answer to a pending ask_user question.
+                            if !app.input.trim().is_empty() {
+                                let answer = std::mem::take(&mut app.input);
+                                app.cursor = 0;
+                                app.transcript.push_block(Kind::User, answer.clone());
+                                if let Some(tx) = app.answering.take() {
+                                    let _ = tx.send(answer);
+                                }
+                                app.status = "answer sent".into();
+                            }
+                        } else if app.busy {
                             app.status = "agent is running — Esc to cancel first".into();
                         } else if !app.input.trim().is_empty() {
                             // With the palette open, Enter runs the selected
                             // command (completing any partial prefix first).
-                            if let Some(&ci) = palette.get(app.palette_idx.min(palette.len().saturating_sub(1))) {
-                                app.input = commands::COMMANDS[ci].0.to_string();
+                            if let Some((name, _, _)) = palette.get(app.palette_idx.min(palette.len().saturating_sub(1))) {
+                                app.input = name.clone();
                             }
                             let raw = std::mem::take(&mut app.input);
+                            app.cursor = 0;
                             app.history.push(raw.clone());
                             app.history_idx = None;
                             app.transcript.push_block(Kind::User, raw.clone());
@@ -868,6 +1224,52 @@ pub async fn run_tui(
                                         let _ = fx2.send(UiEffect::Done(msg));
                                     });
                                 }
+                            } else if let Some(rest) = trimmed.strip_prefix("/skill:") {
+                                // Skill invocation: expand the body into a prompt.
+                                let (name, task) = match rest.split_once(char::is_whitespace) {
+                                    Some((n, t)) => (n, t.trim()),
+                                    None => (rest, ""),
+                                };
+                                match app.skills.iter().find(|s| s.name == name) {
+                                    Some(s) => {
+                                        let task = if task.is_empty() {
+                                            "Apply this skill to the current project now."
+                                        } else {
+                                            task
+                                        };
+                                        let prompt = format!(
+                                            "Follow this skill's instructions.\n\n--- SKILL: {} ---\n{}\n--- END SKILL ---\n\nTask: {task}",
+                                            s.name, s.body
+                                        );
+                                        app.status = format!("running skill {name}…");
+                                        let _ = prompt_tx.send(UiMsg::Prompt(prompt, cancel));
+                                    }
+                                    None => {
+                                        app.busy = false;
+                                        app.cancel = None;
+                                        app.turn_started = None;
+                                        app.transcript.push_block(
+                                            Kind::Warn,
+                                            format!("! unknown skill '{name}' — /skills lists what's available"),
+                                        );
+                                    }
+                                }
+                            } else if trimmed == "/skills" {
+                                app.busy = false;
+                                app.cancel = None;
+                                app.turn_started = None;
+                                if app.skills.is_empty() {
+                                    app.transcript.push_block(
+                                        Kind::Info,
+                                        "no skills found — add .rift/skills/<name>/SKILL.md (project) or ~/.config/rift/skills/ (user)".into(),
+                                    );
+                                } else {
+                                    let mut out = String::from("skills (run with /skill:<name> [task]):\n");
+                                    for s in &app.skills {
+                                        out.push_str(&format!("  {:<18} {}  ({})\n", s.name, s.description, s.source.display()));
+                                    }
+                                    app.transcript.push_block(Kind::Info, out.trim_end().to_string());
+                                }
                             } else if trimmed.starts_with('/') {
                                 app.status = "running command…".into();
                                 let _ = prompt_tx.send(UiMsg::Command(trimmed, cancel));
@@ -878,7 +1280,11 @@ pub async fn run_tui(
                         }
                     }
                     KeyCode::Backspace => {
-                        app.input.pop();
+                        if app.cursor > 0 {
+                            let from = prev_char(&app.input, app.cursor);
+                            app.input.replace_range(from..app.cursor, "");
+                            app.cursor = from;
+                        }
                         app.palette_off = false;
                         app.palette_idx = 0;
                     }
@@ -891,6 +1297,7 @@ pub async fn run_tui(
                             };
                             app.history_idx = Some(idx);
                             app.input = app.history[idx].clone();
+                            app.cursor = app.input.len();
                             app.palette_off = false;
                             app.palette_idx = 0;
                         }
@@ -900,10 +1307,12 @@ pub async fn run_tui(
                             Some(i) if i + 1 < app.history.len() => {
                                 app.history_idx = Some(i + 1);
                                 app.input = app.history[i + 1].clone();
+                                app.cursor = app.input.len();
                             }
                             Some(_) => {
                                 app.history_idx = None;
                                 app.input.clear();
+                                app.cursor = 0;
                             }
                             None => {}
                         }
@@ -931,12 +1340,25 @@ pub async fn run_tui(
                         }
                     }
                     KeyCode::Home => {
-                        let max = app.focused_pane().max_scroll();
-                        app.focused_pane().scroll_from_bottom = max;
+                        // Editing-first: jump to line start when typing,
+                        // pane top when the input is empty.
+                        if app.input.is_empty() {
+                            let max = app.focused_pane().max_scroll();
+                            app.focused_pane().scroll_from_bottom = max;
+                        } else {
+                            app.cursor = line_start(&app.input, app.cursor);
+                        }
                     }
-                    KeyCode::End => app.focused_pane().scroll_from_bottom = 0,
+                    KeyCode::End => {
+                        if app.input.is_empty() {
+                            app.focused_pane().scroll_from_bottom = 0;
+                        } else {
+                            app.cursor = line_end(&app.input, app.cursor);
+                        }
+                    }
                     KeyCode::Char(c) => {
-                        app.input.push(c);
+                        app.input.insert(app.cursor, c);
+                        app.cursor += c.len_utf8();
                         app.palette_off = false;
                         app.palette_idx = 0;
                     }
@@ -947,7 +1369,9 @@ pub async fn run_tui(
                     // Bracketed paste: the whole clipboard arrives as ONE event,
                     // so embedded newlines never act as Enter presses mid-paste.
                     // Terminals encode paste newlines as \r — normalize to \n.
-                    app.input.push_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+                    let data = data.replace("\r\n", "\n").replace('\r', "\n");
+                    app.input.insert_str(app.cursor, &data);
+                    app.cursor += data.len();
                     app.palette_off = false;
                     app.palette_idx = 0;
                 }
