@@ -70,6 +70,26 @@ session, same wire measurement. rift's 6 remaining failures are genuine model
 mistakes (wrong logic that passes the model's own reading but not the hidden
 tests); opencode's 8 include one 600s timeout.
 
+## HumanEval — gemma4:26b, baseline protocol vs rift agentic (2026-06-12)
+
+All 164 problems, two protocols, same model and server (`bench/humaneval.py`):
+the **baseline** follows the standard benchmark protocol (one completion, no
+tools, no feedback — what official numbers report); **rift** gives the same
+model its agent loop in a scratch repo where it can run the official tests and
+fix its own mistakes.
+
+| protocol | pass@1 | failed |
+|---|---:|---|
+| baseline one-shot | 162/164 = **98.8%** | #92, #145 |
+| rift agentic | 162/164 = **98.8%** | #76, #145 |
+
+Verdict: HumanEval is saturated at this model's level — there is no headroom
+for a harness to demonstrate uplift (the ceiling is 1.2 points away). The
+mechanism still showed itself: rift solved #92, which one-shot generation
+fails, by running the tests and iterating. Demonstrating a 10–15% uplift
+requires a benchmark with a non-saturated baseline (HumanEval+/EvalPlus or
+harder agentic suites) — planned next.
+
 ## Caveats (honest ones)
 
 - Small suite, single run per task, nondeterministic models: treat as directional, not a rigorous eval. Observed run-to-run variance on the same task was ~±30% tokens for opencode (40k–71k on t1).
