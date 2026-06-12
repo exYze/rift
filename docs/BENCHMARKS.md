@@ -43,6 +43,33 @@ within the ±30% run-to-run variance noted below. The harness fixes target failu
 modes this small suite doesn't exercise (dev servers, fuzzy edit misses); their
 payoff shows on real-world agentic sessions.
 
+## 50-task suite (2026-06-12, rift v0.4.1 hardened vs opencode v1.14.48)
+
+![50-task results](assets/benchmark-50.svg)
+
+The suite grew from 5 to 50 tasks (`bench/tasks/`): planted arithmetic/logic/string
+bugs, collection handling, edge cases, implement-from-docstring, multi-file fixes,
+and refactors — every task verified by a script that fails pre-fix (self-checked).
+
+| metric (50 tasks) | rift | opencode | delta |
+|---|---:|---:|---|
+| tasks solved | **44/50** | 42/50 | +2 |
+| prompt tokens (wire) | **1,250,659** | 2,926,446 | **−57.3%** |
+| output tokens | **68,420** | 103,708 | −34% |
+| wall time | **26.8 min** | 90.8 min | **3.4× faster** |
+| LLM calls | 501 | 435 | +15% |
+
+What the run surfaced (and fixed — kept for honesty): at gemma's server-default
+temperature the same task alternated between a clean agentic run and a "chat-only"
+answer (the model pastes the fix into its reply and never edits the file). Three
+harness layers now address it — temperature pinned to 0.2 by default, a one-shot
+"apply your changes with the tools" nudge, and (headless/swarm work items only) a
+full-turn greedy retry at temperature 0. Those layers took rift from 35/50 to
+44/50 on this suite with zero per-task tuning; opencode's number is from the same
+session, same wire measurement. rift's 6 remaining failures are genuine model
+mistakes (wrong logic that passes the model's own reading but not the hidden
+tests); opencode's 8 include one 600s timeout.
+
 ## Caveats (honest ones)
 
 - Small suite, single run per task, nondeterministic models: treat as directional, not a rigorous eval. Observed run-to-run variance on the same task was ~±30% tokens for opencode (40k–71k on t1).

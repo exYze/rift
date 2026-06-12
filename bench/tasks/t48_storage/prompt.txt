@@ -1,0 +1,1 @@
+Extend storage.py: save(key, value) must return True on success, and add load(key, default=None) returning the saved value or the default. Keep the module-level dict approach.

@@ -1,0 +1,1 @@
+truncate(s, n) in text.py should return s unchanged when it fits, otherwise cut it so the result INCLUDING a trailing single-character ellipsis '…' is exactly n characters. truncate('hello world', 8) == 'hello w…'. Fix it.

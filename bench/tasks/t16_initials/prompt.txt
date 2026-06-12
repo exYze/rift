@@ -1,0 +1,1 @@
+initials('ada lovelace') in names.py should return 'AL' (uppercase) but returns 'al'. Fix it.

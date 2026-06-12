@@ -1,0 +1,1 @@
+deep_get(d, path, default=None) in dicts.py reads a dotted path like 'a.b' from nested dicts. It currently raises KeyError when any key is missing; it should return the default instead.

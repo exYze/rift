@@ -1,0 +1,1 @@
+median(xs) in stats.py is wrong for even-length lists: median([1,2,3,4]) should be 2.5 (mean of the two middle values) but returns 3. Fix it.

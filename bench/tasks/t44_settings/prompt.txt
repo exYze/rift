@@ -1,0 +1,1 @@
+effective(user_settings) in settings.py should overlay the user's settings on top of DEFAULTS, but defaults are currently overriding the user. effective({'theme':'dark'})['theme'] must be 'dark', while unset keys fall back to defaults. Fix it.

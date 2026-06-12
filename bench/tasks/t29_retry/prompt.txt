@@ -1,0 +1,1 @@
+retry(f, attempts) in retry.py should call f up to `attempts` times, returning the first successful result and re-raising the last exception only if every attempt fails. It currently calls f exactly once.

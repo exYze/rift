@@ -2,7 +2,9 @@
 
 A fast, flicker-free terminal coding agent built in Rust for **local models via Ollama's native API** — no Node, no Python, one 9.5MB binary.
 
-**Benchmarked vs opencode** (same model, same Ollama server, wire-measured tokens): equal task success, **80% fewer prompt tokens, 2.3× faster** — see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+**Benchmarked vs opencode** on a 50-task suite (same model, same Ollama server, wire-measured tokens): **more tasks solved (44 vs 42), 57% fewer prompt tokens, 3.4× faster** — see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+![rift vs opencode — 50-task suite](docs/assets/benchmark-50.svg)
 
 Rift is a ground-up Rust answer to opencode/Crush-style agents, designed around the three failure modes that plague them with local models:
 

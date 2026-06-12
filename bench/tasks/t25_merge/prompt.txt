@@ -1,0 +1,1 @@
+merge(base, override) in conf.py must let override win on key conflicts: merge({'x':1}, {'x':2,'y':3}) == {'x':2,'y':3}. It's backwards. Fix it.

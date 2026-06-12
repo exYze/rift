@@ -1,0 +1,1 @@
+temps.py has c_to_f. Add the inverse function f_to_c(f) so that round-trips are exact for any value: f_to_c(c_to_f(25)) == 25.0 and f_to_c(32) == 0.0.

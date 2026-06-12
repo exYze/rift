@@ -1,0 +1,1 @@
+report.total_area mixes up area and perimeter for circles: total_area([('rect',2,3),('circle',1)]) should be about 9.14 (6 + pi). Fix the bug (files: shapes.py, report.py).

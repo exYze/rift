@@ -1,0 +1,1 @@
+fizzbuzz(n) in fizz.py never returns 'FizzBuzz' for multiples of 15 because the checks are in the wrong order. Fix it.

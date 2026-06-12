@@ -1,0 +1,1 @@
+clamp(v, lo, hi) in num.py should constrain v to the range [lo, hi], but it returns wrong values (clamp(5, 0, 10) returns 0). Fix it.

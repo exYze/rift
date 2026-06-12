@@ -1,0 +1,1 @@
+forms.py imports is_email from validators.py but it was never written, so the module crashes on import. Implement a basic is_email(s): must contain exactly one '@' with a non-empty local part, and a '.' somewhere after the '@'.

@@ -1,0 +1,1 @@
+app.process('boom') should return '[error] boom' but returns '[boom] error' — somewhere the logger arguments are crossed. Fix it (files: logger.py, app.py).

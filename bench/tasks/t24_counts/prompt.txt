@@ -1,0 +1,1 @@
+counts(text) in freq.py should count word occurrences: counts('a b a') == {'a': 2, 'b': 1}. Every count currently comes back as 1. Fix it.

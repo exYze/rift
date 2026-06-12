@@ -1,0 +1,1 @@
+is_leap(year) in dates.py uses the naive %4 rule. Implement the full Gregorian rule: divisible by 4, except centuries unless divisible by 400.

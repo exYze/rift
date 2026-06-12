@@ -1,0 +1,1 @@
+Implement encode in rle.py per its docstring.

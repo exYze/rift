@@ -1,0 +1,1 @@
+is_palindrome(s) in pal.py should ignore case and spaces: 'Race car' is a palindrome. Currently it does a strict comparison. Fix it.

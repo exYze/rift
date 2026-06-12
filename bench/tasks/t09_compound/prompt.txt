@@ -1,0 +1,1 @@
+compound(principal, rate, years) in interest.py should compound annually: 1000 at 10% for 2 years = 1210.0. It currently returns simple growth. Fix it (round the result to 2 decimals).

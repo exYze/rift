@@ -1,0 +1,1 @@
+Implement humanize in dur.py per its docstring.

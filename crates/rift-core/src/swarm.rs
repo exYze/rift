@@ -212,6 +212,7 @@ pub async fn run_swarm(
 
             cfg.model = cand.model.clone();
             cfg.temperature = cand.temperature;
+            cfg.always_task = true;
             // Per-model capability check: never send think to a non-thinking
             // model, clamp num_ctx to the model's max.
             match client.show(&cand.model).await {

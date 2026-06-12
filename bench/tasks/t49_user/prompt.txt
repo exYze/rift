@@ -1,0 +1,1 @@
+main.py crashes because User requires an email. Make email optional with default '' (keeping name required) so both constructions work.

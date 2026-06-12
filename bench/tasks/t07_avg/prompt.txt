@@ -1,0 +1,1 @@
+average(xs) in calc.py crashes with ZeroDivisionError when xs is empty. It should return 0.0 for an empty list and keep working normally otherwise.

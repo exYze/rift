@@ -1,0 +1,1 @@
+pluralize(word) in words.py naively appends 's'. English words ending in s, x, ch, or sh take 'es' (box -> boxes, church -> churches). Fix it.

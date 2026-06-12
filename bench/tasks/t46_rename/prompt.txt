@@ -1,0 +1,1 @@
+Rename the function `calc` to `calculate_total` everywhere it appears (it is defined in orders.py and used in report.py). Behavior must not change, and the old name must be gone.

@@ -1,0 +1,1 @@
+Receipts are adding 80% tax instead of 8%. cart.total(100) should be 108.0. Find and fix the bug (it spans constants.py and cart.py).

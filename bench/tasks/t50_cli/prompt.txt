@@ -1,0 +1,1 @@
+parse_args(argv) in cli.py should support '--name VALUE' (string, default None) and '--loud' (boolean flag, default False), returning {'name': ..., 'loud': ...}. The current version is broken: the flag eats the next argument and defaults are missing. Fix it.

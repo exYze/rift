@@ -1,0 +1,1 @@
+read_config(path) in cfg.py should return {} when the file doesn't exist instead of raising FileNotFoundError. It parses JSON otherwise — keep that.

@@ -32,6 +32,10 @@ pub struct AgentConfig {
     /// None = server default. Only set true after confirming the model has the
     /// "thinking" capability (otherwise Ollama returns a 400).
     pub think: Option<bool>,
+    /// The prompt is known to be a work item (headless --prompt, swarm
+    /// candidates): a turn that ends without any tool use always gets the
+    /// apply-your-changes nudge, regardless of phrasing.
+    pub always_task: bool,
 }
 
 impl Default for AgentConfig {
@@ -39,9 +43,13 @@ impl Default for AgentConfig {
         Self {
             model: "gemma4:26b".into(),
             num_ctx: 32_768,
-            temperature: None,
+            // Local models' server-default temperature (often 0.7-1.0) makes
+            // tool-calling flaky: the same task alternates between a proper
+            // agentic run and a chat-only answer. Pin low for reliability.
+            temperature: Some(0.2),
             max_iterations: 25,
             think: None,
+            always_task: false,
         }
     }
 }
@@ -153,12 +161,22 @@ impl Agent {
     ) -> Result<TurnStats> {
         self.messages.push(Message::user(user_input));
         self.ctx.begin_turn();
+        // Everything before this index survives a greedy retry; the user
+        // message itself is kept.
+        let turn_start = self.messages.len();
 
         let tools = self.registry.tool_defs();
         let known = self.registry.names();
         let start = Instant::now();
         let mut stats = TurnStats::default();
         let mut repeat_counts: HashMap<String, u32> = HashMap::new();
+        // Chat-only failure mode: small models sometimes "answer" a coding
+        // task by pasting the fix into the reply without touching any file.
+        let mut used_tools = false;
+        let mut nudged_apply = false;
+        let mut retried_greedy = false;
+        let mut temp_override: Option<f64> = None;
+        let actionable_prompt = self.cfg.always_task || prompt_looks_actionable(user_input);
 
         let tools_overhead =
             compact::estimate_tokens(&serde_json::to_string(&tools).unwrap_or_default());
@@ -198,7 +216,7 @@ impl Agent {
                 keep_alive: Some("10m".into()),
                 options: Some(ChatOptions {
                     num_ctx: Some(self.cfg.num_ctx),
-                    temperature: self.cfg.temperature,
+                    temperature: temp_override.or(self.cfg.temperature),
                     num_predict: None,
                 }),
             };
@@ -260,13 +278,46 @@ impl Agent {
             }
 
             let tool_calls = msg.tool_calls.clone();
+            let content_has_code = msg.content.contains("```");
             self.messages.push(msg);
 
             if tool_calls.is_empty() {
+                // The model finished without touching a tool this turn even
+                // though the prompt asked for changes (or its reply contains
+                // code) — it likely "fixed" the task in chat instead of in
+                // the files. Nudge once to apply for real.
+                if !used_tools && !nudged_apply && (content_has_code || actionable_prompt) {
+                    nudged_apply = true;
+                    let _ = tx.send(AgentEvent::Warning(
+                        "model replied with code but didn't modify any files; nudging it to apply the change".into(),
+                    ));
+                    self.messages.push(Message::user(
+                        "[system] You wrote code in your reply but did not change any project files. \
+                         If the request was to fix/implement something, apply it now using the read/edit/write \
+                         tools and verify the result. If the user only wanted an explanation, restate your \
+                         answer briefly without code.",
+                    ));
+                    continue;
+                }
+                // Known work item, still no tool use after the nudge: scrap
+                // the chat-only attempt entirely and retry greedily — at
+                // temperature 0 the model reliably follows the tool-calling
+                // instructions. Headless/swarm only (no human to confuse).
+                if !used_tools && !retried_greedy && self.cfg.always_task {
+                    retried_greedy = true;
+                    nudged_apply = false;
+                    temp_override = Some(0.0);
+                    self.messages.truncate(turn_start);
+                    let _ = tx.send(AgentEvent::Warning(
+                        "model never used tools on a work item; retrying the turn at temperature 0".into(),
+                    ));
+                    continue;
+                }
                 stats.duration_ms = start.elapsed().as_millis();
                 let _ = tx.send(AgentEvent::Done(stats.clone()));
                 return Ok(stats);
             }
+            used_tools = true;
 
             for call in tool_calls {
                 let requested_name = call.function.name.clone();
@@ -342,6 +393,18 @@ impl Agent {
         let _ = tx.send(AgentEvent::Done(stats.clone()));
         Ok(stats)
     }
+}
+
+/// Does the user's prompt ask for changes (vs. a question/explanation)?
+/// Drives the no-tools nudge — imprecise on purpose; a false positive just
+/// costs the model one short clarification round.
+fn prompt_looks_actionable(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    const VERBS: &[&str] = &[
+        "fix", "implement", "add ", "refactor", "rename", "create", "write ", "update",
+        "change", "make ", "remove", "delete", "extend", "convert", "build ",
+    ];
+    VERBS.iter().any(|v| p.contains(v))
 }
 
 /// Weak models occasionally leak chat-template special tokens (e.g.

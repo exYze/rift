@@ -1,0 +1,1 @@
+flatten(xs) in seq.py takes a list of lists and should return a single flat list: flatten([[1,2],[3]]) == [1,2,3]. It currently returns the input unchanged. Fix it.

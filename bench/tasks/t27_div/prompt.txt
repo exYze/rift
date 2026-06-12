@@ -1,0 +1,1 @@
+safe_divide(a, b) in math2.py should return None when b is zero instead of raising ZeroDivisionError.

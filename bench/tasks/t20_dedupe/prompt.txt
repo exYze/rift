@@ -1,0 +1,1 @@
+dedupe(xs) in seq.py must preserve first-seen order: dedupe([3,1,3,2,1]) == [3,1,2]. The current set() implementation loses order. Fix it.

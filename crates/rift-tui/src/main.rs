@@ -43,6 +43,9 @@ struct Cli {
     /// Ask before every write/edit/bash action (also: permissions.approve in config)
     #[arg(long)]
     approve: bool,
+    /// Sampling temperature (low = reliable tool calling)
+    #[arg(long, default_value_t = 0.2)]
+    temp: f64,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -125,9 +128,10 @@ async fn main() -> Result<()> {
     let cfg = AgentConfig {
         model: cli.model.clone(),
         num_ctx,
-        temperature: None,
+        temperature: Some(cli.temp),
         max_iterations: cli.max_iterations,
         think,
+        always_task: cli.prompt.is_some(),
     };
 
     // Config: MCP servers + permission policy.
@@ -271,9 +275,10 @@ async fn run_swarm_cli(
     let cfg_base = AgentConfig {
         model: String::new(), // set per candidate
         num_ctx: cli.num_ctx,
-        temperature: None,
+        temperature: Some(cli.temp),
         max_iterations: cli.max_iterations,
         think: None,
+        always_task: true,
     };
 
     use std::io::IsTerminal;

@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Render docs/assets/benchmark-50.svg from bench/results.json.
+
+A repo-friendly dark-theme SVG: headline cards (success, prompt tokens,
+wall time) with proportional bars for each agent.
+"""
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+RESULTS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "results.json")
+OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "..", "docs", "assets", "benchmark-50.svg")
+
+BG, CARD, BORDER = "#0d1117", "#161b22", "#30363d"
+FG, DIM = "#e6edf3", "#8b949e"
+RIFT_C, OC_C, GOOD = "#39c5cf", "#8b949e", "#3fb950"
+
+
+def agg(results, agent):
+    rs = [r for r in results if r["agent"] == agent]
+    return {
+        "n": len(rs),
+        "ok": sum(1 for r in rs if r["ok"]),
+        "prompt": sum(r["prompt_tok"] for r in rs),
+        "out": sum(r["output_tok"] for r in rs),
+        "secs": round(sum(r["secs"] for r in rs), 1),
+        "calls": sum(r["llm_calls"] for r in rs),
+    }
+
+
+def fmt_tok(n):
+    return f"{n/1000:.0f}k" if n >= 10000 else str(n)
+
+
+def bar(x, y, w_frac, width, color, label, value):
+    bw = max(4, int(width * w_frac))
+    return (
+        f'<text x="{x}" y="{y + 11}" font-size="13" fill="{DIM}">{label}</text>'
+        f'<rect x="{x + 86}" y="{y}" width="{bw}" height="16" rx="4" fill="{color}"/>'
+        f'<text x="{x + 86 + bw + 8}" y="{y + 13}" font-size="13" font-weight="600" fill="{FG}">{value}</text>'
+    )
+
+
+def main():
+    with open(RESULTS) as f:
+        results = json.load(f)
+    rift, oc = agg(results, "rift"), agg(results, "opencode")
+    n = rift["n"]
+
+    tok_save = (1 - rift["prompt"] / oc["prompt"]) * 100 if oc["prompt"] else 0
+    speedup = oc["secs"] / rift["secs"] if rift["secs"] else 0
+
+    cards = [
+        ("tasks solved", f'{rift["ok"]}/{n}', f'{oc["ok"]}/{n}',
+         rift["ok"] / n, oc["ok"] / n,
+         f'{"+" if rift["ok"] >= oc["ok"] else ""}{rift["ok"] - oc["ok"]} tasks'),
+        ("prompt tokens (wire-measured)", fmt_tok(rift["prompt"]), fmt_tok(oc["prompt"]),
+         rift["prompt"] / max(rift["prompt"], oc["prompt"]),
+         oc["prompt"] / max(rift["prompt"], oc["prompt"]),
+         f'−{tok_save:.0f}% tokens'),
+        ("wall time", f'{rift["secs"]/60:.0f}m {rift["secs"]%60:.0f}s', f'{oc["secs"]/60:.0f}m {oc["secs"]%60:.0f}s',
+         rift["secs"] / max(rift["secs"], oc["secs"]),
+         oc["secs"] / max(rift["secs"], oc["secs"]),
+         f'{speedup:.1f}× faster'),
+    ]
+
+    W, H = 1280, 560
+    parts = [
+        f'<svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" '
+        f'font-family="-apple-system, \'Segoe UI\', Helvetica, Arial, sans-serif">',
+        f'<rect width="{W}" height="{H}" rx="14" fill="{BG}"/>',
+        f'<text x="55" y="56" font-size="28" font-weight="700" fill="{FG}">rift <tspan fill="{RIFT_C}">vs opencode</tspan> — {n}-task suite</text>',
+        f'<text x="55" y="84" font-size="14" fill="{DIM}">same model (gemma4:26b) · same Ollama server · same prompts · tokens measured on the wire by a recording proxy</text>',
+        f'<text x="{W-55}" y="56" font-size="13" fill="{DIM}" text-anchor="end">github.com/exYze/rift</text>',
+    ]
+
+    card_w, card_h, gap = 380, 330, 30
+    x0 = (W - 3 * card_w - 2 * gap) / 2
+    y0 = 120
+    bar_w = card_w - 200
+    for i, (title, rv, ov, rfrac, ofrac, delta) in enumerate(cards):
+        x = x0 + i * (card_w + gap)
+        parts.append(f'<rect x="{x}" y="{y0}" width="{card_w}" height="{card_h}" rx="10" fill="{CARD}" stroke="{BORDER}" stroke-width="1.5"/>')
+        parts.append(f'<text x="{x+24}" y="{y0+38}" font-size="15" font-weight="600" fill="{FG}">{title}</text>')
+        parts.append(f'<text x="{x+24}" y="{y0+102}" font-size="40" font-weight="700" fill="{RIFT_C}">{rv}</text>')
+        parts.append(f'<text x="{x+24}" y="{y0+126}" font-size="13" fill="{DIM}">rift</text>')
+        parts.append(f'<text x="{x+card_w-24}" y="{y0+102}" font-size="28" font-weight="600" fill="{DIM}" text-anchor="end">{ov}</text>')
+        parts.append(f'<text x="{x+card_w-24}" y="{y0+126}" font-size="13" fill="{DIM}" text-anchor="end">opencode</text>')
+        parts.append(bar(x + 24, y0 + 160, rfrac, bar_w, RIFT_C, "rift", rv))
+        parts.append(bar(x + 24, y0 + 190, ofrac, bar_w, OC_C, "opencode", ov))
+        parts.append(f'<rect x="{x+24}" y="{y0+240}" width="{card_w-48}" height="40" rx="8" fill="{BG}" stroke="{GOOD}" stroke-width="1"/>')
+        parts.append(f'<text x="{x+card_w/2}" y="{y0+266}" font-size="17" font-weight="700" fill="{GOOD}" text-anchor="middle">{delta}</text>')
+
+    parts.append(
+        f'<text x="{W/2}" y="{H-30}" font-size="12.5" fill="{DIM}" text-anchor="middle">'
+        f'{n} tasks: planted bugs, missing features, multi-file fixes, refactors — pass/fail decided by per-task verification scripts · '
+        f'rift {rift["calls"]} LLM calls vs opencode {oc["calls"]} · full methodology in docs/BENCHMARKS.md</text>'
+    )
+    parts.append("</svg>")
+
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    with open(OUT, "w") as f:
+        f.write("\n".join(parts) + "\n")
+    print(f"wrote {OUT}")
+    print(f"rift:     {rift}")
+    print(f"opencode: {oc}")
+
+
+if __name__ == "__main__":
+    main()

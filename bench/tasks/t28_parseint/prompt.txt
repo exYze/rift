@@ -1,0 +1,1 @@
+parse_int(s) in nums.py should return the integer for strings like ' 42 ' and None for non-numeric strings like 'abc' (it currently raises ValueError).

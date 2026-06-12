@@ -1,0 +1,1 @@
+parse_line(s) in csvish.py should split on commas AND strip whitespace around each field: parse_line('a, b , c') == ['a', 'b', 'c']. Fix it.
