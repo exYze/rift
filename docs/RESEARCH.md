@@ -28,4 +28,4 @@ Tools-capable models: gemma4:12b (tools,thinking,vision), gemma4:26b (tools,thin
 
 ## Benchmark targets (for the ≥10% efficiency goal)
 
-Candidate baselines: opencode + same Ollama model; aider benchmark harness (polyglot); SWE-bench-lite subset; token-efficiency metric = task success per prompt token. Headless `gw --prompt` is the harness entry point. TBD in a later iteration.
+Candidate baselines: opencode + same Ollama model; aider benchmark harness (polyglot); SWE-bench-lite subset; token-efficiency metric = task success per prompt token. Headless `rift --prompt` is the harness entry point. TBD in a later iteration.

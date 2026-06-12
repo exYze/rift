@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GhostWriter benchmark harness.
+"""Rift benchmark harness.
 
 Runs each agent over the task suite in bench/tasks/. Every task is copied to
 a fresh temp git repo; the agent gets the task prompt headless; success is
@@ -7,7 +7,7 @@ decided by the task's verify.sh; token counts come from the recording proxy
 (proxy.py), measured identically for every agent from the wire.
 
 Usage:
-  python3 bench.py [agent ...]        # default: ghostwriter opencode
+  python3 bench.py [agent ...]        # default: rift opencode
   (start proxy.py first)
 """
 import json
@@ -21,7 +21,7 @@ import time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TOKEN_LOG = "/tmp/rift-bench-tokens.jsonl"
 PROXY = "http://127.0.0.1:11435"
-GW = os.path.join(ROOT, "..", "target", "release", "rift")
+RIFT = os.path.join(ROOT, "..", "target", "release", "rift")
 MODEL = "gemma4:26b"
 TIMEOUT = 600
 
@@ -40,8 +40,8 @@ OPENCODE_CONFIG = {
 
 
 def agent_cmd(agent, prompt):
-    if agent == "ghostwriter":
-        return [GW, "--host", PROXY, "--model", MODEL, "--prompt", prompt]
+    if agent == "rift":
+        return [RIFT, "--host", PROXY, "--model", MODEL, "--prompt", prompt]
     if agent == "opencode":
         return ["opencode", "run", "-m", f"benchprox/{MODEL}", prompt]
     raise SystemExit(f"unknown agent {agent}")
@@ -134,7 +134,7 @@ def run_task(agent, task):
 
 
 def main():
-    agents = sys.argv[1:] or ["ghostwriter", "opencode"]
+    agents = sys.argv[1:] or ["rift", "opencode"]
     tasks = sorted(d for d in os.listdir(os.path.join(ROOT, "tasks"))
                    if os.path.isdir(os.path.join(ROOT, "tasks", d)))
     results = []

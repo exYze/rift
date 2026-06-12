@@ -233,7 +233,7 @@ async fn main() -> Result<()> {
     }
 }
 
-/// `gw swarm`: race N models on one task in parallel worktrees. Interactive
+/// `rift swarm`: race N models on one task in parallel worktrees. Interactive
 /// TUI by default on a terminal; plain streaming with --no-tui (or piped).
 async fn run_swarm_cli(
     client: OllamaClient,
@@ -337,7 +337,7 @@ async fn run_swarm_cli(
             None => println!("  changes: {}", o.diff_stat),
         }
     }
-    println!("\napply a winner with: gw merge <name> [--cleanup]   (worktrees kept under .rift/worktrees/)");
+    println!("\napply a winner with: rift merge <name> [--cleanup]   (worktrees kept under .rift/worktrees/)");
     Ok(())
 }
 

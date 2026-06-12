@@ -1,11 +1,11 @@
-# GhostWriter vs opencode — token efficiency benchmark
+# Rift vs opencode — token efficiency benchmark
 
 **Date:** 2026-06-11 · **Model:** gemma4:26b (Q4_K_M) · **Server:** a private single-GPU Ollama server on the local network
-**Baseline:** opencode v1.14.48 (installed via Homebrew) · **GhostWriter:** v0.1.0 release build
+**Baseline:** opencode v1.14.48 (installed via Homebrew) · **Rift:** v0.1.0 release build (pre-rename, then called GhostWriter)
 
 ## Headline
 
-| metric (5-task suite) | GhostWriter | opencode | delta |
+| metric (5-task suite) | Rift | opencode | delta |
 |---|---:|---:|---|
 | tasks solved | **5/5** | 5/5 | tied |
 | prompt tokens (total) | **54,431** | 277,110 | **−80.4%** (5.1× fewer) |
@@ -13,11 +13,11 @@
 | wall time (total) | **128.8s** | 300.4s | **−57%** (2.3× faster) |
 | LLM calls | 33 | 32 | ~equal |
 
-Equal task success, **80% fewer prompt tokens and 2.3× faster** — far past the ≥10% efficiency target. The win is structural: GhostWriter's system prompt + tool schemas cost ~1.5k tokens per call and old tool outputs are pruned by the Compactor; opencode re-sends a ~9–10k-token preamble on every call.
+Equal task success, **80% fewer prompt tokens and 2.3× faster** — far past the ≥10% efficiency target. The win is structural: Rift's system prompt + tool schemas cost ~1.5k tokens per call and old tool outputs are pruned by the Compactor; opencode re-sends a ~9–10k-token preamble on every call.
 
 ## Per-task results
 
-| task | gw ok | gw secs | gw prompt | oc ok | oc secs | oc prompt |
+| task | rift ok | rift secs | rift prompt | oc ok | oc secs | oc prompt |
 |---|---|---:|---:|---|---:|---:|
 | t1_offbyone (fix arithmetic bug) | ✓ | 12.0 | 8,700 | ✓ | 38.0 | 40,492 |
 | t2_default (honor default arg) | ✓ | 13.3 | 9,814 | ✓ | 37.0 | 40,676 |
@@ -31,7 +31,7 @@ Equal task success, **80% fewer prompt tokens and 2.3× faster** — far past th
 - **Isolation:** each run gets a fresh temp git repo (copy of the fixture). For opencode, additionally a throwaway `$HOME` per task so no global config/session state leaks (see harness notes).
 - **Token counting:** a recording reverse proxy (`bench/proxy.py`) sits between the agent and Ollama and logs `prompt_eval_count`/`eval_count` (native API) and `usage.*` (OpenAI-compat) from the wire — both tools measured identically, no self-reported stats.
 - **Both agents:** same model, same server, same prompts, headless one-shot mode, 600s timeout. opencode's first-run project initialization is excluded via an untimed warmup call before the token mark.
-- **Reproduce:** `python3 bench/proxy.py & python3 bench/bench.py ghostwriter opencode`
+- **Reproduce:** `python3 bench/proxy.py & python3 bench/bench.py rift opencode`
 
 ## Re-validation (2026-06-11, v0.3.5 harness hardening)
 
@@ -46,9 +46,9 @@ payoff shows on real-world agentic sessions.
 ## Caveats (honest ones)
 
 - Small suite, single run per task, nondeterministic models: treat as directional, not a rigorous eval. Observed run-to-run variance on the same task was ~±30% tokens for opencode (40k–71k on t1).
-- Tasks are small and single-purpose; they don't measure long-session behavior (where GhostWriter's compaction should widen the gap, but that's unmeasured here).
+- Tasks are small and single-purpose; they don't measure long-session behavior (where Rift's compaction should widen the gap, but that's unmeasured here).
 - Wall time on a shared single-GPU server includes prompt-processing time, which itself scales with prompt size — the speed win is partly a consequence of the token win.
-- opencode went 5/5 here once configured correctly; the widely-reported "bad outputs with Ollama" failures are mostly configuration/`num_ctx` pitfalls that GhostWriter eliminates by design rather than model capability.
+- opencode went 5/5 here once configured correctly; the widely-reported "bad outputs with Ollama" failures are mostly configuration/`num_ctx` pitfalls that Rift eliminates by design rather than model capability.
 
 ## Harness bugs found while benchmarking (kept for honesty)
 

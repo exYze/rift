@@ -1,5 +1,9 @@
 # Rift — project state
 
+> Historical note: iterations 1–7 below predate the GhostWriter → Rift rename
+> (the project shipped as `gw`/`gw-*` crates until iteration 8). Old names in
+> those sections are left as they were at the time.
+
 Updated: 2026-06-11 (iteration 8 — slash commands; renamed GhostWriter → Rift, published to github.com/exYze/rift)
 
 ## Vision
