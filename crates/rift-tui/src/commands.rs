@@ -523,7 +523,7 @@ fn cmd_approve(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Resu
     Ok(format!("approval: {state}"))
 }
 
-const CONFIG_TEMPLATE: &str = "{\n  \"mcp\": {},\n  \"permissions\": {\"bash_deny\": [], \"approve\": false}\n}\n";
+const CONFIG_TEMPLATE: &str = "{\n  \"host\": \"http://localhost:11434\",\n  \"model\": \"gemma4:26b\",\n  \"mcp\": {},\n  \"permissions\": {\"bash_deny\": [], \"approve\": false}\n}\n";
 
 fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     match arg {
@@ -567,7 +567,7 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
             agent.ctx().set_approval(config.permissions.approve);
             cx.config_path = path;
             let msg = format!(
-                "config reloaded — approval {}, {} user deny pattern(s) (MCP server changes need a restart)",
+                "config reloaded — approval {}, {} user deny pattern(s) (host/model/MCP changes need a restart)",
                 if config.permissions.approve { "ON" } else { "off" },
                 config.permissions.bash_deny.len(),
             );

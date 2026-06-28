@@ -3,12 +3,18 @@
 //!
 //! ```json
 //! {
+//!   "host": "http://localhost:11434",
+//!   "model": "gemma4:26b",
 //!   "mcp": {
 //!     "fetch": {"command": "uvx", "args": ["mcp-server-fetch"], "env": {}}
 //!   },
 //!   "permissions": {"bash_deny": ["docker push *"]}
 //! }
 //! ```
+//!
+//! `host` and `model` are startup defaults so `rift` can run with no flags; a
+//! `--host`/`--model` flag or `RIFT_HOST`/`RIFT_MODEL` env var still overrides
+//! them.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,6 +26,13 @@ use crate::mcp::McpServerConfig;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
+    /// Default Ollama server URL. Overridden by `--host` / `RIFT_HOST`.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Default model (must have the "tools" capability). Overridden by
+    /// `--model` / `RIFT_MODEL`.
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
     #[serde(default)]
@@ -61,4 +74,26 @@ fn dirs_config() -> std::path::PathBuf {
     // Falls back to a CWD-relative `.config` only if no home dir can be found
     // at all (no HOME, no USERPROFILE) — practically never.
     crate::paths::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_host_and_model() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"host": "http://box:11434", "model": "qwen3"}"#).unwrap();
+        assert_eq!(cfg.host.as_deref(), Some("http://box:11434"));
+        assert_eq!(cfg.model.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn missing_fields_default_to_none() {
+        // An empty object, or one with only other keys, must still parse — the
+        // resolver treats absent host/model as "fall through to the default".
+        let cfg: Config = serde_json::from_str(r#"{"permissions": {"approve": true}}"#).unwrap();
+        assert!(cfg.host.is_none() && cfg.model.is_none());
+        assert!(cfg.permissions.approve);
+    }
 }

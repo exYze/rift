@@ -19,12 +19,12 @@ use tokio_util::sync::CancellationToken;
 #[derive(Parser, Debug)]
 #[command(name = "rift", version, about = "Rift — a fast terminal coding agent for local Ollama models")]
 struct Cli {
-    /// Ollama server URL
-    #[arg(long, env = "RIFT_HOST", default_value = "http://localhost:11434")]
-    host: String,
-    /// Model to use (must have the "tools" capability)
-    #[arg(long, short, env = "RIFT_MODEL", default_value = "gemma4:26b")]
-    model: String,
+    /// Ollama server URL [default: http://localhost:11434, or `host` in config]
+    #[arg(long, env = "RIFT_HOST")]
+    host: Option<String>,
+    /// Model to use, needs the "tools" capability [default: gemma4:26b, or `model` in config]
+    #[arg(long, short, env = "RIFT_MODEL")]
+    model: Option<String>,
     /// Context window to request per call (options.num_ctx)
     #[arg(long, default_value_t = 32_768)]
     num_ctx: u64,
@@ -82,7 +82,27 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = OllamaClient::new(&cli.host);
+
+    // Load config up front so it can supply defaults for host/model. Precedence
+    // for each: CLI flag > env var (clap folds both into `cli`) > config file >
+    // built-in default — so `rift` with no flags uses your configured server.
+    let cwd = std::env::current_dir()?;
+    let (config, config_path) = Config::load(&cwd)?;
+    if let Some(p) = &config_path {
+        eprintln!("config: {}", p.display());
+    }
+    let host = cli
+        .host
+        .clone()
+        .or_else(|| config.host.clone())
+        .unwrap_or_else(|| "http://localhost:11434".to_string());
+    let model = cli
+        .model
+        .clone()
+        .or_else(|| config.model.clone())
+        .unwrap_or_else(|| "gemma4:26b".to_string());
+
+    let client = OllamaClient::new(&host);
 
     // Subcommands bypass the single-model preflight (swarm preflights each
     // candidate itself; merge is git-only).
@@ -109,12 +129,12 @@ async fn main() -> Result<()> {
 
     // Preflight: verify the server is reachable and the model supports tools,
     // so failures are loud and early instead of mid-conversation.
-    let show = match client.show(&cli.model).await {
+    let show = match client.show(&model).await {
         Ok(s) => s,
-        Err(e) => bail!("cannot reach Ollama at {} or model '{}' missing: {e}", cli.host, cli.model),
+        Err(e) => bail!("cannot reach Ollama at {host} or model '{model}' missing: {e}"),
     };
     if !show.supports("tools") {
-        bail!("model '{}' does not have the 'tools' capability; pick a tools-capable model", cli.model);
+        bail!("model '{model}' does not have the 'tools' capability; pick a tools-capable model");
     }
     let think = if show.supports("thinking") { None } else { Some(false) };
     if let Some(max_ctx) = show.context_length() {
@@ -124,9 +144,8 @@ async fn main() -> Result<()> {
     }
     let num_ctx = show.context_length().map_or(cli.num_ctx, |m| m.min(cli.num_ctx));
 
-    let cwd = std::env::current_dir()?;
     let cfg = AgentConfig {
-        model: cli.model.clone(),
+        model: model.clone(),
         num_ctx,
         temperature: Some(cli.temp),
         max_iterations: cli.max_iterations,
@@ -134,11 +153,7 @@ async fn main() -> Result<()> {
         always_task: cli.prompt.is_some(),
     };
 
-    // Config: MCP servers + permission policy.
-    let (config, config_path) = Config::load(&cwd)?;
-    if let Some(p) = &config_path {
-        eprintln!("config: {}", p.display());
-    }
+    // MCP servers + permission policy come from the config loaded up top.
     let mut registry = ToolRegistry::standard();
     let mut mcp_status: Vec<(String, usize)> = vec![];
     for (name, server_cfg) in &config.mcp {
@@ -223,7 +238,7 @@ async fn main() -> Result<()> {
             app::run_tui(
                 agent,
                 app::TuiOptions {
-                    model: cli.model,
+                    model,
                     store,
                     resumed: resumed_messages,
                     mcp: mcp_status,
