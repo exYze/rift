@@ -960,13 +960,30 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     // Hand the terminal to $EDITOR, then take it back.
                     let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
                     ratatui::restore();
-                    let editor = std::env::var("EDITOR")
-                        .or_else(|_| std::env::var("VISUAL"))
-                        .unwrap_or_else(|_| "vi".into());
-                    let status = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(format!("{editor} '{}'", path.display()))
-                        .status();
+                    let status = {
+                        #[cfg(windows)]
+                        {
+                            let editor = std::env::var("EDITOR")
+                                .or_else(|_| std::env::var("VISUAL"))
+                                .unwrap_or_else(|_| "notepad".into());
+                            let shell = std::env::var("COMSPEC")
+                                .unwrap_or_else(|_| "cmd.exe".into());
+                            std::process::Command::new(shell)
+                                .arg("/C")
+                                .arg(format!("{editor} \"{}\"", path.display()))
+                                .status()
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            let editor = std::env::var("EDITOR")
+                                .or_else(|_| std::env::var("VISUAL"))
+                                .unwrap_or_else(|_| "vi".into());
+                            std::process::Command::new("sh")
+                                .arg("-c")
+                                .arg(format!("{editor} '{}'", path.display()))
+                                .status()
+                        }
+                    };
                     terminal = ratatui::init();
                     let _ = execute!(stdout(), EnableBracketedPaste);
                     if app.mouse_capture {

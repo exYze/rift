@@ -650,6 +650,26 @@ impl Tool for EditTool {
 
 // ---------------------------------------------------------------- bash
 
+/// Build a shell invocation for the host platform. On Windows commands run
+/// through `cmd.exe /C` (honoring %COMSPEC%); everywhere else through `sh -c`.
+/// This is what lets the bash tool behave the same on macOS, Linux and Windows
+/// instead of failing to spawn `sh` on Windows.
+fn shell_command(command: &str) -> tokio::process::Command {
+    #[cfg(windows)]
+    {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut cmd = tokio::process::Command::new(shell);
+        cmd.arg("/C").arg(command);
+        cmd
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+}
+
 struct BashTool;
 
 #[async_trait]
@@ -686,16 +706,15 @@ impl Tool for BashTool {
             timeout = timeout.min(SERVER_PROBE_SECS);
         }
 
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg(command)
-            .current_dir(&ctx.cwd)
+        let mut cmd = shell_command(command);
+        cmd.current_dir(&ctx.cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         // Own process group so a timeout can kill the whole tree
-        // (sh → npm → node → vite), not just the shell.
+        // (shell → npm → node → vite), not just the shell. On Windows the
+        // equivalent tree-kill is `taskkill /T` in the timeout branch below.
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -725,13 +744,26 @@ impl Tool for BashTool {
         let status = match tokio::time::timeout(Duration::from_secs(timeout), child.wait()).await {
             Ok(s) => Some(s?),
             Err(_) => {
-                #[cfg(unix)]
+                // Kill the whole process tree, not just the shell wrapper: on
+                // Unix via the negative-pid process group, on Windows via
+                // `taskkill /T` which walks and terminates child processes.
                 if let Some(pid) = pid {
-                    let _ = tokio::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(format!("kill -9 -{pid} 2>/dev/null"))
-                        .output()
-                        .await;
+                    #[cfg(unix)]
+                    {
+                        let _ = tokio::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(format!("kill -9 -{pid} 2>/dev/null"))
+                            .output()
+                            .await;
+                    }
+                    #[cfg(windows)]
+                    {
+                        let pid_str = pid.to_string();
+                        let _ = tokio::process::Command::new("taskkill")
+                            .args(["/F", "/T", "/PID", pid_str.as_str()])
+                            .output()
+                            .await;
+                    }
                 }
                 let _ = child.start_kill();
                 let _ = child.wait().await;

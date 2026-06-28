@@ -22,6 +22,7 @@ pub use tools::{
 /// num_ctx), explicit about tool mechanics, and firm that tool calls must be
 /// structured — the failure modes seen with Ollama-served models.
 pub fn system_prompt(cwd: &str) -> String {
+    let shell = shell_note();
     format!(
         "You are Rift, an expert coding agent working in the directory {cwd}.\n\
          \n\
@@ -29,6 +30,7 @@ pub fn system_prompt(cwd: &str) -> String {
          - Use the provided tools to inspect and modify files and run commands. \
            Invoke tools through the tool-calling mechanism only; NEVER write tool-call \
            JSON, XML, or pseudo-code into your reply text.\n\
+         - {shell}\n\
          - Explore cheaply: use repo_map to orient and outline to see a file's \
            structure; then read only the line ranges you need (offset/limit).\n\
          - For multi-step tasks, first call plan(set=[...]) with your intended \
@@ -45,6 +47,23 @@ pub fn system_prompt(cwd: &str) -> String {
            could be wrong; otherwise proceed on your best judgment.\n\
          - Be concise. Do not restate file contents the user can already see."
     )
+}
+
+/// One-line note about the host shell so the model emits commands the bash tool
+/// can actually run — cmd.exe on Windows has different builtins and quoting than
+/// POSIX sh. Compile-time `cfg` is correct here: the binary is platform-specific.
+fn shell_note() -> &'static str {
+    #[cfg(windows)]
+    {
+        "You are on Windows: the bash tool runs commands through cmd.exe, so use \
+         Windows command syntax (dir, type, del, copy, move, where; chain with &&, \
+         not ;). Prefer the read, repo_map, outline and grep tools over shell \
+         commands for inspecting files."
+    }
+    #[cfg(not(windows))]
+    {
+        "The bash tool runs commands through POSIX sh (sh -c)."
+    }
 }
 
 /// Cap on how much project context gets injected into the system prompt —
