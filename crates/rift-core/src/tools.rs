@@ -1291,7 +1291,12 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/App.jsx"), "x").unwrap();
         let hint = enoent_hint(&dir, &dir.join("App.jsx"));
-        assert!(hint.contains("src/App.jsx"), "should suggest the real path: {hint}");
+        // Normalize separators: enoent_hint renders paths via Display, which
+        // uses `\` on Windows, so compare against forward slashes either way.
+        assert!(
+            hint.replace('\\', "/").contains("src/App.jsx"),
+            "should suggest the real path: {hint}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
