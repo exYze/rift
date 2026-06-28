@@ -1005,7 +1005,14 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                 }
                 needs_redraw = true;
             }
-            if needs_redraw {
+            // Defer the (expensive) full redraw while more input is already
+            // queued, so a burst of events is consumed in a single frame. This
+            // matters most on Windows: crossterm has no bracketed paste there,
+            // so a paste arrives as a flood of individual key events. Redrawing
+            // between each one lets the app fall behind the finite console input
+            // buffer, which then silently drops the tail of long pastes. Drain
+            // the queue first, draw once — no more truncated pastes.
+            if needs_redraw && !event::poll(Duration::from_millis(0))? {
                 terminal.draw(|f| draw(f, &mut app))?;
                 needs_redraw = false;
             }
