@@ -50,6 +50,21 @@ fn parse_frontmatter(text: &str) -> (Option<String>, Option<String>, String) {
     (name, description, body)
 }
 
+/// Safety rail on a skill body before it reaches the model. Skills load on
+/// demand (the model or user explicitly asks for one), so this is deliberately
+/// generous — far larger than the per-session context-file cap — and only trims
+/// a pathologically large SKILL.md that would otherwise blow the context budget.
+const SKILL_BODY_MAX_CHARS: usize = 12_000;
+
+fn cap_body(body: String) -> String {
+    if body.chars().count() <= SKILL_BODY_MAX_CHARS {
+        return body;
+    }
+    let mut capped: String = body.chars().take(SKILL_BODY_MAX_CHARS).collect();
+    capped.push_str("\n\n[skill body truncated — keep SKILL.md focused]");
+    capped
+}
+
 fn skill_from_file(path: &Path, default_name: &str) -> Option<Skill> {
     let text = std::fs::read_to_string(path).ok()?;
     let (name, description, body) = parse_frontmatter(&text);
@@ -65,7 +80,7 @@ fn skill_from_file(path: &Path, default_name: &str) -> Option<Skill> {
     Some(Skill {
         name: name.unwrap_or_else(|| default_name.to_string()),
         description,
-        body,
+        body: cap_body(body),
         source: path.to_path_buf(),
     })
 }
@@ -98,11 +113,8 @@ fn scan_dir(dir: &Path, out: &mut Vec<Skill>) {
 pub fn load_skills(cwd: &Path) -> Vec<Skill> {
     let mut out = vec![];
     scan_dir(&cwd.join(".rift/skills"), &mut out);
-    if let Some(home) = std::env::var_os("HOME") {
-        let xdg = std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| Path::new(&home).join(".config"));
-        scan_dir(&xdg.join("rift/skills"), &mut out);
+    if let Some(cfg) = crate::paths::config_dir() {
+        scan_dir(&cfg.join("rift/skills"), &mut out);
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -199,5 +211,13 @@ mod tests {
         assert_eq!(skills[1].name, "haiku");
         assert!(skills[1].description.contains("Write a haiku"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_skill_body_is_capped() {
+        let capped = cap_body("x".repeat(SKILL_BODY_MAX_CHARS + 5000));
+        assert!(capped.chars().count() <= SKILL_BODY_MAX_CHARS + 100, "body not capped");
+        assert!(capped.contains("truncated"), "missing truncation marker");
+        assert_eq!(cap_body("short".into()), "short"); // small bodies untouched
     }
 }

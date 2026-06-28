@@ -1276,6 +1276,28 @@ mod tests {
         assert!(out.contains("dev server/watcher"), "server guidance missing: {out}");
     }
 
+    // Cross-platform: `echo <word>` and `exit <n>` behave the same under sh and
+    // cmd.exe, so these run on every OS and give the Windows bash path — which
+    // the #[cfg(unix)] timeout tests above can't reach — real coverage of
+    // spawn + stdout capture + exit-code reporting.
+    #[tokio::test]
+    async fn bash_runs_command_and_captures_output() {
+        let ctx = ToolCtx::new(std::env::temp_dir());
+        let mut args = Map::new();
+        args.insert("command".into(), Value::String("echo rift_xplat_marker".into()));
+        let out = BashTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("rift_xplat_marker"), "echo output missing: {out}");
+    }
+
+    #[tokio::test]
+    async fn bash_reports_nonzero_exit() {
+        let ctx = ToolCtx::new(std::env::temp_dir());
+        let mut args = Map::new();
+        args.insert("command".into(), Value::String("exit 3".into()));
+        let out = BashTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("exit code: 3"), "exit-code note missing: {out}");
+    }
+
     #[test]
     fn closest_line_points_at_near_match() {
         let text = "fn alpha() {}\nconst products = [ { id: 1, name: 'Classic' } ];\nfn omega() {}";
