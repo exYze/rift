@@ -1,0 +1,23 @@
+name: dev-build
+
+# Produce a downloadable Windows binary for manual testing of a branch,
+# without cutting a release. Trigger manually (workflow_dispatch) or by
+# pushing the branch under test.
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix-windows-paste-truncation]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p rift-tui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rift-windows-dev
+          path: target/release/rift.exe
+          if-no-files-found: error
