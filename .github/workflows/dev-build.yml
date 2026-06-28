@@ -1,0 +1,21 @@
+name: dev-build
+
+# Build a downloadable Windows binary for manually testing a branch without
+# cutting a release. Trigger from the Actions tab (Run workflow) or:
+#   gh workflow run dev-build.yml --ref <branch>
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p rift-tui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rift-windows-dev
+          path: target/release/rift.exe
+          if-no-files-found: error
