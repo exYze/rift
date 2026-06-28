@@ -7,12 +7,23 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Build and test on every platform we ship, not just Linux. The bash
+        # tool and the $EDITOR launch are platform-specific (cmd.exe vs sh), so
+        # a Linux-only matrix never compiled the Windows code paths — that gap
+        # let a Windows-breaking bug ship in 0.4.1.
+        os: [ubuntu-latest, macos-14, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
-      - run: cargo fmt --check
+      - name: rustfmt
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --check
         continue-on-error: true

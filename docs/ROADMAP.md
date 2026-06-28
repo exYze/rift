@@ -1,6 +1,6 @@
 # Rift roadmap
 
-Where rift goes from v0.3.x. Ordered by phase; each phase is shippable on its
+Where rift goes from v0.4.x. Ordered by phase; each phase is shippable on its
 own. Principles that don't change along the way:
 
 - **Local-first.** Everything works offline against your own server. Cloud
@@ -118,7 +118,8 @@ one implementation, not the foundation.
 - [ ] Demo GIF/VHS tape in the README (the single highest-leverage growth
   item — people install what they can see)
 - [ ] CHANGELOG.md, CONTRIBUTING.md, issue templates
-- [ ] CI test matrix on macOS/Linux/Windows (today: tests on Linux only)
+- [x] CI test matrix on macOS/Linux/Windows (build + test on all three landed
+  early, in 0.4.x — Linux-only CI had let a Windows bug ship)
 - [ ] Publish crates to crates.io (`rift-ollama` is useful standalone)
 
 ## v1.0 — The promise

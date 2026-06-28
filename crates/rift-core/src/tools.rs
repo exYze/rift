@@ -1242,6 +1242,10 @@ mod tests {
         assert!(!looks_like_server_command("ls -la"));
     }
 
+    // Unix-only: encodes POSIX shell behavior (`;` sequencing + `sleep`). The
+    // bash tool runs through cmd.exe on Windows, where this command would echo
+    // a literal string and exit instead of timing out.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_timeout_returns_partial_output() {
         let ctx = ToolCtx::new(std::env::temp_dir());
@@ -1253,6 +1257,9 @@ mod tests {
         assert!(out.contains("killed after 1s"), "timeout note missing: {out}");
     }
 
+    // Unix-only: relies on `tail -f /dev/null` blocking under sh (no cmd.exe
+    // equivalent), so it's gated to the POSIX shell path of the bash tool.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_server_probe_caps_default_timeout() {
         // No explicit timeout + server-like command → capped probe, output kept.
@@ -1284,7 +1291,12 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/App.jsx"), "x").unwrap();
         let hint = enoent_hint(&dir, &dir.join("App.jsx"));
-        assert!(hint.contains("src/App.jsx"), "should suggest the real path: {hint}");
+        // Normalize separators: enoent_hint renders paths via Display, which
+        // uses `\` on Windows, so compare against forward slashes either way.
+        assert!(
+            hint.replace('\\', "/").contains("src/App.jsx"),
+            "should suggest the real path: {hint}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
