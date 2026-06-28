@@ -1,4 +1,7 @@
 /target
 .rift/
+# Local project config may hold a private host/model — keep it out of git.
+# Commit .rift.json.example instead.
+.rift.json
 __pycache__/
 *.pyc

@@ -1,0 +1,9 @@
+{
+  "host": "http://localhost:11434",
+  "model": "gemma4:26b",
+  "mcp": {},
+  "permissions": {
+    "bash_deny": [],
+    "approve": false
+  }
+}
