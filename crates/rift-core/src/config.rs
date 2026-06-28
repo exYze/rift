@@ -58,9 +58,7 @@ impl Config {
 }
 
 fn dirs_config() -> std::path::PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return xdg.into();
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join(".config")
+    // Falls back to a CWD-relative `.config` only if no home dir can be found
+    // at all (no HOME, no USERPROFILE) — practically never.
+    crate::paths::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"))
 }

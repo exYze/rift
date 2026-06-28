@@ -22,8 +22,9 @@ pub struct SessionStore {
 }
 
 fn sessions_dir() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".local/share/rift/sessions"))
+    let dir = crate::paths::data_dir()
+        .context("could not determine a home directory (set HOME or USERPROFILE)")?;
+    Ok(dir.join("rift/sessions"))
 }
 
 impl SessionStore {

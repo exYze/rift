@@ -3,6 +3,7 @@ pub mod compact;
 pub mod config;
 pub mod mcp;
 pub mod outline;
+pub mod paths;
 pub mod session;
 pub mod skills;
 pub mod swarm;
