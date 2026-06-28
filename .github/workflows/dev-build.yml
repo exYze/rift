@@ -1,12 +1,10 @@
 name: dev-build
 
-# Produce a downloadable Windows binary for manual testing of a branch,
-# without cutting a release. Trigger manually (workflow_dispatch) or by
-# pushing the branch under test.
+# Build a downloadable Windows binary for manually testing a branch without
+# cutting a release. Trigger from the Actions tab (Run workflow) or:
+#   gh workflow run dev-build.yml --ref <branch>
 on:
   workflow_dispatch:
-  push:
-    branches: [fix-windows-paste-truncation]
 
 jobs:
   windows:
