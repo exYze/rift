@@ -1242,6 +1242,10 @@ mod tests {
         assert!(!looks_like_server_command("ls -la"));
     }
 
+    // Unix-only: encodes POSIX shell behavior (`;` sequencing + `sleep`). The
+    // bash tool runs through cmd.exe on Windows, where this command would echo
+    // a literal string and exit instead of timing out.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_timeout_returns_partial_output() {
         let ctx = ToolCtx::new(std::env::temp_dir());
@@ -1253,6 +1257,9 @@ mod tests {
         assert!(out.contains("killed after 1s"), "timeout note missing: {out}");
     }
 
+    // Unix-only: relies on `tail -f /dev/null` blocking under sh (no cmd.exe
+    // equivalent), so it's gated to the POSIX shell path of the bash tool.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_server_probe_caps_default_timeout() {
         // No explicit timeout + server-like command → capped probe, output kept.
