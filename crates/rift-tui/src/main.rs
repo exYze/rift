@@ -138,22 +138,44 @@ async fn main() -> Result<()> {
         None => {}
     }
 
-    // Preflight: verify the server is reachable and the model supports tools,
-    // so failures are loud and early instead of mid-conversation.
+    // Preflight: check the server is reachable and the model supports tools.
+    // In the interactive TUI this is non-fatal — open anyway and let the user
+    // recover with /host and /model. Headless (-p) runs still bail, since there
+    // is no interactive way to fix the server/model there.
+    let interactive = cli.prompt.is_none();
     let show = match client.show(&model).await {
-        Ok(s) => s,
+        Ok(s) => Some(s),
+        Err(e) if interactive => {
+            eprintln!("warning: cannot reach Ollama at {host} or model '{model}' missing: {e}");
+            eprintln!("opening anyway — use /host to set a reachable server, then /model to pick a model");
+            None
+        }
         Err(e) => bail!("cannot reach Ollama at {host} or model '{model}' missing: {e}"),
     };
-    if !show.supports("tools") {
-        bail!("model '{model}' does not have the 'tools' capability; pick a tools-capable model");
-    }
-    let think = if show.supports("thinking") { None } else { Some(false) };
-    if let Some(max_ctx) = show.context_length() {
-        if num_ctx > max_ctx {
-            eprintln!("warning: num_ctx {num_ctx} exceeds model max {max_ctx}; using {max_ctx}");
+    if let Some(show) = &show {
+        if !show.supports("tools") {
+            if interactive {
+                eprintln!("warning: model '{model}' lacks the 'tools' capability — switch with /model");
+            } else {
+                bail!("model '{model}' does not have the 'tools' capability; pick a tools-capable model");
+            }
         }
     }
-    let num_ctx = show.context_length().map_or(num_ctx, |m| m.min(num_ctx));
+    // Thinking mode is known only if we reached the model; otherwise leave it on
+    // auto (None) until the user selects one with /model.
+    let think = match &show {
+        Some(s) => (!s.supports("thinking")).then_some(false),
+        None => None,
+    };
+    let num_ctx = match show.as_ref().and_then(|s| s.context_length()) {
+        Some(max_ctx) => {
+            if num_ctx > max_ctx {
+                eprintln!("warning: num_ctx {num_ctx} exceeds model max {max_ctx}; using {max_ctx}");
+            }
+            num_ctx.min(max_ctx)
+        }
+        None => num_ctx,
+    };
 
     let cfg = AgentConfig {
         model: model.clone(),
@@ -186,7 +208,6 @@ async fn main() -> Result<()> {
 
     // Elicitation: in interactive mode the model gets an ask_user tool wired
     // to the TUI; headless runs stay non-interactive (no tool registered).
-    let interactive = cli.prompt.is_none();
     let approve = cli.approve || config.permissions.approve;
     let mut ctx = ToolCtx::with_extra_deny(&cwd, &config.permissions.bash_deny).with_approval(approve);
     let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
