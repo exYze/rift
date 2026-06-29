@@ -28,7 +28,11 @@ Full details and rationale in [docs/ROADMAP.md](docs/ROADMAP.md).
 curl -fsSL https://raw.githubusercontent.com/exYze/rift/master/install.sh | sh
 ```
 
-**Windows**: download `rift-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/exYze/rift/releases/latest) and put `rift.exe` on your PATH.
+**Windows** (PowerShell — downloads, verifies the checksum, and adds to PATH):
+
+```powershell
+irm https://raw.githubusercontent.com/exYze/rift/master/install.ps1 | iex
+```
 
 **From source** (any platform with Rust):
 
@@ -49,7 +53,10 @@ rift checks for new releases on startup (at most once per 24h, cached, silent wh
 ## Usage
 
 ```sh
-# TUI (default)
+# TUI — host/model come from your config (see Config below), or pass them explicitly
+rift
+
+# ...or override per run
 rift --host http://localhost:11434 --model gemma4:26b
 
 # Headless one-shot
@@ -101,7 +108,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 }
 ```
 
-Copy [`.rift.json.example`](.rift.json.example) to `.rift.json` (project — it's gitignored, so a private host stays out of git) or `~/.config/rift/config.json` (user-wide), then edit. Set `host` and `model` once and you can start the TUI with a bare `rift` — no flags needed; they're the startup defaults (a `--host`/`--model` flag or `RIFT_HOST`/`RIFT_MODEL` env var still overrides them). Set `"approve": true` (or launch with `--approve`) to pause for a y/n picker before every write/edit/shell action, with per-session "always allow". Project context files (`RIFT.md`, `AGENTS.md`, `CLAUDE.md`) at the repo root are loaded into the system prompt automatically (`/init` writes a RIFT.md for you). On multi-step tasks the agent maintains a visible task checklist, pinned at the top of the activity pane.
+Copy [`.rift.json.example`](.rift.json.example) to `.rift.json` (project — it's gitignored, so a private host stays out of git) or `~/.config/rift/config.json` (user-wide), then edit. Set `host` and `model` once and you can start the TUI with a bare `rift` — no flags needed; they're the startup defaults (a `--host`/`--model` flag or `RIFT_HOST`/`RIFT_MODEL` env var still overrides them). Other optional keys mirror the flags: `num_ctx`, `temperature`, `max_iterations`. Set `"approve": true` (or launch with `--approve`) to pause for a y/n picker before every write/edit/shell action, with per-session "always allow". Project context files (`RIFT.md`, `AGENTS.md`, `CLAUDE.md`) at the repo root are loaded into the system prompt automatically (`/init` writes a RIFT.md for you). On multi-step tasks the agent maintains a visible task checklist, pinned at the top of the activity pane.
 
 ## Skills
 
