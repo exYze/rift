@@ -1298,6 +1298,23 @@ mod tests {
         assert!(out.contains("exit code: 3"), "exit-code note missing: {out}");
     }
 
+    // Windows analogue of the (unix-gated) timeout test: a hanging command must
+    // be killed near the deadline via `taskkill /T`, with partial output kept.
+    // `ping -n 10` runs ~9s; `&` chains commands under cmd.exe.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bash_timeout_kills_process_tree_on_windows() {
+        let ctx = ToolCtx::new(std::env::temp_dir());
+        let mut args = Map::new();
+        args.insert("command".into(), Value::String("echo started & ping -n 10 127.0.0.1".into()));
+        args.insert("timeout_secs".into(), Value::from(1));
+        let start = std::time::Instant::now();
+        let out = BashTool.execute(&args, &ctx).await.unwrap();
+        assert!(start.elapsed().as_secs() < 8, "should be killed near the 1s deadline, took {:?}", start.elapsed());
+        assert!(out.contains("started"), "partial output must survive the kill: {out}");
+        assert!(out.contains("killed after 1s"), "timeout note missing: {out}");
+    }
+
     #[test]
     fn closest_line_points_at_near_match() {
         let text = "fn alpha() {}\nconst products = [ { id: 1, name: 'Classic' } ];\nfn omega() {}";
