@@ -111,7 +111,15 @@ async fn main() -> Result<()> {
     // candidate itself; merge is git-only).
     match &cli.cmd {
         Some(Cmd::Swarm { task, models, explore, no_tui }) => {
-            return run_swarm_cli(client, num_ctx, temp, max_iterations, task, models, *explore, *no_tui).await;
+            let cfg_base = AgentConfig {
+                model: String::new(), // set per candidate
+                num_ctx,
+                temperature: Some(temp),
+                max_iterations,
+                think: None,
+                always_task: true,
+            };
+            return run_swarm_cli(client, cfg_base, task, models, *explore, *no_tui).await;
         }
         Some(Cmd::Merge { name, cleanup }) => {
             let swarm = Swarm::discover(&std::env::current_dir()?).await?;
@@ -259,9 +267,7 @@ async fn main() -> Result<()> {
 /// TUI by default on a terminal; plain streaming with --no-tui (or piped).
 async fn run_swarm_cli(
     client: OllamaClient,
-    num_ctx: u64,
-    temp: f64,
-    max_iterations: usize,
+    cfg_base: AgentConfig,
     task: &str,
     models: &str,
     explore: bool,
@@ -291,15 +297,6 @@ async fn run_swarm_cli(
     if candidates.is_empty() {
         bail!("no models given");
     }
-
-    let cfg_base = AgentConfig {
-        model: String::new(), // set per candidate
-        num_ctx,
-        temperature: Some(temp),
-        max_iterations,
-        think: None,
-        always_task: true,
-    };
 
     use std::io::IsTerminal;
     if !no_tui && std::io::stdout().is_terminal() {
