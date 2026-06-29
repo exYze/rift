@@ -33,6 +33,15 @@ pub struct Config {
     /// `--model` / `RIFT_MODEL`.
     #[serde(default)]
     pub model: Option<String>,
+    /// Default context window to request (options.num_ctx). Overridden by `--num-ctx`.
+    #[serde(default)]
+    pub num_ctx: Option<u64>,
+    /// Default sampling temperature. Overridden by `--temp`.
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    /// Default max agent-loop iterations per turn. Overridden by `--max-iterations`.
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
     #[serde(default)]

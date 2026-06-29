@@ -25,15 +25,15 @@ struct Cli {
     /// Model to use, needs the "tools" capability [default: gemma4:26b, or `model` in config]
     #[arg(long, short, env = "RIFT_MODEL")]
     model: Option<String>,
-    /// Context window to request per call (options.num_ctx)
-    #[arg(long, default_value_t = 32_768)]
-    num_ctx: u64,
+    /// Context window to request per call [default: 32768, or `num_ctx` in config]
+    #[arg(long)]
+    num_ctx: Option<u64>,
     /// Run a single prompt headless (no TUI) and print the transcript
     #[arg(long, short)]
     prompt: Option<String>,
-    /// Max agent-loop iterations per turn
-    #[arg(long, default_value_t = 25)]
-    max_iterations: usize,
+    /// Max agent-loop iterations per turn [default: 25, or `max_iterations` in config]
+    #[arg(long)]
+    max_iterations: Option<usize>,
     /// Resume the most recent session
     #[arg(long = "continue", short = 'c')]
     cont: bool,
@@ -43,9 +43,9 @@ struct Cli {
     /// Ask before every write/edit/bash action (also: permissions.approve in config)
     #[arg(long)]
     approve: bool,
-    /// Sampling temperature (low = reliable tool calling)
-    #[arg(long, default_value_t = 0.2)]
-    temp: f64,
+    /// Sampling temperature, low = reliable tool calling [default: 0.2, or `temperature` in config]
+    #[arg(long)]
+    temp: Option<f64>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -101,6 +101,9 @@ async fn main() -> Result<()> {
         .clone()
         .or_else(|| config.model.clone())
         .unwrap_or_else(|| "gemma4:26b".to_string());
+    let num_ctx = cli.num_ctx.or(config.num_ctx).unwrap_or(32_768);
+    let temp = cli.temp.or(config.temperature).unwrap_or(0.2);
+    let max_iterations = cli.max_iterations.or(config.max_iterations).unwrap_or(25);
 
     let client = OllamaClient::new(&host);
 
@@ -108,7 +111,7 @@ async fn main() -> Result<()> {
     // candidate itself; merge is git-only).
     match &cli.cmd {
         Some(Cmd::Swarm { task, models, explore, no_tui }) => {
-            return run_swarm_cli(client, &cli, task, models, *explore, *no_tui).await;
+            return run_swarm_cli(client, num_ctx, temp, max_iterations, task, models, *explore, *no_tui).await;
         }
         Some(Cmd::Merge { name, cleanup }) => {
             let swarm = Swarm::discover(&std::env::current_dir()?).await?;
@@ -138,17 +141,17 @@ async fn main() -> Result<()> {
     }
     let think = if show.supports("thinking") { None } else { Some(false) };
     if let Some(max_ctx) = show.context_length() {
-        if cli.num_ctx > max_ctx {
-            eprintln!("warning: --num-ctx {} exceeds model max {max_ctx}; using {max_ctx}", cli.num_ctx);
+        if num_ctx > max_ctx {
+            eprintln!("warning: num_ctx {num_ctx} exceeds model max {max_ctx}; using {max_ctx}");
         }
     }
-    let num_ctx = show.context_length().map_or(cli.num_ctx, |m| m.min(cli.num_ctx));
+    let num_ctx = show.context_length().map_or(num_ctx, |m| m.min(num_ctx));
 
     let cfg = AgentConfig {
         model: model.clone(),
         num_ctx,
-        temperature: Some(cli.temp),
-        max_iterations: cli.max_iterations,
+        temperature: Some(temp),
+        max_iterations,
         think,
         always_task: cli.prompt.is_some(),
     };
@@ -256,7 +259,9 @@ async fn main() -> Result<()> {
 /// TUI by default on a terminal; plain streaming with --no-tui (or piped).
 async fn run_swarm_cli(
     client: OllamaClient,
-    cli: &Cli,
+    num_ctx: u64,
+    temp: f64,
+    max_iterations: usize,
     task: &str,
     models: &str,
     explore: bool,
@@ -289,9 +294,9 @@ async fn run_swarm_cli(
 
     let cfg_base = AgentConfig {
         model: String::new(), // set per candidate
-        num_ctx: cli.num_ctx,
-        temperature: Some(cli.temp),
-        max_iterations: cli.max_iterations,
+        num_ctx,
+        temperature: Some(temp),
+        max_iterations,
         think: None,
         always_task: true,
     };
