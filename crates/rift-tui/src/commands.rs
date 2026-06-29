@@ -83,6 +83,12 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/swarm", "<task> [--models a,b]", "WarpDrive race in isolated worktrees"),
     ("/think", "[on|off|auto]", "thinking mode (capability-checked)"),
     ("/tokens", "", "context budget, usage estimate, calibration"),
+    ("/stats", "", "session totals: turns, tokens, tools, compactions"),
+    ("/system", "[text]", "show or override the system prompt"),
+    ("/temp", "<0.0-2.0>", "set sampling temperature"),
+    ("/ctx", "<n>", "set context window (num_ctx)"),
+    ("/retry", "", "re-run the last prompt"),
+    ("/quit", "", "exit rift"),
     ("/tools", "", "tools the model can call (builtin + MCP)"),
     ("/undo", "", "revert last turn's write/edit changes"),
     ("/update", "", "update rift to the latest release"),
@@ -139,6 +145,9 @@ pub async fn run_command(
         "/host" => cmd_host(rest, agent, fx, cancel).await,
         "/think" => cmd_think(rest, agent, fx).await,
         "/export" => cmd_export(agent, cx, fx),
+        "/system" => cmd_system(rest, agent, fx),
+        "/temp" => cmd_temp(rest, agent, fx),
+        "/ctx" => cmd_ctx(rest, agent, fx),
         other => Err(anyhow!("unknown command '{other}' — /help lists available commands")),
     };
     let status = match result {
@@ -206,6 +215,58 @@ fn cmd_clear(agent: &mut Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) 
     cx.store.save(&agent.cfg.model, &cwd, &agent.messages)?;
     let _ = fx.send(UiEffect::Clear);
     Ok("conversation cleared".into())
+}
+
+fn cmd_temp(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.is_empty() {
+        let cur = agent.cfg.temperature.map_or("model default".into(), |t| t.to_string());
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("temperature: {cur}  (set with /temp <0.0-2.0>)")));
+        return Ok("temperature shown".into());
+    }
+    let t: f64 = arg.parse().map_err(|_| anyhow!("not a number: '{arg}' — usage: /temp <0.0-2.0>"))?;
+    if !(0.0..=2.0).contains(&t) {
+        bail!("temperature must be between 0.0 and 2.0 (low = more reliable tool calling)");
+    }
+    agent.cfg.temperature = Some(t);
+    let _ = fx.send(UiEffect::Out(Kind::Info, format!("temperature set to {t}")));
+    Ok(format!("temperature: {t}"))
+}
+
+fn cmd_ctx(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.is_empty() {
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("num_ctx: {}  (set with /ctx <n>)", agent.cfg.num_ctx)));
+        return Ok("num_ctx shown".into());
+    }
+    let n: u64 = arg.parse().map_err(|_| anyhow!("not an integer: '{arg}' — usage: /ctx <n>"))?;
+    if n < 512 {
+        bail!("num_ctx too small (minimum 512)");
+    }
+    agent.cfg.num_ctx = n;
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        format!("num_ctx set to {n} (effective next turn; /model re-clamps to the model's max)"),
+    ));
+    Ok(format!("num_ctx: {n}"))
+}
+
+fn cmd_system(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.is_empty() {
+        let current = agent.messages.first().map_or_else(String::new, |m| m.content.clone());
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("system prompt:\n{current}")));
+        return Ok("system prompt shown".into());
+    }
+    let has_system = agent.messages.first().is_some_and(|m| m.role == Role::System);
+    let sys = Message::system(arg.to_string());
+    if has_system {
+        agent.messages[0] = sys;
+    } else {
+        agent.messages.insert(0, sys);
+    }
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        "system prompt overridden for this session (kept across /clear; restart to reset)".into(),
+    ));
+    Ok("system prompt set".into())
 }
 
 async fn cmd_compact(
