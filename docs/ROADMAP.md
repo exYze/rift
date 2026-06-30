@@ -52,7 +52,7 @@ The agent should *show its plan* and *ask before dangerous things*.
 
 ## v0.5 — Command + UX expansion
 
-- [ ] More slash commands:
+- [x] More slash commands (shipped 0.5.0):
   - `/retry` — re-run the last prompt (after an interruption or bad answer)
   - `/stats` — session totals: tokens, calls, tool counts, compactions
   - `/system [text]` — view or override the system prompt
