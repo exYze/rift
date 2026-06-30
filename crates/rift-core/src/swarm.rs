@@ -53,6 +53,39 @@ impl Swarm {
         &self.root
     }
 
+    /// Names of worktree directories currently under `.rift/worktrees/`.
+    pub fn list_worktrees(&self) -> Vec<String> {
+        let mut out = vec![];
+        if let Ok(entries) = std::fs::read_dir(self.root.join(".rift/worktrees")) {
+            for e in entries.flatten() {
+                if e.path().is_dir() {
+                    if let Some(n) = e.file_name().to_str() {
+                        out.push(n.to_string());
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Captured patches as `(candidate name, path)` under `.rift/patches/`.
+    pub fn list_patches(&self) -> Vec<(String, PathBuf)> {
+        let mut out = vec![];
+        if let Ok(entries) = std::fs::read_dir(self.root.join(".rift/patches")) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("patch") {
+                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                        out.push((stem.to_string(), p));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Keep swarm scratch space out of `git status` without touching the
     /// repo's .gitignore. Only worktrees/ and patches/ — the rest of `.rift/`
     /// (skills, prompts) is meant to be committed.

@@ -79,10 +79,18 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/permissions", "", "active shell deny patterns"),
     ("/plan", "[clear]", "show or clear the agent's task checklist"),
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
+    ("/save", "<name>", "name this session (keeps autosaving to it)"),
     ("/skills", "", "list available skills (run with /skill:<name>)"),
     ("/swarm", "<task> [--models a,b]", "WarpDrive race in isolated worktrees"),
+    ("/worktrees", "", "list swarm worktrees + patches"),
     ("/think", "[on|off|auto]", "thinking mode (capability-checked)"),
     ("/tokens", "", "context budget, usage estimate, calibration"),
+    ("/stats", "", "session totals: turns, tokens, tools, compactions"),
+    ("/system", "[text]", "show or override the system prompt"),
+    ("/temp", "<0.0-2.0>", "set sampling temperature"),
+    ("/ctx", "<n>", "set context window (num_ctx)"),
+    ("/retry", "", "re-run the last prompt"),
+    ("/quit", "", "exit rift"),
     ("/tools", "", "tools the model can call (builtin + MCP)"),
     ("/undo", "", "revert last turn's write/edit changes"),
     ("/update", "", "update rift to the latest release"),
@@ -139,6 +147,11 @@ pub async fn run_command(
         "/host" => cmd_host(rest, agent, fx, cancel).await,
         "/think" => cmd_think(rest, agent, fx).await,
         "/export" => cmd_export(agent, cx, fx),
+        "/system" => cmd_system(rest, agent, fx),
+        "/temp" => cmd_temp(rest, agent, fx),
+        "/ctx" => cmd_ctx(rest, agent, fx),
+        "/save" => cmd_save(rest, agent, cx, fx),
+        "/worktrees" => cmd_worktrees(cx, fx).await,
         other => Err(anyhow!("unknown command '{other}' — /help lists available commands")),
     };
     let status = match result {
@@ -206,6 +219,101 @@ fn cmd_clear(agent: &mut Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) 
     cx.store.save(&agent.cfg.model, &cwd, &agent.messages)?;
     let _ = fx.send(UiEffect::Clear);
     Ok("conversation cleared".into())
+}
+
+fn cmd_temp(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.is_empty() {
+        let cur = agent.cfg.temperature.map_or("model default".into(), |t| t.to_string());
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("temperature: {cur}  (set with /temp <0.0-2.0>)")));
+        return Ok("temperature shown".into());
+    }
+    let t: f64 = arg.parse().map_err(|_| anyhow!("not a number: '{arg}' — usage: /temp <0.0-2.0>"))?;
+    if !(0.0..=2.0).contains(&t) {
+        bail!("temperature must be between 0.0 and 2.0 (low = more reliable tool calling)");
+    }
+    agent.cfg.temperature = Some(t);
+    let _ = fx.send(UiEffect::Out(Kind::Info, format!("temperature set to {t}")));
+    Ok(format!("temperature: {t}"))
+}
+
+fn cmd_ctx(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.is_empty() {
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("num_ctx: {}  (set with /ctx <n>)", agent.cfg.num_ctx)));
+        return Ok("num_ctx shown".into());
+    }
+    let n: u64 = arg.parse().map_err(|_| anyhow!("not an integer: '{arg}' — usage: /ctx <n>"))?;
+    if n < 512 {
+        bail!("num_ctx too small (minimum 512)");
+    }
+    agent.cfg.num_ctx = n;
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        format!("num_ctx set to {n} (effective next turn; /model re-clamps to the model's max)"),
+    ));
+    Ok(format!("num_ctx: {n}"))
+}
+
+fn cmd_system(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.is_empty() {
+        let current = agent.messages.first().map_or_else(String::new, |m| m.content.clone());
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("system prompt:\n{current}")));
+        return Ok("system prompt shown".into());
+    }
+    let has_system = agent.messages.first().is_some_and(|m| m.role == Role::System);
+    let sys = Message::system(arg.to_string());
+    if has_system {
+        agent.messages[0] = sys;
+    } else {
+        agent.messages.insert(0, sys);
+    }
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        "system prompt overridden for this session (kept across /clear; restart to reset)".into(),
+    ));
+    Ok("system prompt set".into())
+}
+
+fn cmd_save(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.is_empty() {
+        bail!("usage: /save <name>");
+    }
+    let cwd = cx.cwd.display().to_string();
+    let path = cx.store.save_as(arg, &agent.cfg.model, &cwd, &agent.messages)?;
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or(arg).to_string();
+    let _ = fx.send(UiEffect::Out(
+        Kind::Info,
+        format!("session named '{name}' — autosaving to {}", path.display()),
+    ));
+    Ok(format!("saved as {name}"))
+}
+
+async fn cmd_worktrees(cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let swarm = Swarm::discover(&cx.cwd).await?;
+    let worktrees = swarm.list_worktrees();
+    let patches = swarm.list_patches();
+    if worktrees.is_empty() && patches.is_empty() {
+        let _ = fx.send(UiEffect::Out(
+            Kind::Info,
+            "no swarm worktrees or patches — start a race with /swarm <task>".into(),
+        ));
+        return Ok("no worktrees".into());
+    }
+    let mut out = String::new();
+    if !worktrees.is_empty() {
+        out.push_str(&format!("worktrees ({}) under .rift/worktrees/:\n", worktrees.len()));
+        for w in &worktrees {
+            out.push_str(&format!("  {w}\n"));
+        }
+    }
+    if !patches.is_empty() {
+        out.push_str(&format!("patches ({}):\n", patches.len()));
+        for (name, _) in &patches {
+            out.push_str(&format!("  {name}\n"));
+        }
+    }
+    out.push_str("\napply a winner: /merge <name>   ·   add --cleanup to also remove all worktrees");
+    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().to_string()));
+    Ok(format!("{} worktree(s), {} patch(es)", worktrees.len(), patches.len()))
 }
 
 async fn cmd_compact(
@@ -295,11 +403,20 @@ fn cmd_sessions(
             .take(20)
             .enumerate()
             .map(|(i, path)| match SessionStore::load(path) {
-                Ok(s) => PickerItem {
-                    value: (i + 1).to_string(),
-                    label: format!("{:<9} {:<16} {:>3} msgs", fmt_age(s.saved_at), s.model, s.messages.len()),
-                    detail: if path == cx.store.path() { "current".into() } else { String::new() },
-                },
+                Ok(s) => {
+                    let stem = path.file_stem().and_then(|p| p.to_str()).unwrap_or("");
+                    // Named sessions (from /save) show their name; timestamped ones don't.
+                    let name = if stem.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                        String::new()
+                    } else {
+                        stem.to_string()
+                    };
+                    PickerItem {
+                        value: (i + 1).to_string(),
+                        label: format!("{name:<14} {:<9} {:<16} {:>3} msgs", fmt_age(s.saved_at), s.model, s.messages.len()),
+                        detail: if path == cx.store.path() { "current".into() } else { String::new() },
+                    }
+                }
                 Err(_) => PickerItem {
                     value: (i + 1).to_string(),
                     label: format!("(unreadable) {}", path.display()),

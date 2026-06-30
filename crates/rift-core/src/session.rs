@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rift_ollama::Message;
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +94,28 @@ impl SessionStore {
     pub fn load(path: &std::path::Path) -> Result<SavedSession> {
         let text = std::fs::read_to_string(path).with_context(|| format!("cannot read session {}", path.display()))?;
         Ok(serde_json::from_str(&text)?)
+    }
+
+    /// Give this session a friendly name: future autosaves go to `<name>.json`
+    /// and the old (usually timestamped) file is removed. Returns the new path.
+    pub fn save_as(&mut self, name: &str, model: &str, cwd: &str, messages: &[Message]) -> Result<PathBuf> {
+        let safe: String = name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect();
+        let safe = safe.trim_matches('-').to_string();
+        if safe.is_empty() {
+            bail!("invalid session name (use letters, digits, - or _)");
+        }
+        let dir = sessions_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        let new_path = dir.join(format!("{safe}.json"));
+        let old = std::mem::replace(&mut self.path, new_path.clone());
+        self.save(model, cwd, messages)?;
+        if old != new_path && old.exists() {
+            let _ = std::fs::remove_file(&old);
+        }
+        Ok(new_path)
     }
 
     /// Atomic save (write temp + rename) so a crash mid-write never corrupts

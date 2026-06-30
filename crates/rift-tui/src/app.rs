@@ -420,6 +420,22 @@ struct App {
     plan: Vec<PlanItem>,
     /// Discovered skills — palette entries (/skill:<name>) and prompt bodies.
     skills: Vec<Skill>,
+    /// The last prompt actually sent to the agent — re-sent by /retry.
+    last_prompt: Option<String>,
+    /// Cumulative per-session counters surfaced by /stats.
+    session_stats: SessionStats,
+}
+
+/// Running per-session counters surfaced by the `/stats` command.
+#[derive(Default)]
+struct SessionStats {
+    turns: u64,
+    model_calls: u64,
+    output_tokens: u64,
+    prompt_tokens: u64,
+    tool_calls: u64,
+    compactions: u64,
+    duration_ms: u128,
 }
 
 impl App {
@@ -446,6 +462,8 @@ impl App {
             answering: None,
             plan: vec![],
             skills,
+            last_prompt: None,
+            session_stats: SessionStats::default(),
         }
     }
 
@@ -546,6 +564,7 @@ impl App {
             AgentEvent::Thinking(t) => self.transcript.append_stream(Kind::Thinking, &t),
             AgentEvent::Content(c) => self.transcript.append_stream(Kind::Assistant, &c),
             AgentEvent::ToolStart { name, args } => {
+                self.session_stats.tool_calls += 1;
                 let args: String = args.chars().take(160).collect();
                 self.log.push_block(Kind::Tool, format!("→ {name} {args}"));
                 self.status = format!("running {name}…");
@@ -557,6 +576,9 @@ impl App {
                 );
             }
             AgentEvent::Info(i) => {
+                if i.starts_with("compacted") {
+                    self.session_stats.compactions += 1;
+                }
                 self.log.push_block(Kind::Info, format!("· {i}"));
             }
             AgentEvent::Plan(items) => self.plan = items,
@@ -568,6 +590,13 @@ impl App {
                 self.busy = false;
                 self.cancel = None;
                 self.turn_started = None;
+                if stats.iterations > 0 {
+                    self.session_stats.turns += 1;
+                    self.session_stats.model_calls += stats.iterations as u64;
+                    self.session_stats.output_tokens += stats.output_tokens;
+                    self.session_stats.prompt_tokens += stats.prompt_tokens;
+                    self.session_stats.duration_ms += stats.duration_ms;
+                }
                 self.status = format!(
                     "done — {} steps · {} prompt tok · {} out tok · {:.1} tok/s",
                     stats.iterations, stats.prompt_tokens, stats.output_tokens, stats.tokens_per_sec
@@ -1294,11 +1323,43 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                     }
                                     app.transcript.push_block(Kind::Info, out.trim_end().to_string());
                                 }
+                            } else if trimmed == "/quit" {
+                                app.quit = true;
+                            } else if trimmed == "/retry" {
+                                if let Some(p) = app.last_prompt.clone() {
+                                    app.status = "retrying…".into();
+                                    app.transcript.push_block(
+                                        Kind::Info,
+                                        format!("↻ {}", p.chars().take(80).collect::<String>()),
+                                    );
+                                    let _ = prompt_tx.send(UiMsg::Prompt(p, cancel));
+                                } else {
+                                    app.busy = false;
+                                    app.cancel = None;
+                                    app.turn_started = None;
+                                    app.transcript.push_block(Kind::Warn, "! nothing to retry yet".into());
+                                }
+                            } else if trimmed == "/stats" {
+                                app.busy = false;
+                                app.cancel = None;
+                                app.turn_started = None;
+                                let out = format!(
+                                    "session stats:\n  turns:         {}\n  model calls:   {}\n  tool calls:    {}\n  compactions:   {}\n  output tokens: {}\n  prompt tokens: {} (last-of-turn, summed)\n  model time:    {:.1}s",
+                                    app.session_stats.turns,
+                                    app.session_stats.model_calls,
+                                    app.session_stats.tool_calls,
+                                    app.session_stats.compactions,
+                                    app.session_stats.output_tokens,
+                                    app.session_stats.prompt_tokens,
+                                    app.session_stats.duration_ms as f64 / 1000.0,
+                                );
+                                app.transcript.push_block(Kind::Info, out);
                             } else if trimmed.starts_with('/') {
                                 app.status = "running command…".into();
                                 let _ = prompt_tx.send(UiMsg::Command(trimmed, cancel));
                             } else {
                                 app.status = "sending…".into();
+                                app.last_prompt = Some(raw.clone());
                                 let _ = prompt_tx.send(UiMsg::Prompt(raw, cancel));
                             }
                         }
