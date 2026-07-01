@@ -12,7 +12,7 @@
 //!    summary, keep the current turn verbatim
 
 use anyhow::Result;
-use rift_ollama::{ChatOptions, ChatRequest, Message, OllamaClient, Role};
+use rift_provider::{ChatOptions, ChatRequest, Message, Provider, Role, StreamDelta};
 
 /// Tokens reserved for the model's output within num_ctx.
 pub const OUTPUT_RESERVE: u64 = 4096;
@@ -118,7 +118,7 @@ fn transcript_for_summary(messages: &[Message]) -> String {
 /// and the current turn into one structured summary message. Returns the new
 /// message list: [system, summary, <current turn ...>].
 pub async fn summarize_history(
-    client: &OllamaClient,
+    client: &dyn Provider,
     model: &str,
     num_ctx: u64,
     messages: &[Message],
@@ -150,7 +150,8 @@ pub async fn summarize_history(
         keep_alive: Some("10m".into()),
         options: Some(ChatOptions { num_ctx: Some(num_ctx), temperature: Some(0.0), num_predict: Some(1500) }),
     };
-    let outcome = client.chat_stream(&req, |_| {}).await?;
+    let mut noop = |_: StreamDelta| {};
+    let outcome = client.chat_stream(&req, &mut noop).await?;
     let summary = outcome.message.content;
 
     let mut rebuilt = Vec::with_capacity(tail.len() + 2);

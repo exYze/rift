@@ -1,0 +1,298 @@
+//! Provider abstraction: the trait rift's agent loop, compactor, and swarm talk
+//! to, plus the backend-neutral wire types they exchange. `OllamaClient` (in
+//! rift-ollama) is one implementation; an OpenAI-compatible one is next.
+
+use anyhow::Result;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: Role,
+    #[serde(default)]
+    pub content: String,
+    /// Reasoning text for thinking-capable models. Streamed separately from content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// On role=tool messages: which tool this result answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+impl Message {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self { role: Role::System, content: content.into(), thinking: None, tool_calls: vec![], tool_name: None }
+    }
+    pub fn user(content: impl Into<String>) -> Self {
+        Self { role: Role::User, content: content.into(), thinking: None, tool_calls: vec![], tool_name: None }
+    }
+    pub fn tool_result(tool_name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            thinking: None,
+            tool_calls: vec![],
+            tool_name: Some(tool_name.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Present on newer Ollama servers; absent on older ones. Preserved round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub function: ToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallFunction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<i64>,
+    pub name: String,
+    /// Always a parsed JSON object (never a string).
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDef {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolFunctionDef,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolFunctionDef {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the arguments object.
+    pub parameters: Value,
+}
+
+impl ToolDef {
+    pub fn function(name: impl Into<String>, description: impl Into<String>, parameters: Value) -> Self {
+        Self {
+            kind: "function".into(),
+            function: ToolFunctionDef { name: name.into(), description: description.into(), parameters },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ChatOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_ctx: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_predict: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDef>,
+    pub stream: bool,
+    /// None = let the server default (thinking models default to on). Sending
+    /// `think:true` to a non-thinking model is a 400, so only set after a
+    /// capability check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub think: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<ChatOptions>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ChatStats {
+    pub prompt_eval_count: u64,
+    pub eval_count: u64,
+    /// nanoseconds
+    pub total_duration: u64,
+    /// nanoseconds
+    pub eval_duration: u64,
+}
+
+impl ChatStats {
+    pub fn tokens_per_sec(&self) -> f64 {
+        if self.eval_duration == 0 {
+            return 0.0;
+        }
+        self.eval_count as f64 / (self.eval_duration as f64 / 1e9)
+    }
+}
+
+/// Incremental events surfaced during a streaming chat call.
+#[derive(Debug, Clone)]
+pub enum StreamDelta {
+    Thinking(String),
+    Content(String),
+    /// Tool calls always arrive whole (arguments fully parsed).
+    ToolCall(ToolCall),
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatOutcome {
+    /// The fully accumulated assistant message (thinking + content + tool calls).
+    pub message: Message,
+    pub done_reason: Option<String>,
+    pub stats: ChatStats,
+    /// True when the server reports it evaluated ~num_ctx prompt tokens, which
+    /// strongly suggests the front of the prompt was silently truncated.
+    pub truncation_suspected: bool,
+}
+
+/// One model as reported by a provider's model list.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelEntry {
+    pub name: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// Backend-neutral capability info for a single model.
+#[derive(Debug, Clone, Default)]
+pub struct ModelCapabilities {
+    pub capabilities: Vec<String>,
+    pub context_length: Option<u64>,
+}
+
+impl ModelCapabilities {
+    pub fn supports(&self, cap: &str) -> bool {
+        self.capabilities.iter().any(|c| c == cap)
+    }
+    pub fn context_length(&self) -> Option<u64> {
+        self.context_length
+    }
+}
+
+/// A model backend. `OllamaClient` implements this; other providers (e.g. an
+/// OpenAI-compatible one) will too. Object-safe so the agent can hold an
+/// `Arc<dyn Provider>` and the swarm can share one across candidates.
+#[async_trait]
+pub trait Provider: Send + Sync {
+    /// Endpoint this provider talks to (for display in the UI).
+    fn base_url(&self) -> &str;
+
+    /// List available models.
+    async fn tags(&self) -> Result<Vec<ModelEntry>>;
+
+    /// Capabilities (tools/thinking) + context length for one model. Providers
+    /// that can't probe should return their best-known defaults.
+    async fn show(&self, model: &str) -> Result<ModelCapabilities>;
+
+    /// Streaming chat. `on_delta` fires for every thinking/content fragment and
+    /// each complete tool call; the accumulated message is returned at the end.
+    async fn chat_stream(
+        &self,
+        req: &ChatRequest,
+        on_delta: &mut (dyn FnMut(StreamDelta) + Send),
+    ) -> Result<ChatOutcome>;
+}
+
+/// Fallback for the failure mode where a model emits its tool call as plain JSON
+/// text in `content` instead of a structured `tool_calls` entry. Recognizes
+/// `{"name": ..., "arguments"|"parameters": {...}}`, an array of those, and
+/// code-fenced variants — but only for names in `known_tools` so it never
+/// misfires on ordinary JSON the model is just talking about.
+pub fn extract_textual_tool_calls(content: &str, known_tools: &[String]) -> Vec<ToolCall> {
+    let mut text = content.trim();
+    if let Some(stripped) = strip_code_fence(text) {
+        text = stripped;
+    }
+    if !(text.starts_with('{') || text.starts_with('[')) {
+        return vec![];
+    }
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return vec![];
+    };
+    let candidates: Vec<&Value> = match &value {
+        Value::Array(items) => items.iter().collect(),
+        v @ Value::Object(_) => vec![v],
+        _ => return vec![],
+    };
+    let mut calls = Vec::new();
+    for c in candidates {
+        let Some(obj) = c.as_object() else { return vec![] };
+        let Some(name) = obj.get("name").and_then(|n| n.as_str()) else { return vec![] };
+        if !known_tools.iter().any(|t| t == name) {
+            return vec![];
+        }
+        let args = obj
+            .get("arguments")
+            .or_else(|| obj.get("parameters"))
+            .and_then(|a| a.as_object())
+            .cloned()
+            .unwrap_or_default();
+        calls.push(ToolCall {
+            id: None,
+            function: ToolCallFunction { index: Some(calls.len() as i64), name: name.to_string(), arguments: args },
+        });
+    }
+    calls
+}
+
+fn strip_code_fence(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let rest = text.strip_prefix("```")?;
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+    let rest = rest.strip_suffix("```")?;
+    Some(rest.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn known() -> Vec<String> {
+        vec!["read".into(), "bash".into()]
+    }
+
+    #[test]
+    fn textual_tool_call_object() {
+        let calls = extract_textual_tool_calls(r#"{"name": "read", "arguments": {"path": "a.rs"}}"#, &known());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read");
+        assert_eq!(calls[0].function.arguments["path"], "a.rs");
+    }
+
+    #[test]
+    fn textual_tool_call_fenced_array_with_parameters_key() {
+        let text = "```json\n[{\"name\": \"bash\", \"parameters\": {\"command\": \"ls\"}}]\n```";
+        let calls = extract_textual_tool_calls(text, &known());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "bash");
+    }
+
+    #[test]
+    fn ignores_unknown_names_and_plain_json() {
+        assert!(extract_textual_tool_calls(r#"{"name": "nope", "arguments": {}}"#, &known()).is_empty());
+        assert!(extract_textual_tool_calls(r#"{"key": "value"}"#, &known()).is_empty());
+        assert!(extract_textual_tool_calls("just prose", &known()).is_empty());
+    }
+
+    #[test]
+    fn tool_result_serializes_with_tool_name() {
+        let msg = Message::tool_result("read", "file contents");
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["role"], "tool");
+        assert_eq!(v["tool_name"], "read");
+        assert!(v.get("tool_calls").is_none());
+    }
+}

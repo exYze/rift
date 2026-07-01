@@ -1,0 +1,12 @@
+[package]
+name = "rift-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider abstraction and wire types shared by rift's model backends"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true

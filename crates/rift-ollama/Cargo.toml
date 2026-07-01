@@ -6,9 +6,12 @@ license.workspace = true
 description = "Native Ollama /api/chat client: streaming, tool calling, thinking, capability detection"
 
 [dependencies]
+rift-provider = { path = "../rift-provider" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true

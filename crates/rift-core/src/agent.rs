@@ -13,9 +13,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use std::sync::Arc;
+
 use anyhow::Result;
-use rift_ollama::{
-    extract_textual_tool_calls, ChatOptions, ChatRequest, Message, OllamaClient, Role, StreamDelta,
+use rift_provider::{
+    extract_textual_tool_calls, ChatOptions, ChatRequest, Message, Provider, Role, StreamDelta,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -81,7 +83,7 @@ pub enum AgentEvent {
 }
 
 pub struct Agent {
-    client: OllamaClient,
+    client: Arc<dyn Provider>,
     pub cfg: AgentConfig,
     registry: ToolRegistry,
     ctx: ToolCtx,
@@ -92,16 +94,16 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(client: OllamaClient, cfg: AgentConfig, registry: ToolRegistry, ctx: ToolCtx, system_prompt: String) -> Self {
+    pub fn new(client: Arc<dyn Provider>, cfg: AgentConfig, registry: ToolRegistry, ctx: ToolCtx, system_prompt: String) -> Self {
         Self { client, cfg, registry, ctx, messages: vec![Message::system(system_prompt)], calibration: 1.0 }
     }
 
-    pub fn client(&self) -> &OllamaClient {
+    pub fn client(&self) -> &Arc<dyn Provider> {
         &self.client
     }
 
-    /// Swap the backing Ollama server (e.g. the `/host` command).
-    pub fn set_client(&mut self, client: OllamaClient) {
+    /// Swap the backing provider (e.g. the `/host` command).
+    pub fn set_client(&mut self, client: Arc<dyn Provider>) {
         self.client = client;
     }
 
@@ -137,7 +139,7 @@ impl Agent {
             return;
         }
         let _ = tx.send(AgentEvent::Info("compacting: summarizing earlier conversation…".into()));
-        match compact::summarize_history(&self.client, &self.cfg.model, self.cfg.num_ctx, &self.messages).await {
+        match compact::summarize_history(&*self.client, &self.cfg.model, self.cfg.num_ctx, &self.messages).await {
             Ok(rebuilt) => {
                 self.messages = rebuilt;
                 let est3 = compact::estimate_prompt_tokens(&self.messages, tools_overhead, self.calibration);
@@ -222,13 +224,14 @@ impl Agent {
             };
 
             let tx2 = tx.clone();
-            let stream_fut = self.client.chat_stream(&req, move |delta| {
+            let mut on_delta = move |delta| {
                 let _ = match delta {
                     StreamDelta::Thinking(t) => tx2.send(AgentEvent::Thinking(t)),
                     StreamDelta::Content(c) => tx2.send(AgentEvent::Content(c)),
                     StreamDelta::ToolCall(_) => Ok(()),
                 };
-            });
+            };
+            let stream_fut = self.client.chat_stream(&req, &mut on_delta);
             let outcome = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {

@@ -6,7 +6,7 @@ license.workspace = true
 description = "Rift agent engine: tool registry, agent loop, session state"
 
 [dependencies]
-rift-ollama = { path = "../rift-ollama" }
+rift-provider = { path = "../rift-provider" }
 tokio.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
