@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
-use rift_ollama::ToolDef;
+use rift_provider::ToolDef;
 use serde_json::{json, Map, Value};
 
 const READ_MAX_LINES: usize = 2000;

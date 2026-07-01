@@ -5,11 +5,12 @@
 //! through the same CancellationToken as normal turns.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use rift_core::{builtin_bash_deny, compact, run_swarm, Agent, AgentEvent, Candidate, SessionStore, Swarm};
-use rift_ollama::{Message, OllamaClient, Role};
+use rift_ollama::{Message, OllamaClient, Provider, Role};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
@@ -338,7 +339,7 @@ async fn cmd_compact(
     let rebuilt = tokio::select! {
         biased;
         _ = cancel.cancelled() => bail!("cancelled"),
-        r = compact::summarize_history(agent.client(), &agent.cfg.model, agent.cfg.num_ctx, &agent.messages) => r?,
+        r = compact::summarize_history(&**agent.client(), &agent.cfg.model, agent.cfg.num_ctx, &agent.messages) => r?,
     };
     agent.messages = rebuilt;
     let after = compact::estimate_prompt_tokens(&agent.messages, overhead, cal);
@@ -821,7 +822,7 @@ async fn cmd_host(
         ));
         return Ok("host shown".into());
     }
-    let candidate = OllamaClient::new(arg);
+    let candidate: Arc<dyn Provider> = Arc::new(OllamaClient::new(arg));
     let models = tokio::select! {
         biased;
         _ = cancel.cancelled() => bail!("cancelled"),

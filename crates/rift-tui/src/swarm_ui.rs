@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rift_core::{run_swarm, AgentConfig, AgentEvent, Candidate, CandidateOutcome, Swarm, TurnStats};
-use rift_ollama::OllamaClient;
+use rift_ollama::Provider;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseEventKind,
@@ -212,7 +212,7 @@ fn draw(frame: &mut Frame, app: &mut SwarmApp, task: &str) {
 }
 
 pub async fn run_swarm_tui(
-    client: OllamaClient,
+    client: Arc<dyn Provider>,
     cfg: AgentConfig,
     swarm: Swarm,
     candidates: Vec<Candidate>,

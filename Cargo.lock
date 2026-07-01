@@ -1130,7 +1130,7 @@ dependencies = [
  "globset",
  "ignore",
  "regex",
- "rift-ollama",
+ "rift-provider",
  "serde",
  "serde_json",
  "thiserror",
@@ -1148,12 +1148,25 @@ dependencies = [
 name = "rift-ollama"
 version = "0.5.1"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "futures-util",
  "reqwest",
+ "rift-provider",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "rift-provider"
+version = "0.5.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

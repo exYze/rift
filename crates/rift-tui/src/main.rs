@@ -5,6 +5,7 @@ mod swarm_ui;
 mod update;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
@@ -12,7 +13,7 @@ use rift_core::{
     run_swarm, Agent, AgentConfig, AgentEvent, AskRequest, AskUserTool, Candidate, Config,
     McpClient, McpTool, SessionStore, Swarm, ToolCtx, ToolRegistry,
 };
-use rift_ollama::OllamaClient;
+use rift_ollama::{OllamaClient, Provider};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -105,7 +106,7 @@ async fn main() -> Result<()> {
     let temp = cli.temp.or(config.temperature).unwrap_or(0.2);
     let max_iterations = cli.max_iterations.or(config.max_iterations).unwrap_or(25);
 
-    let client = OllamaClient::new(&host);
+    let client: Arc<dyn Provider> = Arc::new(OllamaClient::new(&host));
 
     // Subcommands bypass the single-model preflight (swarm preflights each
     // candidate itself; merge is git-only).
@@ -287,7 +288,7 @@ async fn main() -> Result<()> {
 /// `rift swarm`: race N models on one task in parallel worktrees. Interactive
 /// TUI by default on a terminal; plain streaming with --no-tui (or piped).
 async fn run_swarm_cli(
-    client: OllamaClient,
+    client: Arc<dyn Provider>,
     cfg_base: AgentConfig,
     task: &str,
     models: &str,

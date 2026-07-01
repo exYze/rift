@@ -8,8 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
+
 use anyhow::{bail, Context, Result};
-use rift_ollama::OllamaClient;
+use rift_provider::Provider;
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -214,7 +216,7 @@ pub struct CandidateOutcome {
 /// worktree. Events stream out tagged with the candidate index. Failures are
 /// per-candidate, never collective.
 pub async fn run_swarm(
-    client: &OllamaClient,
+    client: &Arc<dyn Provider>,
     base_cfg: &AgentConfig,
     swarm: &Swarm,
     candidates: Vec<Candidate>,
@@ -297,7 +299,7 @@ pub async fn run_swarm(
                 .messages
                 .iter()
                 .rev()
-                .find(|m| m.role == rift_ollama::Role::Assistant && !m.content.is_empty())
+                .find(|m| m.role == rift_provider::Role::Assistant && !m.content.is_empty())
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
 
