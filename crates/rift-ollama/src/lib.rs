@@ -141,7 +141,7 @@ impl Provider for OllamaClient {
             return Err(Self::api_error(body).into());
         }
 
-        let mut acc = Message { role: Role::Assistant, content: String::new(), thinking: None, tool_calls: vec![], tool_name: None };
+        let mut acc = Message { role: Role::Assistant, content: String::new(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None };
         let mut stats = ChatStats::default();
         let mut done_reason = None;
 

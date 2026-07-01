@@ -1,0 +1,16 @@
+[package]
+name = "rift-openai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenAI-compatible provider for rift (vLLM, LM Studio, llama.cpp, OpenRouter, LiteLLM, Ollama /v1)"
+
+[dependencies]
+rift-provider = { path = "../rift-provider" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true

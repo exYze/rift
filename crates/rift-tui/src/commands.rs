@@ -59,6 +59,9 @@ pub struct CmdCx {
     /// (server name, registered tool count) for each configured MCP server.
     pub mcp: Vec<(String, usize)>,
     pub config_path: Option<PathBuf>,
+    /// Default Ollama host + configured providers, for provider-aware `/model`.
+    pub host: String,
+    pub providers: std::collections::HashMap<String, rift_core::ProviderConfig>,
 }
 
 /// (name, argument hint, one-line description) — the single source of truth
@@ -130,7 +133,7 @@ pub async fn run_command(
         }
         "/approve" => cmd_approve(rest, agent, fx),
         "/config" => cmd_config(rest, agent, cx, fx),
-        "/model" => cmd_model(rest, agent, fx).await,
+        "/model" => cmd_model(rest, agent, cx, fx).await,
         "/clear" => cmd_clear(agent, cx, fx),
         "/compact" => cmd_compact(agent, fx, cancel).await,
         "/copy" => cmd_copy(rest, agent, fx).await,
@@ -165,7 +168,12 @@ pub async fn run_command(
     let _ = fx.send(UiEffect::Done(status));
 }
 
-async fn cmd_model(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+async fn cmd_model(
+    arg: &str,
+    agent: &mut Agent,
+    cx: &CmdCx,
+    fx: &UnboundedSender<UiEffect>,
+) -> Result<String> {
     if arg.is_empty() {
         let models = agent.client().tags().await.context("listing models")?;
         if models.is_empty() {
@@ -191,10 +199,13 @@ async fn cmd_model(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>)
         return Ok(format!("{count} model(s) — ↑↓ select, Enter switch, Esc cancel"));
     }
 
+    // Route `provider/model` through a configured provider; a bare name uses
+    // the default Ollama host. Preflight the *target* client, then swap it in
+    // so the rest of the session talks to the right endpoint.
+    let (client, actual) = crate::build_provider(arg, &cx.host, &cx.providers);
     // Same preflight as startup: capability check + num_ctx clamp.
-    let show = agent
-        .client()
-        .show(arg)
+    let show = client
+        .show(&actual)
         .await
         .map_err(|e| anyhow!("model '{arg}' not usable: {e}"))?;
     if !show.supports("tools") {
@@ -208,8 +219,9 @@ async fn cmd_model(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>)
             agent.cfg.num_ctx = agent.cfg.num_ctx.min(max);
         }
     }
-    agent.cfg.model = arg.to_string();
-    let _ = fx.send(UiEffect::Model(arg.to_string()));
+    agent.cfg.model = actual.clone();
+    agent.set_client(client);
+    let _ = fx.send(UiEffect::Model(actual));
     let _ = fx.send(UiEffect::Out(Kind::Info, format!("switched to {arg}{note}")));
     Ok(format!("model: {arg}"))
 }

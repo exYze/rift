@@ -42,10 +42,36 @@ pub struct Config {
     /// Default max agent-loop iterations per turn. Overridden by `--max-iterations`.
     #[serde(default)]
     pub max_iterations: Option<usize>,
+    /// Named OpenAI-compatible providers. Address a model as `<name>/<model>`
+    /// (e.g. `openrouter/qwen3`) to route it through one of these.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
     #[serde(default)]
     pub permissions: Permissions,
+}
+
+/// An OpenAI-compatible endpoint rift can route models to.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfig {
+    /// API root, e.g. `https://openrouter.ai/api/v1` (a `/v1` is appended if absent).
+    pub base_url: String,
+    /// Literal API key. Prefer `api_key_env` to keep secrets out of the file.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Environment variable to read the API key from.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+}
+
+impl ProviderConfig {
+    /// Resolve the API key: the literal value, else the named env var.
+    pub fn resolve_key(&self) -> Option<String> {
+        self.api_key
+            .clone()
+            .or_else(|| self.api_key_env.as_ref().and_then(|e| std::env::var(e).ok()))
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -85,6 +85,12 @@ One Rust TUI combining three concepts: **GhostWriter** (flawless multi-pane TUI,
 - [x] PTY-verified: open on /, filter on /c, ↓+Enter ran /compact, /to+Tab+Enter ran /tokens
 - Lesson: in expect scripts a lone ESC byte gets paired by crossterm with the next byte as an Alt-chord — don't test Esc-then-type sequences in the same PTY breath
 
+### v0.6 — model providers (done)
+- [x] Phase 0: extracted a `Provider` trait + neutral wire types into a new `rift-provider` crate; `rift-ollama` now `impl Provider for OllamaClient`. Agent/swarm/compact hold `Arc<dyn Provider>` (Arc so swarm's per-candidate `clone()` is a refcount bump, not a reconnect). (#8)
+- [x] Phase 1: new `rift-openai` crate — an OpenAI-compatible `Provider` (vLLM, LM Studio, llama.cpp, OpenRouter, LiteLLM, Ollama `/v1`). SSE streaming, tool-call args accumulated by index and parsed from the protocol's string encoding, results correlated by `tool_call_id` (added to `Message`), no `/show` so default caps assume `tools`.
+- [x] Config: `providers: { <name>: { base_url, api_key | api_key_env } }`; address a model as `provider/model` (split on first `/`). CLI flag > `RIFT_HOST`/`RIFT_MODEL` env > config > default precedence unchanged. `/model provider/model` swaps the live client mid-session.
+- [x] Live-verified against Ollama `/v1`: model list, streaming chat (deltas == final content), and a real tool call (`get_time` with parsed args + `tool_call_id`, `done_reason: tool_calls`).
+
 ### Possible future work (roadmap complete; not scheduled)
 - Streaming-diff pane in main chat TUI; session picker; syntax highlighting via syntect (binary budget!)
 - Compactor v2: hydrate-on-demand line ranges, persistent repo map cache
@@ -94,7 +100,7 @@ One Rust TUI combining three concepts: **GhostWriter** (flawless multi-pane TUI,
 
 ## Decisions log
 
-- Native /api/chat over OpenAI-compat shim (root cause of most opencode-Ollama bugs).
+- Native /api/chat for Ollama (root cause of most opencode-Ollama bugs); the OpenAI-compat wire path is opt-in per `provider/model` for *non-Ollama* backends, never the default Ollama route.
 - Tool results correlate by `tool_name` (model's requested name, pre-aliasing) per native protocol.
 - `think` left at server default for thinking models; forced false only when capability absent.
 - num_ctx default 32768, clamped to model max from /api/show.

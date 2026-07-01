@@ -913,10 +913,12 @@ pub struct TuiOptions {
     pub config_path: Option<PathBuf>,
     pub ask_rx: mpsc::UnboundedReceiver<AskRequest>,
     pub skills: Vec<Skill>,
+    pub host: String,
+    pub providers: std::collections::HashMap<String, rift_core::ProviderConfig>,
 }
 
 pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
-    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills } = opts;
+    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, providers } = opts;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<UiMsg>();
@@ -939,7 +941,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
     let fx_ui = fx_tx.clone();
     let agent_task = tokio::spawn(async move {
         let mut agent = agent;
-        let mut cx = CmdCx { store, cwd: cwd.clone(), mcp, config_path };
+        let mut cx = CmdCx { store, cwd: cwd.clone(), mcp, config_path, host, providers };
         let cwd_str = cwd.display().to_string();
         while let Some(msg) = prompt_rx.recv().await {
             match msg {
