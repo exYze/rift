@@ -26,17 +26,22 @@ pub struct Message {
     pub thinking: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
-    /// On role=tool messages: which tool this result answers.
+    /// On role=tool messages: which tool this result answers (Ollama's native
+    /// correlation, by name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// On role=tool messages: the tool-call id this result answers. OpenAI-compat
+    /// providers require it; Ollama ignores it. Threaded from `ToolCall::id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into(), thinking: None, tool_calls: vec![], tool_name: None }
+        Self { role: Role::System, content: content.into(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into(), thinking: None, tool_calls: vec![], tool_name: None }
+        Self { role: Role::User, content: content.into(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None }
     }
     pub fn tool_result(tool_name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -45,6 +50,7 @@ impl Message {
             thinking: None,
             tool_calls: vec![],
             tool_name: Some(tool_name.into()),
+            tool_call_id: None,
         }
     }
 }

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 rift-core = { path = "../rift-core" }
 rift-ollama = { path = "../rift-ollama" }
+rift-openai = { path = "../rift-openai" }
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true

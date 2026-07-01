@@ -376,8 +376,11 @@ impl Agent {
                     let _ = tx.send(AgentEvent::Plan(self.ctx.plan_snapshot()));
                 }
 
-                // Correlate by the name the model used, per the native protocol.
-                self.messages.push(Message::tool_result(requested_name, result));
+                // Correlate by name (Ollama) and by id (OpenAI-compat): keep both
+                // so the tool result round-trips whatever provider is in use.
+                let mut result_msg = Message::tool_result(requested_name, result);
+                result_msg.tool_call_id = call.id.clone();
+                self.messages.push(result_msg);
             }
 
             if cancel.is_cancelled() {

@@ -4,6 +4,7 @@ mod commands;
 mod swarm_ui;
 mod update;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,9 +12,26 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use rift_core::{
     run_swarm, Agent, AgentConfig, AgentEvent, AskRequest, AskUserTool, Candidate, Config,
-    McpClient, McpTool, SessionStore, Swarm, ToolCtx, ToolRegistry,
+    McpClient, McpTool, ProviderConfig, SessionStore, Swarm, ToolCtx, ToolRegistry,
 };
 use rift_ollama::{OllamaClient, Provider};
+use rift_openai::OpenAiClient;
+
+/// Build a provider (and the actual model name) from a possibly-prefixed model
+/// string. `openrouter/qwen3` routes through the configured `openrouter`
+/// provider with model `qwen3`; any other model uses the default Ollama server.
+pub(crate) fn build_provider(
+    model: &str,
+    host: &str,
+    providers: &HashMap<String, ProviderConfig>,
+) -> (Arc<dyn Provider>, String) {
+    if let Some((name, rest)) = model.split_once('/') {
+        if let Some(pc) = providers.get(name) {
+            return (Arc::new(OpenAiClient::new(&pc.base_url, pc.resolve_key())), rest.to_string());
+        }
+    }
+    (Arc::new(OllamaClient::new(host)), model.to_string())
+}
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -106,7 +124,9 @@ async fn main() -> Result<()> {
     let temp = cli.temp.or(config.temperature).unwrap_or(0.2);
     let max_iterations = cli.max_iterations.or(config.max_iterations).unwrap_or(25);
 
-    let client: Arc<dyn Provider> = Arc::new(OllamaClient::new(&host));
+    // A `provider/model` string routes through a configured provider; otherwise
+    // the default Ollama server at `host`. `model` becomes the bare model name.
+    let (client, model) = build_provider(&model, &host, &config.providers);
 
     // Subcommands bypass the single-model preflight (swarm preflights each
     // candidate itself; merge is git-only).
@@ -278,6 +298,8 @@ async fn main() -> Result<()> {
                     config_path,
                     ask_rx,
                     skills,
+                    host: host.clone(),
+                    providers: config.providers.clone(),
                 },
             )
             .await
