@@ -451,7 +451,7 @@ impl App {
             history: vec![],
             history_idx: None,
             busy: false,
-            status: "Enter send · /help commands · Ctrl+T select/copy · Ctrl+L log · Esc cancel · Ctrl+C quit".into(),
+            status: "Enter send · /help commands · Ctrl+T select/copy · Ctrl+L log · Esc cancel · /quit exit".into(),
             cancel: None,
             quit: false,
             palette_idx: 0,
@@ -1066,7 +1066,13 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     if app.picker.is_some() {
                         match key.code {
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.quit = true;
+                                // Ctrl+C no longer exits; it just dismisses the picker.
+                                if let Some(p) = app.picker.take() {
+                                    if matches!(p.kind, PickerKind::Elicit { .. }) {
+                                        app.transcript.push_block(Kind::Info, "(question dismissed)".into());
+                                    }
+                                }
+                                app.status = "picker closed".into();
                             }
                             KeyCode::Up => {
                                 if let Some(p) = app.picker.as_mut() {
@@ -1125,7 +1131,16 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     }
                     match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.quit = true;
+                        // Ctrl+C no longer exits; that is what /quit is for. If a turn is
+                        // running, interrupt it (like Esc); otherwise remind the user.
+                        if app.busy {
+                            if let Some(cancel) = &app.cancel {
+                                cancel.cancel();
+                            }
+                            app.status = "cancelling… (type /quit to exit)".into();
+                        } else {
+                            app.status = "Ctrl+C won't exit; type /quit to quit".into();
+                        }
                     }
                     KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.show_log = !app.show_log;
