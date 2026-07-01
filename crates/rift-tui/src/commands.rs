@@ -104,7 +104,7 @@ fn help_text() -> String {
     }
     out.push_str(
         "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+T toggle mouse capture \
-         (off = select/copy text natively) · Esc cancel · Ctrl+C quit",
+         (off = select/copy text natively) · Esc cancel · /quit exit",
     );
     out
 }
