@@ -163,9 +163,13 @@ function.
   experimenting without recompiling (user-level only — a cloned repo must
   never be able to replace the system prompt). Swarm candidates each get
   their own family prompt, so cross-provider races compare tuned targets
-- [ ] **Family targets** — actual qwen/deepseek/glm/mistral files. Only
-  `default.md` ships until a candidate beats the incumbent through the
-  evolution gate; workflow in `crates/rift-core/prompts/README.md`
+- [ ] **Family targets** — actual qwen/deepseek/glm/mistral files, each
+  landed through the evolution gate; workflow in
+  `crates/rift-core/prompts/README.md`. First candidate `gemma.md` is in
+  provisionally: the first 3-model matrix run (2026-07) showed gemma4:26b
+  at 40/50 with 8 chat-only failures and 3× the tokens of ornith/qwen
+  (both 50/50 on the same default prompt) — validate vs that baseline on
+  the next matrix run
 - [ ] **Prompt evolution gate** — prompt files are versioned; a change
   merges only if it beats the incumbent on the bench matrix. Prompts are
   code: benchmark → review → revise → benchmark → merge

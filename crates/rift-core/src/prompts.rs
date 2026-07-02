@@ -39,7 +39,14 @@ pub struct PromptTarget {
 
 /// Compile-time embedded targets, (file stem, contents). `default.md` must
 /// always be present — it is the fallback for unmatched models.
-const EMBEDDED: &[(&str, &str)] = &[("default", include_str!("../prompts/default.md"))];
+const EMBEDDED: &[(&str, &str)] = &[
+    ("default", include_str!("../prompts/default.md")),
+    // Provisional (first bench matrix, 2026-07: 8/10 gemma4:26b failures were
+    // chat-only answers that ignored two nudges + a temp-0 retry; 2 more
+    // explored without editing). Validate against default.md's 40/50
+    // baseline on the next matrix run — see prompts/README.md.
+    ("gemma", include_str!("../prompts/gemma.md")),
+];
 
 /// Parse a target file: `--- family: x / match: a, b ---` frontmatter,
 /// body = template. Missing `family` falls back to the file stem.
@@ -152,13 +159,28 @@ mod tests {
     #[test]
     fn default_target_renders_placeholders() {
         let targets = embedded_targets();
-        let t = select("gemma4:26b", &targets).unwrap();
+        let t = select("deepseek-coder:33b", &targets).unwrap();
         assert_eq!(t.family, "default");
         let p = render(t, "/work/repo");
         assert!(p.starts_with("You are Rift, an expert coding agent working in the directory /work/repo."));
         assert!(!p.contains("{cwd}") && !p.contains("{shell}"));
         assert!(p.contains("repo_map"));
         assert!(p.ends_with("already see."));
+    }
+
+    #[test]
+    fn gemma_models_get_the_gemma_target() {
+        let targets = embedded_targets();
+        for model in ["gemma4:26b", "codegemma:7b", "hf.co/Jiunsong/SuperGemma4-31b-GGUF:latest"] {
+            let t = select(model, &targets).unwrap();
+            assert_eq!(t.family, "gemma", "{model}");
+        }
+        let p = render(select("gemma4:26b", &targets).unwrap(), "/work/repo");
+        assert!(p.contains("CRITICAL"));
+        assert!(!p.contains("{cwd}") && !p.contains("{shell}"));
+        // The rules the trace data says gemma needs are actually present.
+        assert!(p.contains("changes NOTHING"));
+        assert!(p.contains("never stop after only reading files"));
     }
 
     #[test]
@@ -191,7 +213,7 @@ mod tests {
 
         let mut targets = targets_from_dir(&dir);
         targets.extend(embedded_targets());
-        let t = select("gemma4:26b", &targets).unwrap();
+        let t = select("mistral:7b", &targets).unwrap();
         assert_eq!(render(t, "/x"), "overridden /x");
 
         let _ = std::fs::remove_dir_all(&dir);

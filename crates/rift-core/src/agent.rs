@@ -230,7 +230,11 @@ impl Agent {
         let mut repeat_counts: HashMap<String, u32> = HashMap::new();
         // Chat-only failure mode: small models sometimes "answer" a coding
         // task by pasting the fix into the reply without touching any file.
+        // A variant seen in the first bench matrix (gemma4:26b): the model
+        // explores (repo_map/read) but never edits — so the nudge keys on
+        // mutating tool use, not any tool use.
         let mut used_tools = false;
+        let mut used_mutating = false;
         let mut nudged_apply = false;
         let mut retried_greedy = false;
         let mut temp_override: Option<f64> = None;
@@ -363,19 +367,20 @@ impl Agent {
             self.messages.push(msg);
 
             if tool_calls.is_empty() {
-                // The model finished without touching a tool this turn even
-                // though the prompt asked for changes (or its reply contains
-                // code) — it likely "fixed" the task in chat instead of in
-                // the files. Nudge once to apply for real.
-                if !used_tools && !nudged_apply && (content_has_code || actionable_prompt) {
+                // The model finished without applying any change this turn
+                // even though the prompt asked for one (or its reply contains
+                // code) — either pure chat, or it explored with read-only
+                // tools and then "fixed" the task in its reply. Nudge once to
+                // apply for real.
+                if !used_mutating && !nudged_apply && (content_has_code || actionable_prompt) {
                     nudged_apply = true;
                     stats.failures.apply_nudges += 1;
                     let _ = tx.send(AgentEvent::Warning(
-                        "model replied with code but didn't modify any files; nudging it to apply the change".into(),
+                        "model finished without modifying any files; nudging it to apply the change".into(),
                     ));
                     self.messages.push(Message::user(
-                        "[system] You wrote code in your reply but did not change any project files. \
-                         If the request was to fix/implement something, apply it now using the read/edit/write \
+                        "[system] You have not changed any project files this turn. \
+                         If the request was to fix/implement something, apply it now using the edit/write \
                          tools and verify the result. If the user only wanted an explanation, restate your \
                          answer briefly without code.",
                     ));
@@ -478,6 +483,13 @@ impl Agent {
                     }
                 };
                 tool_records.push(ToolTraceRecord { name: canonical.clone(), ok });
+
+                // bash counts as mutating: a command can apply changes and we
+                // can't tell a read-only one apart; erring this way only
+                // suppresses a nudge, never fires a spurious one.
+                if ok && matches!(canonical.as_str(), "write" | "edit" | "bash") {
+                    used_mutating = true;
+                }
 
                 let _ = tx.send(AgentEvent::ToolResult {
                     name: canonical.clone(),
