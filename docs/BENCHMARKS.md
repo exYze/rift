@@ -90,6 +90,47 @@ fails, by running the tests and iterating. Demonstrating a 10–15% uplift
 requires a benchmark with a non-saturated baseline (HumanEval+/EvalPlus or
 harder agentic suites) — planned next.
 
+## 3-model matrix (2026-07-02, rift v0.7.1, DGX Spark server)
+
+First run of the model matrix (`bench.py --models a,b,c rift`): the same
+50-task suite, rift only, three local models on a DGX Spark Ollama server,
+wire-measured through the proxy. New in v0.7.1: every run also records a
+per-turn JSONL trace (tool calls, hardening/failure counters, outcome) to
+`bench/traces/` — the failure analysis below comes straight from them.
+
+| metric (50 tasks) | gemma4:26b | ornith:35b | qwen3.6:35b |
+|---|---:|---:|---:|
+| tasks solved (as recorded) | 40/50 | 49/50 | 49/50 |
+| tasks solved (corrected\*) | 40/50 | **50/50** | **50/50** |
+| prompt tokens (wire) | 1,499,962 | **517,110** | 531,376 |
+| output tokens | 73,019 | 32,564 | 32,444 |
+| wall time | 28.1 min | 14.2 min | **11.5 min** |
+| apply nudges / greedy retries | 36 / 13 | 0 / 0 | 0 / 0 |
+| doom loops / tool errors | 15 / 13 | 1 / 1 | 0 / 11 |
+
+\* `t12_cents` was unpassable as written: its verify asserted
+`total([1.005, 2.0]) == 3.01`, reachable only via `Decimal` +
+`ROUND_HALF_UP` semantics the prompt never asks for (1.005 is
+1.00499… in binary floating point). Both 35B models had written the
+canonical `round(sum(prices), 2)` and were marked failed. The verify was
+fixed with binary-exact values and re-validated against the preserved run
+dirs (pristine source still fails; both models' outputs pass).
+
+What the traces showed: 8 of gemma4:26b's 10 failures were **chat-only
+answers** — zero tool calls despite two apply-nudges and a temperature-0
+retry — and the other two explored with read-only tools and never edited.
+The recovery cycles are also where its 3× token bloat comes from. Two
+changes came out of this run: the apply-nudge now keys on *mutating* tool
+use (write/edit/bash) instead of any tool use, and gemma models get a
+dedicated prompt target (`crates/rift-core/prompts/gemma.md`, provisional)
+that puts the tool-application contract first. This run's 40/50 is the
+baseline those changes are measured against.
+
+Also surfaced: the suite is saturating for strong models (both 35Bs at
+100% corrected) — the same lesson HumanEval taught above. Benchmark suite
+v2 with a harder tier (multi-file, longer-horizon, compaction-exercising
+tasks) is the planned fix (docs/ROADMAP.md, v0.8).
+
 ## Caveats (honest ones)
 
 - Small suite, single run per task, nondeterministic models: treat as directional, not a rigorous eval. Observed run-to-run variance on the same task was ~±30% tokens for opencode (40k–71k on t1).
