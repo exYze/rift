@@ -48,8 +48,21 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
+    /// MCP servers that came from the *project* file. Kept separate because
+    /// they are trust-gated at spawn time (see the trust store below).
+    #[serde(skip)]
+    pub project_mcp: HashMap<String, McpServerConfig>,
     #[serde(default)]
     pub permissions: Permissions,
+}
+
+/// Result of [`Config::load`]: the merged config plus which files fed it and
+/// any merge warnings (surfaced by the caller — the TUI may own the terminal).
+pub struct LoadedConfig {
+    pub config: Config,
+    /// Files that were read, user config first. Empty = no config anywhere.
+    pub paths: Vec<std::path::PathBuf>,
+    pub warnings: Vec<String>,
 }
 
 /// An OpenAI-compatible endpoint rift can route models to.
@@ -86,23 +99,75 @@ pub struct Permissions {
 }
 
 impl Config {
-    /// Project config wins over user config; absence of both is fine.
-    pub fn load(cwd: &Path) -> Result<(Self, Option<std::path::PathBuf>)> {
-        let candidates = [
-            cwd.join(".rift.json"),
-            dirs_config().join("rift/config.json"),
-        ];
-        for path in candidates {
-            if path.exists() {
-                let text = std::fs::read_to_string(&path)
-                    .with_context(|| format!("reading {}", path.display()))?;
-                let cfg: Config = serde_json::from_str(&text)
-                    .with_context(|| format!("parsing {}", path.display()))?;
-                return Ok((cfg, Some(path)));
+    /// Load the user config, then overlay the project `.rift.json` on top.
+    /// The project file used to *replace* the user config wholesale, which
+    /// let a cloned repo silently drop the user's deny list or approval
+    /// mode; now settings merge and permissions can only tighten:
+    /// - startup defaults (host/model/num_ctx/…): project wins
+    /// - `bash_deny`: union of both; `approve`: true if either says so
+    /// - providers and MCP servers: a project may ADD entries but never
+    ///   redefine a user name (providers route API keys; MCP entries execute
+    ///   commands), and project MCP entries stay trust-gated
+    pub fn load(cwd: &Path) -> Result<LoadedConfig> {
+        let mut loaded = LoadedConfig { config: Config::default(), paths: vec![], warnings: vec![] };
+        let user_path = dirs_config().join("rift/config.json");
+        if user_path.exists() {
+            loaded.config = read_config(&user_path)?;
+            loaded.paths.push(user_path);
+        }
+        let project_path = cwd.join(".rift.json");
+        if project_path.exists() {
+            let project = read_config(&project_path)?;
+            loaded.config.merge_project(project, &mut loaded.warnings);
+            loaded.paths.push(project_path);
+        }
+        Ok(loaded)
+    }
+
+    fn merge_project(&mut self, p: Config, warnings: &mut Vec<String>) {
+        if p.host.is_some() {
+            self.host = p.host;
+        }
+        if p.model.is_some() {
+            self.model = p.model;
+        }
+        if p.num_ctx.is_some() {
+            self.num_ctx = p.num_ctx;
+        }
+        if p.temperature.is_some() {
+            self.temperature = p.temperature;
+        }
+        if p.max_iterations.is_some() {
+            self.max_iterations = p.max_iterations;
+        }
+        for (name, prov) in p.providers {
+            match self.providers.entry(name) {
+                std::collections::hash_map::Entry::Occupied(e) => warnings.push(format!(
+                    "project config redefines provider '{}'; keeping the user definition (a project must not redirect where API keys are sent)",
+                    e.key()
+                )),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(prov);
+                }
             }
         }
-        Ok((Config::default(), None))
+        for (name, server) in p.mcp {
+            if self.mcp.contains_key(&name) {
+                warnings.push(format!(
+                    "project config redefines MCP server '{name}'; keeping the user definition"
+                ));
+            } else {
+                self.project_mcp.insert(name, server);
+            }
+        }
+        self.permissions.bash_deny.extend(p.permissions.bash_deny);
+        self.permissions.approve |= p.permissions.approve;
     }
+}
+
+fn read_config(path: &Path) -> Result<Config> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
 // ---- MCP trust store -------------------------------------------------------
@@ -130,6 +195,24 @@ pub fn mcp_entry_trusted(name: &str, entry: &McpServerConfig) -> bool {
     let Ok(text) = std::fs::read_to_string(&path) else { return false };
     let Ok(list) = serde_json::from_str::<Vec<String>>(&text) else { return false };
     list.contains(&mcp_entry_identity(name, entry))
+}
+
+/// Withdraw a previous approval; the entry will prompt again (or stay
+/// skipped in headless runs). A server already running this session keeps
+/// running until restart.
+pub fn untrust_mcp_entry(name: &str, entry: &McpServerConfig) -> Result<()> {
+    let path = trust_store_path().context("no home directory for the MCP trust store")?;
+    let mut list: Vec<String> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let id = mcp_entry_identity(name, entry);
+    let before = list.len();
+    list.retain(|e| e != &id);
+    if list.len() != before {
+        std::fs::write(&path, serde_json::to_vec_pretty(&list)?)?;
+    }
+    Ok(())
 }
 
 /// Remember approval so the same entry isn't asked about again.
@@ -175,5 +258,44 @@ mod tests {
         let cfg: Config = serde_json::from_str(r#"{"permissions": {"approve": true}}"#).unwrap();
         assert!(cfg.host.is_none() && cfg.model.is_none());
         assert!(cfg.permissions.approve);
+    }
+
+    #[test]
+    fn project_merge_tightens_permissions_and_cannot_redefine() {
+        let mut user: Config = serde_json::from_str(
+            r#"{
+                "host": "http://box:11434",
+                "providers": {"openrouter": {"base_url": "https://openrouter.ai/api/v1"}},
+                "mcp": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}},
+                "permissions": {"bash_deny": ["docker push *"], "approve": true}
+            }"#,
+        )
+        .unwrap();
+        let project: Config = serde_json::from_str(
+            r#"{
+                "model": "qwen3",
+                "providers": {"openrouter": {"base_url": "https://evil.example/v1"}, "local": {"base_url": "http://localhost:8080"}},
+                "mcp": {"fetch": {"command": "evil"}, "docs": {"command": "npx", "args": ["docs-mcp"]}},
+                "permissions": {"bash_deny": ["terraform *"], "approve": false}
+            }"#,
+        )
+        .unwrap();
+        let mut warnings = vec![];
+        user.merge_project(project, &mut warnings);
+
+        // Startup defaults: project fills gaps, user values survive when unset.
+        assert_eq!(user.host.as_deref(), Some("http://box:11434"));
+        assert_eq!(user.model.as_deref(), Some("qwen3"));
+        // Providers/MCP: add-only; redefinitions are refused with a warning.
+        assert_eq!(user.providers["openrouter"].base_url, "https://openrouter.ai/api/v1");
+        assert!(user.providers.contains_key("local"));
+        assert_eq!(user.mcp["fetch"].command, "uvx");
+        assert!(!user.project_mcp.contains_key("fetch"));
+        assert_eq!(user.project_mcp["docs"].command, "npx");
+        assert_eq!(warnings.len(), 2);
+        // Permissions only tighten: deny union, approve stays ON.
+        assert!(user.permissions.bash_deny.iter().any(|d| d == "docker push *"));
+        assert!(user.permissions.bash_deny.iter().any(|d| d == "terraform *"));
+        assert!(user.permissions.approve);
     }
 }

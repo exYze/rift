@@ -108,6 +108,12 @@ impl Agent {
         self.client = client;
     }
 
+    /// Register a tool mid-session (e.g. an MCP server trusted via `/mcp
+    /// trust`); tool defs are rebuilt per request, so it's usable immediately.
+    pub fn register_tool(&mut self, tool: Box<dyn crate::tools::Tool>) {
+        self.registry.register(tool);
+    }
+
     pub fn registry(&self) -> &ToolRegistry {
         &self.registry
     }
