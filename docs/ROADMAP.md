@@ -89,11 +89,14 @@ one implementation, not the foundation.
   over user config with tighten-only permissions (0.6.2)
 - [x] Token accounting per provider (shipped 0.6.0; usage fields normalized
   into the shared `ChatStats`)
-- [ ] **Per-provider hardening test suite** — tool-call correlation,
-  context-overflow behavior, streaming quirks, run against real servers
-  (vLLM, LM Studio, llama.cpp, Ollama `/v1`) before a provider is called
-  supported. The one v0.6 item still open — gates v0.7's cloud providers
-  and v1.0's "provider matrix green in CI"
+- [x] **Per-provider hardening test suite** (shipped 0.6.4) — two layers:
+  a deterministic mock-server suite in CI (SSE/NDJSON framing across split
+  reads, missing `[DONE]`, mid-stream error events, tool-call accumulation
+  and id handling, `stream_options` rejection recovery, truncated-argument
+  errors, front-truncation detection, proxy error statuses), plus an
+  env-gated live suite (`RIFT_LIVE_OLLAMA` / `RIFT_LIVE_OPENAI` +
+  `RIFT_LIVE_MODEL`) run against real servers before a provider is called
+  supported. v1.0's "provider matrix green in CI" builds on the live layer
 
 ## v0.7 — Cloud providers + cross-provider swarm
 

@@ -365,6 +365,110 @@ fn strip_code_fence(text: &str) -> Option<&str> {
     Some(rest.trim())
 }
 
+/// Mock HTTP server for the per-provider hardening test suites (rift-ollama
+/// and rift-openai integration tests). Serves canned responses one
+/// connection at a time, records raw requests, and frames bodies by
+/// connection-close so streaming chunk boundaries land exactly where a test
+/// puts them. Not part of the public API.
+#[doc(hidden)]
+pub mod test_support {
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex;
+
+    pub struct MockResponse {
+        pub status: u16,
+        pub content_type: &'static str,
+        /// Written with a flush (and a small delay) between chunks, so each
+        /// chunk arrives as its own network read on the client side.
+        pub chunks: Vec<String>,
+    }
+
+    impl MockResponse {
+        pub fn json(status: u16, body: &str) -> Self {
+            Self { status, content_type: "application/json", chunks: vec![body.to_string()] }
+        }
+        /// 200 stream (SSE or NDJSON — the client decides how to parse).
+        pub fn stream(chunks: &[&str]) -> Self {
+            Self {
+                status: 200,
+                content_type: "text/event-stream",
+                chunks: chunks.iter().map(|c| c.to_string()).collect(),
+            }
+        }
+    }
+
+    pub struct MockServer {
+        pub base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl MockServer {
+        /// Serve `responses` in order, one per connection.
+        pub async fn start(responses: Vec<MockResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock server");
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+            let recorded = requests.clone();
+            tokio::spawn(async move {
+                for resp in responses {
+                    let Ok((mut sock, _)) = listener.accept().await else { return };
+                    let raw = read_request(&mut sock).await;
+                    recorded.lock().await.push(raw);
+                    let head = format!(
+                        "HTTP/1.1 {} MOCK\r\ncontent-type: {}\r\nconnection: close\r\n\r\n",
+                        resp.status, resp.content_type
+                    );
+                    if sock.write_all(head.as_bytes()).await.is_err() {
+                        continue;
+                    }
+                    for chunk in &resp.chunks {
+                        if sock.write_all(chunk.as_bytes()).await.is_err() {
+                            break;
+                        }
+                        let _ = sock.flush().await;
+                        // Let the client observe this chunk as a separate read.
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    let _ = sock.shutdown().await;
+                }
+            });
+            Self { base_url, requests }
+        }
+
+        /// Raw request texts (start-line + headers + body), in arrival order.
+        pub async fn requests(&self) -> Vec<String> {
+            self.requests.lock().await.clone()
+        }
+    }
+
+    async fn read_request(sock: &mut TcpStream) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            match sock.read(&mut tmp).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                    let need = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if buf.len() >= pos + 4 + need {
+                        break;
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
