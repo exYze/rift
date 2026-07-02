@@ -100,8 +100,15 @@ one implementation, not the foundation.
 
 ## v0.7 — Cloud providers + cross-provider swarm
 
-- [ ] **Anthropic + OpenAI native providers** (API keys via env/config;
-  never required)
+- [x] **Anthropic + OpenAI native providers** (shipped 0.7 phase 1) —
+  rift-anthropic speaks the Messages API natively (SSE content-block events,
+  tool_use/tool_result blocks, thinking with signature round-trip via
+  `Message::provider_data`, adaptive thinking, /v1/models discovery), with
+  its own mock + live hardening suites (`RIFT_LIVE_ANTHROPIC`). OpenAI rides
+  the existing rift-openai protocol. `anthropic/<model>` and `openai/<model>`
+  work with just ANTHROPIC_API_KEY / OPENAI_API_KEY in the env — no config
+  entry needed; `kind: "anthropic"` on a provider entry selects the protocol
+  for custom endpoints. API keys via env/config; never required
 - [ ] **Cross-provider WarpDrive** — the killer demo: race
   `gemma4:26b` (free, local) vs `claude-sonnet` (cloud) on the same task in
   isolated worktrees and merge whoever wins. No other TUI does this

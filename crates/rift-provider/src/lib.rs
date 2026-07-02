@@ -34,14 +34,37 @@ pub struct Message {
     /// providers require it; Ollama ignores it. Threaded from `ToolCall::id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Provider-specific raw payload for lossless round-trips. rift-anthropic
+    /// stores the assistant's raw content blocks here (thinking blocks carry
+    /// signatures the API validates on replay — the neutral fields can't
+    /// represent them). Other providers ignore it and build requests from the
+    /// neutral fields, so cross-provider switches keep working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_data: Option<Value>,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None }
+        Self {
+            role: Role::System,
+            content: content.into(),
+            thinking: None,
+            tool_calls: vec![],
+            tool_name: None,
+            tool_call_id: None,
+            provider_data: None,
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None }
+        Self {
+            role: Role::User,
+            content: content.into(),
+            thinking: None,
+            tool_calls: vec![],
+            tool_name: None,
+            tool_call_id: None,
+            provider_data: None,
+        }
     }
     pub fn tool_result(tool_name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -51,6 +74,7 @@ impl Message {
             tool_calls: vec![],
             tool_name: Some(tool_name.into()),
             tool_call_id: None,
+            provider_data: None,
         }
     }
 }

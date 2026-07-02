@@ -45,8 +45,12 @@ pub struct Config {
     /// TUI color theme name ("dark", "light", "mono"); runtime `/theme` overrides.
     #[serde(default)]
     pub theme: Option<String>,
-    /// Named OpenAI-compatible providers. Address a model as `<name>/<model>`
-    /// (e.g. `openrouter/qwen3`) to route it through one of these.
+    /// Named cloud providers. Address a model as `<name>/<model>` (e.g.
+    /// `openrouter/qwen3`, `anthropic/claude-opus-4-8`) to route it through
+    /// one of these. `kind` selects the wire protocol ("openai" default,
+    /// "anthropic" for the native Messages API). The names `anthropic` and
+    /// `openai` have built-in defaults that need only the ANTHROPIC_API_KEY /
+    /// OPENAI_API_KEY env var — no config entry required.
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
@@ -68,11 +72,15 @@ pub struct LoadedConfig {
     pub warnings: Vec<String>,
 }
 
-/// An OpenAI-compatible endpoint rift can route models to.
+/// A cloud/remote endpoint rift can route models to.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
     /// API root, e.g. `https://openrouter.ai/api/v1` (a `/v1` is appended if absent).
     pub base_url: String,
+    /// Wire protocol: `"openai"` (default — OpenAI-compatible chat
+    /// completions) or `"anthropic"` (native Anthropic Messages API).
+    #[serde(default)]
+    pub kind: Option<String>,
     /// Literal API key. Prefer `api_key_env` to keep secrets out of the file.
     #[serde(default)]
     pub api_key: Option<String>,

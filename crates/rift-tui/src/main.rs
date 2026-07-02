@@ -16,12 +16,16 @@ use rift_core::{
     run_swarm, Agent, AgentConfig, AgentEvent, AskRequest, AskUserTool, Candidate, Config,
     McpClient, McpTool, ProviderConfig, SessionStore, Swarm, ToolCtx, ToolRegistry,
 };
+use rift_anthropic::AnthropicClient;
 use rift_ollama::{OllamaClient, Provider};
 use rift_openai::OpenAiClient;
 
 /// Build a provider (and the actual model name) from a possibly-prefixed model
 /// string. `openrouter/qwen3` routes through the configured `openrouter`
-/// provider with model `qwen3`; any other model uses the default Ollama server.
+/// provider with model `qwen3`. `anthropic/<model>` and `openai/<model>` work
+/// with no config entry at all — just ANTHROPIC_API_KEY / OPENAI_API_KEY in
+/// the environment (cloud is an option, never a requirement). Any other model
+/// uses the default Ollama server.
 pub(crate) fn build_provider(
     model: &str,
     host: &str,
@@ -29,7 +33,23 @@ pub(crate) fn build_provider(
 ) -> (Arc<dyn Provider>, String) {
     if let Some((name, rest)) = model.split_once('/') {
         if let Some(pc) = providers.get(name) {
-            return (Arc::new(OpenAiClient::new(&pc.base_url, pc.resolve_key())), rest.to_string());
+            let client: Arc<dyn Provider> = match pc.kind.as_deref() {
+                Some("anthropic") => Arc::new(AnthropicClient::new(&pc.base_url, pc.resolve_key())),
+                _ => Arc::new(OpenAiClient::new(&pc.base_url, pc.resolve_key())),
+            };
+            return (client, rest.to_string());
+        }
+        // Built-in cloud providers (config entries with the same name override).
+        match name {
+            "anthropic" => {
+                let key = std::env::var("ANTHROPIC_API_KEY").ok();
+                return (Arc::new(AnthropicClient::new("https://api.anthropic.com", key)), rest.to_string());
+            }
+            "openai" => {
+                let key = std::env::var("OPENAI_API_KEY").ok();
+                return (Arc::new(OpenAiClient::new("https://api.openai.com/v1", key)), rest.to_string());
+            }
+            _ => {}
         }
     }
     (Arc::new(OllamaClient::new(host)), model.to_string())

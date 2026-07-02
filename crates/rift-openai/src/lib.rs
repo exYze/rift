@@ -466,6 +466,7 @@ impl Provider for OpenAiClient {
             tool_calls,
             tool_name: None,
             tool_call_id: None,
+            provider_data: None,
         };
         let stats = ChatStats {
             prompt_eval_count: acc.prompt_tokens,
@@ -485,7 +486,15 @@ mod tests {
     #[test]
     fn tool_result_maps_to_tool_call_id_and_string_args() {
         // An assistant tool call: neutral arguments (object) -> OpenAI string.
-        let mut assistant = Message { role: Role::Assistant, content: String::new(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None };
+        let mut assistant = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![],
+            tool_name: None,
+            tool_call_id: None,
+            provider_data: None,
+        };
         assistant.tool_calls.push(ToolCall {
             id: Some("call_9".into()),
             function: ToolCallFunction {
