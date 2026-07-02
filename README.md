@@ -26,6 +26,12 @@ Full details and rationale in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Install
 
+**Homebrew** (macOS / Linux):
+
+```sh
+brew install exYze/tap/rift
+```
+
 **macOS / Linux** (one line, no dependencies):
 
 ```sh
@@ -36,6 +42,12 @@ curl -fsSL https://raw.githubusercontent.com/exYze/rift/master/install.sh | sh
 
 ```powershell
 irm https://raw.githubusercontent.com/exYze/rift/master/install.ps1 | iex
+```
+
+**Windows via scoop** (installs straight from the manifest, auto-updates):
+
+```powershell
+scoop install https://raw.githubusercontent.com/exYze/rift/master/packaging/scoop/rift.json
 ```
 
 **From source** (any platform with Rust):
