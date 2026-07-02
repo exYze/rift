@@ -105,6 +105,51 @@ impl Config {
     }
 }
 
+// ---- MCP trust store -------------------------------------------------------
+//
+// MCP entries execute arbitrary commands at startup. The user config is the
+// user's own machine, but a project `.rift.json` can arrive inside a cloned
+// repo — running its `mcp` entries unprompted is remote code execution. So
+// project-defined servers need a one-time approval, remembered per exact
+// entry (name + command + args + env, values included: a changed env var can
+// change what a trusted command does).
+
+fn mcp_entry_identity(name: &str, entry: &McpServerConfig) -> String {
+    let mut env: Vec<(&String, &String)> = entry.env.iter().collect();
+    env.sort();
+    format!("{name}\u{0}{}\u{0}{}\u{0}{env:?}", entry.command, entry.args.join("\u{1}"))
+}
+
+fn trust_store_path() -> Option<std::path::PathBuf> {
+    crate::paths::data_dir().map(|d| d.join("rift/trusted-mcp.json"))
+}
+
+/// Has the user previously approved this exact project-config MCP entry?
+pub fn mcp_entry_trusted(name: &str, entry: &McpServerConfig) -> bool {
+    let Some(path) = trust_store_path() else { return false };
+    let Ok(text) = std::fs::read_to_string(&path) else { return false };
+    let Ok(list) = serde_json::from_str::<Vec<String>>(&text) else { return false };
+    list.contains(&mcp_entry_identity(name, entry))
+}
+
+/// Remember approval so the same entry isn't asked about again.
+pub fn trust_mcp_entry(name: &str, entry: &McpServerConfig) -> Result<()> {
+    let path = trust_store_path().context("no home directory for the MCP trust store")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut list: Vec<String> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let id = mcp_entry_identity(name, entry);
+    if !list.contains(&id) {
+        list.push(id);
+        std::fs::write(&path, serde_json::to_vec_pretty(&list)?)?;
+    }
+    Ok(())
+}
+
 fn dirs_config() -> std::path::PathBuf {
     // Falls back to a CWD-relative `.config` only if no home dir can be found
     // at all (no HOME, no USERPROFILE) — practically never.

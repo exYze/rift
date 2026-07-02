@@ -10,7 +10,7 @@ pub mod swarm;
 pub mod tools;
 
 pub use agent::{Agent, AgentConfig, AgentEvent, TurnStats};
-pub use config::{Config, ProviderConfig};
+pub use config::{mcp_entry_trusted, trust_mcp_entry, Config, ProviderConfig};
 pub use mcp::{McpClient, McpTool};
 pub use session::{SavedSession, SessionStore};
 pub use skills::{load_skills, skills_prompt_section, Skill, SkillTool};
