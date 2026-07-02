@@ -3,6 +3,26 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v0.8.1 — 2026-07-02
+
+- **Persistent outline cache**: repo_map outlines cached per repo root
+  keyed by (mtime, size) — a hit skips the file read and the tree-sitter
+  parse; best-effort JSON under the user data dir
+- **Idle-time compaction**: the context-budget check also runs right after
+  each turn, so pruning/summarizing happens while you read the reply
+  instead of mid-turn while you wait
+- **Hard-tier benchmark suite** (`bench/tasks2/`, `--dir tasks2`): 10
+  harder tasks — multi-file symptom-not-location bugs, fix-the-failing-test
+  with tamper guards, needle-in-a-haystack long-session modules, a
+  cross-file signature refactor
+- **First judge-accuracy results**: qwen3.6:35b judging gemma4:26b vs
+  ornith:35b races went 14/14 on discriminative cases (see
+  docs/BENCHMARKS.md)
+- Community docs: CHANGELOG, CONTRIBUTING, issue templates
+- Demo GIF in the README (reproducible VHS tape committed)
+- Packaging: Homebrew formula generator + release-workflow tap
+  automation, scoop manifest with autoupdate
+
 ## v0.8.0 — 2026-07-02 · v0.7 phase complete: cloud + swarm
 
 - **Cross-provider WarpDrive**: one swarm race can mix providers — each
