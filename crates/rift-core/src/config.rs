@@ -53,6 +53,12 @@ pub struct Config {
     /// OPENAI_API_KEY env var — no config entry required.
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+    /// Cost display rates ($ per million tokens) keyed by a model-name
+    /// substring, for metered providers rift has no built-in rates for:
+    /// `"pricing": {"gpt-5": {"input": 1.25, "output": 10.0}}`. Display
+    /// only — never affects requests.
+    #[serde(default)]
+    pub pricing: HashMap<String, Pricing>,
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
     /// MCP servers that came from the *project* file. Kept separate because
@@ -96,6 +102,13 @@ impl ProviderConfig {
             .clone()
             .or_else(|| self.api_key_env.as_ref().and_then(|e| std::env::var(e).ok()))
     }
+}
+
+/// USD per million tokens, for the cost display.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct Pricing {
+    pub input: f64,
+    pub output: f64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -164,6 +177,11 @@ impl Config {
                     e.insert(prov);
                 }
             }
+        }
+        // Pricing entries are display-only: a project may add rates for its
+        // models but never redefine the user's.
+        for (name, rates) in p.pricing {
+            self.pricing.entry(name).or_insert(rates);
         }
         for (name, server) in p.mcp {
             if self.mcp.contains_key(&name) {

@@ -93,7 +93,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
     ("/save", "<name>", "name this session (keeps autosaving to it)"),
     ("/skills", "", "list available skills (run with /skill:<name>)"),
-    ("/swarm", "<task> [--models a,b]", "WarpDrive race in isolated worktrees"),
+    ("/swarm", "<task> [--models a,b] [--judge m]", "WarpDrive race in isolated worktrees"),
     ("/worktrees", "", "list swarm worktrees + patches"),
     ("/think", "[on|off|auto]", "thinking mode (capability-checked)"),
     ("/tokens", "", "context budget, usage estimate, calibration"),
@@ -600,15 +600,19 @@ async fn cmd_swarm(
     fx: &UnboundedSender<UiEffect>,
     cancel: &CancellationToken,
 ) -> Result<String> {
-    // Parse: task words, optional `--models a,b`, optional `--explore`.
+    // Parse: task words, optional `--models a,b` / `--judge model` / `--explore`.
     let mut task_words: Vec<&str> = vec![];
     let mut models = agent.cfg.model.clone();
     let mut explore = false;
+    let mut judge: Option<String> = None;
     let mut words = rest.split_whitespace().peekable();
     while let Some(w) = words.next() {
         match w {
             "--models" => {
                 models = words.next().ok_or_else(|| anyhow!("--models needs a value"))?.to_string();
+            }
+            "--judge" => {
+                judge = Some(words.next().ok_or_else(|| anyhow!("--judge needs a model"))?.to_string());
             }
             "--explore" => explore = true,
             _ => task_words.push(w),
@@ -616,7 +620,7 @@ async fn cmd_swarm(
     }
     let task = task_words.join(" ");
     if task.is_empty() {
-        bail!("usage: /swarm <task> [--models a,b] [--explore]");
+        bail!("usage: /swarm <task> [--models a,b] [--judge model] [--explore]");
     }
 
     let swarm = Swarm::discover(&cx.cwd).await?;
@@ -667,7 +671,8 @@ async fn cmd_swarm(
     });
 
     let base_cfg = agent.cfg.clone();
-    let outcomes = run_swarm(agent.client(), &base_cfg, &swarm, candidates, &task, etx, cancel).await;
+    let factory = crate::provider_factory(&cx.host, &cx.providers);
+    let outcomes = run_swarm(&factory, &base_cfg, &swarm, candidates, &task, etx, cancel).await;
     let _ = forwarder.await;
 
     let mut out = String::from("race results:\n");
@@ -689,11 +694,23 @@ async fn cmd_swarm(
             out.push_str(&format!("  says: {}\n", summary.replace('\n', " ")));
         }
     }
+    let mut verdict_note = String::new();
+    if let Some(judge_model) = judge {
+        match rift_core::judge_swarm(&factory, &judge_model, base_cfg.num_ctx, &task, &outcomes).await {
+            Ok(v) => {
+                out.push_str(&format!("\njudge ({judge_model}):\n{}\n", v.text.trim()));
+                if let Some(w) = &v.winner {
+                    verdict_note = format!(" — judge recommends {w}");
+                }
+            }
+            Err(e) => out.push_str(&format!("\njudge failed: {e:#}\n")),
+        }
+    }
     if mergeable > 0 {
         out.push_str("\napply a winner with /merge <name> [--cleanup]");
     }
     let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
-    Ok(format!("race done — {mergeable} candidate(s) produced changes"))
+    Ok(format!("race done — {mergeable} candidate(s) produced changes{verdict_note}"))
 }
 
 async fn cmd_merge(rest: &str, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {

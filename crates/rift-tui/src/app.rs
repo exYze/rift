@@ -698,6 +698,8 @@ struct SessionStats {
     model_calls: u64,
     output_tokens: u64,
     prompt_tokens: u64,
+    /// Prompt tokens summed across every call — the billable input.
+    billed_prompt_tokens: u64,
     tool_calls: u64,
     compactions: u64,
     duration_ms: u128,
@@ -956,6 +958,7 @@ impl App {
                     self.session_stats.model_calls += stats.iterations as u64;
                     self.session_stats.output_tokens += stats.output_tokens;
                     self.session_stats.prompt_tokens += stats.prompt_tokens;
+                    self.session_stats.billed_prompt_tokens += stats.billed_prompt_tokens;
                     self.session_stats.duration_ms += stats.duration_ms;
                     self.session_stats.failures.add(&stats.failures);
                 }
@@ -1371,11 +1374,14 @@ pub struct TuiOptions {
     pub skills: Vec<Skill>,
     pub host: String,
     pub providers: std::collections::HashMap<String, rift_core::ProviderConfig>,
+    /// Config `pricing` map for the cost display (built-ins live in
+    /// crate::pricing).
+    pub pricing: std::collections::HashMap<String, rift_core::config::Pricing>,
     pub theme: &'static theme::Theme,
 }
 
 pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
-    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, providers, theme } = opts;
+    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, providers, pricing, theme } = opts;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<UiMsg>();
@@ -1910,6 +1916,20 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                     app.session_stats.duration_ms as f64 / 1000.0,
                                     f.model_failures(),
                                 );
+                                // Metered providers: estimated $ at the current
+                                // model's rates (billed input = per-call sums).
+                                if let Some(rates) = crate::pricing::lookup(&app.model, &pricing) {
+                                    let s = &app.session_stats;
+                                    let usd = crate::pricing::cost(s.billed_prompt_tokens, s.output_tokens, rates);
+                                    out.push_str(&format!(
+                                        "\n  est. cost:     {} ({} billed in @ ${}/MTok, {} out @ ${}/MTok)",
+                                        crate::pricing::format_cost(usd),
+                                        s.billed_prompt_tokens,
+                                        rates.0,
+                                        s.output_tokens,
+                                        rates.1,
+                                    ));
+                                }
                                 if f.model_failures() > 0 {
                                     let detail: Vec<String> = [
                                         ("textual tool calls", f.textual_recoveries),

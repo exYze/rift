@@ -2,6 +2,7 @@ mod app;
 mod clipboard;
 mod commands;
 mod highlight;
+mod pricing;
 mod swarm_ui;
 mod theme;
 mod update;
@@ -53,6 +54,18 @@ pub(crate) fn build_provider(
         }
     }
     (Arc::new(OllamaClient::new(host)), model.to_string())
+}
+
+/// A [`rift_core::ProviderFactory`] over `build_provider`: lets the swarm
+/// (and its judge) resolve each candidate's model string independently, so
+/// one race can mix local and cloud providers.
+pub(crate) fn provider_factory(
+    host: &str,
+    providers: &HashMap<String, ProviderConfig>,
+) -> rift_core::ProviderFactory {
+    let host = host.to_string();
+    let providers = providers.clone();
+    Arc::new(move |model: &str| Ok(build_provider(model, &host, &providers)))
 }
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -108,6 +121,10 @@ enum Cmd {
         /// Also run each model at temperature 0.8 as an extra candidate
         #[arg(long)]
         explore: bool,
+        /// Referee model that scores the candidates' diffs and recommends a
+        /// winner after the race (e.g. qwen3.6:35b or anthropic/claude-sonnet-5)
+        #[arg(long)]
+        judge: Option<String>,
         /// Plain streaming output instead of the interactive TUI
         #[arg(long)]
         no_tui: bool,
@@ -163,7 +180,7 @@ async fn main() -> Result<()> {
     // Subcommands bypass the single-model preflight (swarm preflights each
     // candidate itself; merge is git-only).
     match &cli.cmd {
-        Some(Cmd::Swarm { task, models, explore, no_tui }) => {
+        Some(Cmd::Swarm { task, models, explore, judge, no_tui }) => {
             let cfg_base = AgentConfig {
                 model: String::new(), // set per candidate
                 num_ctx,
@@ -172,7 +189,8 @@ async fn main() -> Result<()> {
                 think: None,
                 always_task: true,
             };
-            return run_swarm_cli(client, cfg_base, task, models, *explore, *no_tui).await;
+            let factory = provider_factory(&host, &config.providers);
+            return run_swarm_cli(factory, cfg_base, task, models, *explore, judge.clone(), *no_tui).await;
         }
         Some(Cmd::Merge { name, cleanup }) => {
             let swarm = Swarm::discover(&std::env::current_dir()?).await?;
@@ -362,7 +380,10 @@ async fn main() -> Result<()> {
     };
 
     match cli.prompt {
-        Some(prompt) => run_headless(agent, prompt, store).await,
+        Some(prompt) => {
+            let rates = pricing::lookup(&model, &config.pricing);
+            run_headless(agent, prompt, store, rates).await
+        }
         None => {
             app::run_tui(
                 agent,
@@ -376,6 +397,7 @@ async fn main() -> Result<()> {
                     skills,
                     host: host.clone(),
                     providers: config.providers.clone(),
+                    pricing: config.pricing.clone(),
                     theme: ui_theme,
                 },
             )
@@ -387,11 +409,12 @@ async fn main() -> Result<()> {
 /// `rift swarm`: race N models on one task in parallel worktrees. Interactive
 /// TUI by default on a terminal; plain streaming with --no-tui (or piped).
 async fn run_swarm_cli(
-    client: Arc<dyn Provider>,
+    factory: rift_core::ProviderFactory,
     cfg_base: AgentConfig,
     task: &str,
     models: &str,
     explore: bool,
+    judge: Option<String>,
     no_tui: bool,
 ) -> Result<()> {
     const COLORS: [&str; 6] = ["\x1b[36m", "\x1b[35m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[31m"];
@@ -421,7 +444,7 @@ async fn run_swarm_cli(
 
     use std::io::IsTerminal;
     if !no_tui && std::io::stdout().is_terminal() {
-        return swarm_ui::run_swarm_tui(client, cfg_base, swarm, candidates, task.to_string()).await;
+        return swarm_ui::run_swarm_tui(factory, cfg_base, swarm, candidates, task.to_string(), judge).await;
     }
 
     println!("WarpDrive swarm: {} candidate(s) on task: {task}", candidates.len());
@@ -461,7 +484,7 @@ async fn run_swarm_cli(
     });
 
     let cancel = CancellationToken::new();
-    let outcomes = run_swarm(&client, &cfg_base, &swarm, candidates, task, tx, &cancel).await;
+    let outcomes = run_swarm(&factory, &cfg_base, &swarm, candidates, task, tx, &cancel).await;
     let _ = printer.await;
 
     println!("\n=== results ===");
@@ -480,6 +503,19 @@ async fn run_swarm_cli(
             None => println!("  changes: {}", o.diff_stat),
         }
     }
+
+    if let Some(judge_model) = judge {
+        println!("\n=== judge ({judge_model}) ===");
+        match rift_core::judge_swarm(&factory, &judge_model, cfg_base.num_ctx, task, &outcomes).await {
+            Ok(v) => {
+                println!("{}", v.text.trim());
+                // Machine-parseable verdict line (the judge bench keys on it).
+                println!("JUDGE: winner={}", v.winner.as_deref().unwrap_or("none"));
+            }
+            Err(e) => println!("judge failed: {e:#}"),
+        }
+    }
+
     println!("\napply a winner with: rift merge <name> [--cleanup]   (worktrees kept under .rift/worktrees/)");
     Ok(())
 }
@@ -504,7 +540,12 @@ fn indent(s: &str, pad: &str) -> String {
 
 /// One-shot mode: prints the event stream to stdout. Used for scripting and
 /// as the harness entry point for benchmarks.
-async fn run_headless(mut agent: Agent, prompt: String, store: SessionStore) -> Result<()> {
+async fn run_headless(
+    mut agent: Agent,
+    prompt: String,
+    store: SessionStore,
+    rates: Option<(f64, f64)>,
+) -> Result<()> {
     use std::io::Write;
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     let printer = tokio::spawn(async move {
@@ -560,8 +601,20 @@ async fn run_headless(mut agent: Agent, prompt: String, store: SessionStore) -> 
                         0 => String::new(),
                         n => format!(", {n} recoveries"),
                     };
+                    let cost = rates
+                        .map(|r| {
+                            format!(
+                                ", est. {}",
+                                pricing::format_cost(pricing::cost(
+                                    stats.billed_prompt_tokens,
+                                    stats.output_tokens,
+                                    r
+                                ))
+                            )
+                        })
+                        .unwrap_or_default();
                     println!(
-                        "\n\x1b[2m[{} iterations, {} prompt tok, {} out tok, {:.1} tok/s, {:.1}s{recoveries}]\x1b[0m",
+                        "\n\x1b[2m[{} iterations, {} prompt tok, {} out tok, {:.1} tok/s, {:.1}s{recoveries}{cost}]\x1b[0m",
                         stats.iterations,
                         stats.prompt_tokens,
                         stats.output_tokens,

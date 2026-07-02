@@ -7,6 +7,9 @@
       "api_key_env": "OPENROUTER_API_KEY"
     }
   },
+  "pricing": {
+    "gpt-5": { "input": 1.25, "output": 10.0 }
+  },
   "mcp": {},
   "permissions": {
     "bash_deny": [],

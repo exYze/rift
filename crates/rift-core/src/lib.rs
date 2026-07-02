@@ -18,7 +18,9 @@ pub use config::{
 pub use mcp::{McpClient, McpTool};
 pub use session::{SavedSession, SessionStore};
 pub use skills::{load_skills, skills_prompt_section, Skill, SkillTool};
-pub use swarm::{run_swarm, Candidate, CandidateOutcome, Swarm};
+pub use swarm::{
+    judge_swarm, run_swarm, Candidate, CandidateOutcome, JudgeVerdict, ProviderFactory, Swarm,
+};
 pub use tools::{
     builtin_bash_deny, AskRequest, AskUserTool, EditRecord, PlanItem, Tool, ToolCtx, ToolRegistry,
 };

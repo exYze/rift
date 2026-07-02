@@ -10,8 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use rift_core::{run_swarm, AgentConfig, AgentEvent, Candidate, CandidateOutcome, Swarm, TurnStats};
-use rift_ollama::Provider;
+use rift_core::{
+    judge_swarm, run_swarm, AgentConfig, AgentEvent, Candidate, CandidateOutcome, JudgeVerdict,
+    ProviderFactory, Swarm, TurnStats,
+};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseEventKind,
@@ -126,6 +128,26 @@ impl SwarmApp {
         self.race_done = true;
         self.message = "race finished — m merges the selected candidate".into();
     }
+
+    /// Surface the judge's verdict: full scoring text into the picked
+    /// winner's log (or the selected one if no winner), tab auto-selected.
+    fn load_verdict(&mut self, v: &JudgeVerdict) {
+        let target = v
+            .winner
+            .as_ref()
+            .and_then(|w| self.cands.iter().position(|c| &c.name == w))
+            .unwrap_or(self.selected);
+        if v.winner.is_some() {
+            self.selected = target;
+        }
+        if let Some(c) = self.cands.get_mut(target) {
+            c.log.push_block(Kind::Info, format!("── judge verdict ──\n{}", v.text));
+        }
+        self.message = match &v.winner {
+            Some(w) => format!("judge recommends {w} — m merges it"),
+            None => "judge: no winner (verdict in the log pane)".into(),
+        };
+    }
 }
 
 fn draw(frame: &mut Frame, app: &mut SwarmApp, task: &str) {
@@ -212,11 +234,12 @@ fn draw(frame: &mut Frame, app: &mut SwarmApp, task: &str) {
 }
 
 pub async fn run_swarm_tui(
-    client: Arc<dyn Provider>,
+    factory: ProviderFactory,
     cfg: AgentConfig,
     swarm: Swarm,
     candidates: Vec<Candidate>,
     task: String,
+    judge: Option<String>,
 ) -> Result<()> {
     let swarm = Arc::new(swarm);
     let (tx, mut rx) = mpsc::unbounded_channel::<(usize, AgentEvent)>();
@@ -243,14 +266,16 @@ pub async fn run_swarm_tui(
         quit: false,
     };
 
+    let num_ctx = cfg.num_ctx;
     let race = {
-        let client = client.clone();
+        let factory = factory.clone();
         let swarm = swarm.clone();
         let cancel = cancel.clone();
         let task = task.clone();
-        tokio::spawn(async move { run_swarm(&client, &cfg, &swarm, candidates, &task, tx, &cancel).await })
+        tokio::spawn(async move { run_swarm(&factory, &cfg, &swarm, candidates, &task, tx, &cancel).await })
     };
     let mut race_handle = Some(race);
+    let mut judge_handle: Option<tokio::task::JoinHandle<Result<JudgeVerdict>>> = None;
 
     let mut terminal = ratatui::init();
     let _ = execute!(stdout(), EnableMouseCapture);
@@ -269,13 +294,36 @@ pub async fn run_swarm_tui(
             app.handle_event(idx, ev);
             needs_redraw = true;
         }
-        // Race finished? Load outcomes exactly once.
+        // Race finished? Load outcomes exactly once; hand them to the judge
+        // if one was requested (the TUI stays interactive while it thinks).
         if let Some(handle) = &race_handle {
             if handle.is_finished() {
                 let handle = race_handle.take().unwrap();
                 match handle.await {
-                    Ok(outcomes) => app.load_outcomes(&outcomes),
+                    Ok(outcomes) => {
+                        app.load_outcomes(&outcomes);
+                        if let Some(judge_model) = judge.clone() {
+                            app.message = format!("judge ({judge_model}) is scoring the candidates…");
+                            let factory = factory.clone();
+                            let task = task.clone();
+                            judge_handle = Some(tokio::spawn(async move {
+                                judge_swarm(&factory, &judge_model, num_ctx, &task, &outcomes).await
+                            }));
+                        }
+                    }
                     Err(e) => app.message = format!("race task failed: {e}"),
+                }
+                needs_redraw = true;
+            }
+        }
+        // Judge finished? Surface the verdict once.
+        if let Some(handle) = &judge_handle {
+            if handle.is_finished() {
+                let handle = judge_handle.take().unwrap();
+                match handle.await {
+                    Ok(Ok(v)) => app.load_verdict(&v),
+                    Ok(Err(e)) => app.message = format!("judge failed: {e:#}"),
+                    Err(e) => app.message = format!("judge task failed: {e}"),
                 }
                 needs_redraw = true;
             }

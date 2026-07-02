@@ -109,12 +109,20 @@ one implementation, not the foundation.
   work with just ANTHROPIC_API_KEY / OPENAI_API_KEY in the env — no config
   entry needed; `kind: "anthropic"` on a provider entry selects the protocol
   for custom endpoints. API keys via env/config; never required
-- [ ] **Cross-provider WarpDrive** — the killer demo: race
-  `gemma4:26b` (free, local) vs `claude-sonnet` (cloud) on the same task in
-  isolated worktrees and merge whoever wins. No other TUI does this
-- [ ] Cost display for metered providers (`/stats` shows $ next to tokens)
-- [ ] Swarm auto-judge: optional referee model scores candidate diffs and
-  recommends a winner
+- [x] **Cross-provider WarpDrive** (shipped 0.8.0) — race `gemma4:26b`
+  (free, local) vs `anthropic/claude-sonnet-4-6` (cloud) on the same task
+  in isolated worktrees and merge whoever wins: each candidate's model
+  string resolves through a provider factory, so one race spans providers.
+  No other TUI does this
+- [x] Cost display for metered providers (shipped 0.8.0) — `/stats` and the
+  headless summary show estimated $; billed input tracked as summed
+  per-call prompt tokens (not last-of-turn); built-in Anthropic rates,
+  config `pricing` map for everything else
+- [x] Swarm auto-judge (shipped 0.8.0) — `--judge <model>` scores every
+  candidate's diff and recommends a winner (TUI: verdict in the winner's
+  log, tab auto-selected; headless: machine-parseable `JUDGE: winner=`
+  line). `bench/judge_bench.py` measures judge accuracy against verify.sh
+  ground truth — discriminative-case accuracy is the headline number
 - [x] **Turn traces + failure counters** — the hardening layer already
   *detects* the interesting failures (textual tool-call recovery, alias
   resolution, doom-loop guard, truncation detection, fuzzy edit misses)

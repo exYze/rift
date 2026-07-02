@@ -61,7 +61,11 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone, Default)]
 pub struct TurnStats {
     pub iterations: usize,
+    /// The LAST call's prompt size — the context-window gauge.
     pub prompt_tokens: u64,
+    /// Prompt tokens summed across every call this turn — what a metered
+    /// provider actually bills for input (each iteration re-sends history).
+    pub billed_prompt_tokens: u64,
     pub output_tokens: u64,
     pub duration_ms: u128,
     pub tokens_per_sec: f64,
@@ -199,6 +203,7 @@ impl Agent {
             outcome,
             iterations: stats.iterations,
             prompt_tokens: stats.prompt_tokens,
+            billed_prompt_tokens: stats.billed_prompt_tokens,
             output_tokens: stats.output_tokens,
             duration_ms: stats.duration_ms,
             tools,
@@ -312,6 +317,7 @@ impl Agent {
             };
 
             stats.prompt_tokens = outcome.stats.prompt_eval_count;
+            stats.billed_prompt_tokens += outcome.stats.prompt_eval_count;
             stats.output_tokens += outcome.stats.eval_count;
             stats.tokens_per_sec = outcome.stats.tokens_per_sec();
 

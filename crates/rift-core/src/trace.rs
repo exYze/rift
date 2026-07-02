@@ -100,6 +100,8 @@ pub struct TurnTrace<'a> {
     pub outcome: &'a str,
     pub iterations: usize,
     pub prompt_tokens: u64,
+    /// Summed per-call prompt tokens — the billable input for the turn.
+    pub billed_prompt_tokens: u64,
     pub output_tokens: u64,
     pub duration_ms: u128,
     pub tools: &'a [ToolTraceRecord],
@@ -162,6 +164,7 @@ mod tests {
             outcome: "answered",
             iterations: 3,
             prompt_tokens: 1200,
+            billed_prompt_tokens: 2900,
             output_tokens: 340,
             duration_ms: 4200,
             tools,
