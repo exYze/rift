@@ -88,7 +88,13 @@ struct BlockEntry {
 pub(crate) struct Pane {
     blocks: Vec<BlockEntry>,
     wrapped: Vec<(Kind, String)>,
+    /// Wrapped line count per block (parallel to `blocks`), so a streaming
+    /// append re-wraps only the tail block instead of the whole transcript.
+    line_counts: Vec<usize>,
+    /// Index of the first block whose cached wrap is stale.
+    first_dirty: usize,
     wrap_width: u16,
+    /// Full invalidation (width-independent), e.g. after suspending for $EDITOR.
     pub(crate) dirty: bool,
     pub(crate) scroll_from_bottom: usize,
     pub(crate) view_height: usize,
@@ -146,6 +152,8 @@ impl Pane {
         Self {
             blocks: vec![],
             wrapped: vec![],
+            line_counts: vec![],
+            first_dirty: 0,
             wrap_width: 0,
             dirty: true,
             scroll_from_bottom: 0,
@@ -155,14 +163,14 @@ impl Pane {
     }
 
     pub(crate) fn push_block(&mut self, kind: Kind, text: String) {
+        self.first_dirty = self.first_dirty.min(self.blocks.len());
         self.blocks.push(BlockEntry { kind, text: sanitize_for_pane(&text), gap: true });
-        self.dirty = true;
     }
 
     /// Dense single line, no blank separator after it (tool logs, diffs).
     pub(crate) fn push_line(&mut self, kind: Kind, text: String) {
+        self.first_dirty = self.first_dirty.min(self.blocks.len());
         self.blocks.push(BlockEntry { kind, text: sanitize_for_pane(&text), gap: false });
-        self.dirty = true;
     }
 
     pub(crate) fn append_stream(&mut self, kind: Kind, text: &str) {
@@ -171,7 +179,8 @@ impl Pane {
             Some(last) if last.kind == kind => last.text.push_str(&text),
             _ => self.blocks.push(BlockEntry { kind, text, gap: true }),
         }
-        self.dirty = true;
+        // Only the tail block changed; leave earlier wrap caches intact.
+        self.first_dirty = self.first_dirty.min(self.blocks.len() - 1);
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -184,16 +193,24 @@ impl Pane {
     }
 
     pub(crate) fn rebuild(&mut self, width: u16) {
-        if !self.dirty && width == self.wrap_width {
+        let width_changed = width != self.wrap_width;
+        if self.dirty || width_changed {
+            // Width change (or external invalidation) voids every block's cache.
+            self.first_dirty = 0;
+            self.dirty = false;
+            self.wrap_width = width;
+        }
+        if self.first_dirty >= self.blocks.len() {
             return;
         }
-        let width_changed = width != self.wrap_width;
         let old_total = self.wrapped.len();
-        self.wrap_width = width;
-        self.dirty = false;
         let w = width.max(10) as usize;
-        self.wrapped.clear();
-        for block in &self.blocks {
+        // Drop cached lines from the first stale block onward; re-wrap the tail.
+        self.line_counts.truncate(self.first_dirty);
+        let keep: usize = self.line_counts.iter().sum();
+        self.wrapped.truncate(keep);
+        for block in &self.blocks[self.first_dirty..] {
+            let lines_before = self.wrapped.len();
             let prefixed = match block.kind {
                 Kind::User => format!("❯ {}", block.text),
                 _ => block.text.clone(),
@@ -235,7 +252,9 @@ impl Pane {
             if block.gap {
                 self.wrapped.push((block.kind, String::new()));
             }
+            self.line_counts.push(self.wrapped.len() - lines_before);
         }
+        self.first_dirty = self.blocks.len();
         if self.scroll_from_bottom > 0 && !width_changed && self.wrapped.len() > old_total {
             self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(self.wrapped.len() - old_total);
         }
@@ -555,6 +574,13 @@ impl App {
         }
     }
 
+    /// Clear the turn-in-flight state (busy flag, cancel token, spinner clock).
+    fn idle(&mut self) {
+        self.busy = false;
+        self.cancel = None;
+        self.turn_started = None;
+    }
+
     fn handle_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::Iteration(i) => {
@@ -587,9 +613,7 @@ impl App {
                 self.transcript.push_block(Kind::Warn, format!("! {w}"));
             }
             AgentEvent::Done(stats) => {
-                self.busy = false;
-                self.cancel = None;
-                self.turn_started = None;
+                self.idle();
                 if stats.iterations > 0 {
                     self.session_stats.turns += 1;
                     self.session_stats.model_calls += stats.iterations as u64;
@@ -637,10 +661,9 @@ impl App {
             // Handled by the event loop (need stdout/terminal); never reach here.
             UiEffect::Osc52(_) => {}
             UiEffect::EditFile(_) => {}
+            UiEffect::Status(status) => self.status = status,
             UiEffect::Done(status) => {
-                self.busy = false;
-                self.cancel = None;
-                self.turn_started = None;
+                self.idle();
                 self.status = status;
             }
         }
@@ -963,6 +986,14 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
 
     let mut terminal = ratatui::init();
     let _ = execute!(stdout(), EnableMouseCapture, EnableBracketedPaste);
+    // ratatui's panic hook restores raw mode/alt screen only; also turn off
+    // mouse capture + bracketed paste so a panic doesn't leave the shell
+    // spewing mouse-escape garbage.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+        prev_hook(info);
+    }));
 
     let mut app = App::new(model, skills);
     app.seed_from_messages(&resumed);
@@ -993,27 +1024,35 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     ratatui::restore();
                     let status = {
                         #[cfg(windows)]
-                        {
-                            let editor = std::env::var("EDITOR")
-                                .or_else(|_| std::env::var("VISUAL"))
-                                .unwrap_or_else(|_| "notepad".into());
-                            let shell = std::env::var("COMSPEC")
-                                .unwrap_or_else(|_| "cmd.exe".into());
-                            std::process::Command::new(shell)
-                                .arg("/C")
-                                .arg(format!("{editor} \"{}\"", path.display()))
-                                .status()
-                        }
+                        let editor = std::env::var("EDITOR")
+                            .or_else(|_| std::env::var("VISUAL"))
+                            .unwrap_or_else(|_| "notepad".into());
                         #[cfg(not(windows))]
-                        {
-                            let editor = std::env::var("EDITOR")
-                                .or_else(|_| std::env::var("VISUAL"))
-                                .unwrap_or_else(|_| "vi".into());
-                            std::process::Command::new("sh")
-                                .arg("-c")
-                                .arg(format!("{editor} '{}'", path.display()))
-                                .status()
-                        }
+                        let editor = std::env::var("EDITOR")
+                            .or_else(|_| std::env::var("VISUAL"))
+                            .unwrap_or_else(|_| "vi".into());
+                        // Direct spawn first: std handles spaced paths (and .cmd/.bat
+                        // on Windows) without shell-quoting pitfalls. Fall back to a
+                        // shell only when the spawn itself fails, e.g. EDITOR embeds
+                        // flags like "code -w".
+                        std::process::Command::new(&editor).arg(&path).status().or_else(|_| {
+                            #[cfg(windows)]
+                            {
+                                let shell = std::env::var("COMSPEC")
+                                    .unwrap_or_else(|_| "cmd.exe".into());
+                                std::process::Command::new(shell)
+                                    .arg("/C")
+                                    .arg(format!("{editor} \"{}\"", path.display()))
+                                    .status()
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                std::process::Command::new("sh")
+                                    .arg("-c")
+                                    .arg(format!("{editor} '{}'", path.display()))
+                                    .status()
+                            }
+                        })
                     };
                     terminal = ratatui::init();
                     let _ = execute!(stdout(), EnableBracketedPaste);
@@ -1060,9 +1099,11 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                 }
                 continue;
             }
-            needs_redraw = true;
+            // Only state-changing events trigger a redraw — mouse capture
+            // floods us with Moved events, and redrawing on each pegs a core.
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    needs_redraw = true;
                     let palette = app.palette();
                     // An open picker owns the keyboard.
                     if app.picker.is_some() {
@@ -1273,9 +1314,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                             } else if trimmed.strip_prefix("/copy").is_some_and(|r| r.trim() == "log") {
                                 // Handled UI-side: the activity pane lives here,
                                 // not in the agent's message history.
-                                app.busy = false;
-                                app.cancel = None;
-                                app.turn_started = None;
+                                app.idle();
                                 let text = app.log.raw_text();
                                 if text.trim().is_empty() {
                                     app.transcript.push_block(Kind::Warn, "! activity log is empty".into());
@@ -1291,7 +1330,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                             }
                                         };
                                         let _ = fx2.send(UiEffect::Out(Kind::Info, msg.clone()));
-                                        let _ = fx2.send(UiEffect::Done(msg));
+                                        // Status only — a Done here would reset the
+                                        // busy/cancel state of a turn started meanwhile.
+                                        let _ = fx2.send(UiEffect::Status(msg));
                                     });
                                 }
                             } else if let Some(rest) = trimmed.strip_prefix("/skill:") {
@@ -1315,9 +1356,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                         let _ = prompt_tx.send(UiMsg::Prompt(prompt, cancel));
                                     }
                                     None => {
-                                        app.busy = false;
-                                        app.cancel = None;
-                                        app.turn_started = None;
+                                        app.idle();
                                         app.transcript.push_block(
                                             Kind::Warn,
                                             format!("! unknown skill '{name}' — /skills lists what's available"),
@@ -1325,9 +1364,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                     }
                                 }
                             } else if trimmed == "/skills" {
-                                app.busy = false;
-                                app.cancel = None;
-                                app.turn_started = None;
+                                app.idle();
                                 if app.skills.is_empty() {
                                     app.transcript.push_block(
                                         Kind::Info,
@@ -1351,15 +1388,11 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                     );
                                     let _ = prompt_tx.send(UiMsg::Prompt(p, cancel));
                                 } else {
-                                    app.busy = false;
-                                    app.cancel = None;
-                                    app.turn_started = None;
+                                    app.idle();
                                     app.transcript.push_block(Kind::Warn, "! nothing to retry yet".into());
                                 }
                             } else if trimmed == "/stats" {
-                                app.busy = false;
-                                app.cancel = None;
-                                app.turn_started = None;
+                                app.idle();
                                 let out = format!(
                                     "session stats:\n  turns:         {}\n  model calls:   {}\n  tool calls:    {}\n  compactions:   {}\n  output tokens: {}\n  prompt tokens: {} (last-of-turn, summed)\n  model time:    {:.1}s",
                                     app.session_stats.turns,
@@ -1468,6 +1501,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     }
                 }
                 Event::Paste(data) => {
+                    needs_redraw = true;
                     // Bracketed paste: the whole clipboard arrives as ONE event,
                     // so embedded newlines never act as Enter presses mid-paste.
                     // Terminals encode paste newlines as \r — normalize to \n.
@@ -1487,12 +1521,19 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                         app.focused_pane()
                     };
                     match mouse.kind {
-                        MouseEventKind::ScrollUp => pane.scroll_up(3),
-                        MouseEventKind::ScrollDown => pane.scroll_down(3),
+                        MouseEventKind::ScrollUp => {
+                            pane.scroll_up(3);
+                            needs_redraw = true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            pane.scroll_down(3);
+                            needs_redraw = true;
+                        }
                         _ => {}
                     }
                 }
                 Event::Resize(_, _) => {
+                    needs_redraw = true;
                     app.transcript.dirty = true;
                     app.log.dirty = true;
                 }

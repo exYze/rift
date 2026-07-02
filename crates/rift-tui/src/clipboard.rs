@@ -19,6 +19,17 @@ pub async fn copy_via_tool(text: &str) -> Option<&'static str> {
             ("xsel", &["-ib"]),
         ]
     };
+    // clip.exe interprets stdin in the OEM code page, mangling any non-ASCII
+    // (✓, ❯, box drawing…) — but it honors a UTF-16 BOM, so feed it UTF-16LE.
+    let payload: Vec<u8> = if cfg!(windows) {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes
+    } else {
+        text.as_bytes().to_vec()
+    };
     for (tool, args) in candidates {
         let Ok(mut child) = tokio::process::Command::new(tool)
             .args(*args)
@@ -30,7 +41,7 @@ pub async fn copy_via_tool(text: &str) -> Option<&'static str> {
             continue;
         };
         if let Some(mut stdin) = child.stdin.take() {
-            if stdin.write_all(text.as_bytes()).await.is_err() {
+            if stdin.write_all(&payload).await.is_err() {
                 continue;
             }
             drop(stdin);

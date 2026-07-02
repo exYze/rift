@@ -254,11 +254,20 @@ pub async fn run_swarm_tui(
 
     let mut terminal = ratatui::init();
     let _ = execute!(stdout(), EnableMouseCapture);
+    // ratatui's panic hook restores raw mode/alt screen only; also turn off
+    // mouse capture so a panic doesn't leave the shell spewing mouse escapes.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        prev_hook(info);
+    }));
 
+    let mut needs_redraw = true;
     let result: Result<()> = loop {
         // Drain agent events.
         while let Ok((idx, ev)) = rx.try_recv() {
             app.handle_event(idx, ev);
+            needs_redraw = true;
         }
         // Race finished? Load outcomes exactly once.
         if let Some(handle) = &race_handle {
@@ -268,10 +277,16 @@ pub async fn run_swarm_tui(
                     Ok(outcomes) => app.load_outcomes(&outcomes),
                     Err(e) => app.message = format!("race task failed: {e}"),
                 }
+                needs_redraw = true;
             }
         }
 
-        terminal.draw(|f| draw(f, &mut app, &task))?;
+        // While the race runs, keep the timed cadence (streaming logs +
+        // running markers); once finished, redraw only on actual changes.
+        if needs_redraw || !app.race_done {
+            terminal.draw(|f| draw(f, &mut app, &task))?;
+            needs_redraw = false;
+        }
         if app.quit {
             break Ok(());
         }
@@ -280,7 +295,9 @@ pub async fn run_swarm_tui(
             continue;
         }
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                needs_redraw = true;
+                match key.code {
                 KeyCode::Char('q') => app.quit = true,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     cancel.cancel();
@@ -334,7 +351,8 @@ pub async fn run_swarm_tui(
                     }
                 }
                 _ => {}
-            },
+                }
+            }
             Event::Mouse(mouse) => {
                 let c = &mut app.cands[app.selected];
                 let over_log = c.log.contains(mouse.column, mouse.row);
@@ -345,12 +363,19 @@ pub async fn run_swarm_tui(
                     &mut c.log
                 };
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => pane.scroll_up(3),
-                    MouseEventKind::ScrollDown => pane.scroll_down(3),
+                    MouseEventKind::ScrollUp => {
+                        pane.scroll_up(3);
+                        needs_redraw = true;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        pane.scroll_down(3);
+                        needs_redraw = true;
+                    }
                     _ => {}
                 }
             }
             Event::Resize(_, _) => {
+                needs_redraw = true;
                 for c in &mut app.cands {
                     c.log.dirty = true;
                     c.diff.dirty = true;
