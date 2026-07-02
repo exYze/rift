@@ -2,6 +2,8 @@
 
 A fast, flicker-free terminal coding agent built in Rust for **local models via Ollama's native API** — no Node, no Python, one 9.5MB binary.
 
+![rift demo — fixing a bug with gemma4:26b on a local Ollama server](docs/assets/demo.gif)
+
 **Benchmarked vs opencode** on a 50-task suite (same model, same Ollama server, wire-measured tokens): **more tasks solved (44 vs 42), 57% fewer prompt tokens, 3.4× faster** — see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 **Model matrix** (July 2026, v0.7.1): the same 50-task suite across three local models — **ornith:35b 50/50 and qwen3.6:35b 50/50** at ~520k prompt tokens each, gemma4:26b 40/50 — with per-turn traces and failure counters recorded for every run. The traces pinpointed gemma's chat-only failure mode and produced the first per-model prompt target ([details](docs/BENCHMARKS.md)).

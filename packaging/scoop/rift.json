@@ -1,0 +1,27 @@
+{
+    "version": "0.8.0",
+    "description": "Fast terminal coding agent for local models - one binary, no runtimes",
+    "homepage": "https://github.com/exYze/rift",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/exYze/rift/releases/download/v0.8.0/rift-x86_64-pc-windows-msvc.zip",
+            "hash": "bfd23a688ee41715b37a168d2fe20868d0304dcb8d937805e231e23d262c3195"
+        }
+    },
+    "bin": [["rift-x86_64-pc-windows-msvc.exe", "rift"]],
+    "checkver": {
+        "github": "https://github.com/exYze/rift"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/exYze/rift/releases/download/v$version/rift-x86_64-pc-windows-msvc.zip"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/exYze/rift/releases/download/v$version/checksums.txt",
+            "regex": "$sha256\\s+rift-x86_64-pc-windows-msvc.zip"
+        }
+    }
+}

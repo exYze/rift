@@ -84,3 +84,30 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Regenerate the Homebrew formula from the just-published checksums and
+  # push it to exYze/homebrew-tap. No-ops (successfully) until the
+  # TAP_PUSH_TOKEN secret exists — a fine-grained PAT with contents:write
+  # on the tap repo.
+  homebrew-tap:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: update tap formula
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$TAP_PUSH_TOKEN" ]; then
+            echo "TAP_PUSH_TOKEN not set — skipping tap update"
+            exit 0
+          fi
+          scripts/make_formula.sh "$TAG" > rift.rb
+          git clone "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/exYze/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          mv rift.rb tap/Formula/rift.rb
+          cd tap
+          git -c user.email=bot@rift -c user.name=rift-release add Formula/rift.rb
+          git -c user.email=bot@rift -c user.name=rift-release commit -m "rift $TAG" || exit 0
+          git push
