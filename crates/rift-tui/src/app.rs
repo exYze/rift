@@ -701,6 +701,8 @@ struct SessionStats {
     tool_calls: u64,
     compactions: u64,
     duration_ms: u128,
+    /// Summed hardening interventions across turns (see TurnStats::failures).
+    failures: rift_core::FailureCounters,
 }
 
 impl App {
@@ -955,6 +957,7 @@ impl App {
                     self.session_stats.output_tokens += stats.output_tokens;
                     self.session_stats.prompt_tokens += stats.prompt_tokens;
                     self.session_stats.duration_ms += stats.duration_ms;
+                    self.session_stats.failures.add(&stats.failures);
                 }
                 self.status = format!(
                     "done — {} steps · {} prompt tok · {} out tok · {:.1} tok/s",
@@ -1895,8 +1898,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                 }
                             } else if trimmed == "/stats" {
                                 app.idle();
-                                let out = format!(
-                                    "session stats:\n  turns:         {}\n  model calls:   {}\n  tool calls:    {}\n  compactions:   {}\n  output tokens: {}\n  prompt tokens: {} (last-of-turn, summed)\n  model time:    {:.1}s",
+                                let f = &app.session_stats.failures;
+                                let mut out = format!(
+                                    "session stats:\n  turns:         {}\n  model calls:   {}\n  tool calls:    {}\n  compactions:   {}\n  output tokens: {}\n  prompt tokens: {} (last-of-turn, summed)\n  model time:    {:.1}s\n  recoveries:    {}",
                                     app.session_stats.turns,
                                     app.session_stats.model_calls,
                                     app.session_stats.tool_calls,
@@ -1904,7 +1908,26 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                     app.session_stats.output_tokens,
                                     app.session_stats.prompt_tokens,
                                     app.session_stats.duration_ms as f64 / 1000.0,
+                                    f.model_failures(),
                                 );
+                                if f.model_failures() > 0 {
+                                    let detail: Vec<String> = [
+                                        ("textual tool calls", f.textual_recoveries),
+                                        ("tool aliases", f.alias_hits),
+                                        ("doom loops", f.doom_loop_trips),
+                                        ("unknown tools", f.unknown_tools),
+                                        ("tool errors", f.tool_errors),
+                                        ("apply nudges", f.apply_nudges),
+                                        ("greedy retries", f.greedy_retries),
+                                        ("truncations", f.truncations),
+                                        ("template strips", f.template_strips),
+                                    ]
+                                    .iter()
+                                    .filter(|(_, n)| *n > 0)
+                                    .map(|(k, n)| format!("{k} {n}"))
+                                    .collect();
+                                    out.push_str(&format!(" ({})", detail.join(", ")));
+                                }
                                 app.transcript.push_block(Kind::Info, out);
                             } else if trimmed.starts_with('/') {
                                 app.status = "running command…".into();

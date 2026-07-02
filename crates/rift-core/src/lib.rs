@@ -8,6 +8,7 @@ pub mod session;
 pub mod skills;
 pub mod swarm;
 pub mod tools;
+pub mod trace;
 
 pub use agent::{Agent, AgentConfig, AgentEvent, TurnStats};
 pub use config::{
@@ -20,6 +21,7 @@ pub use swarm::{run_swarm, Candidate, CandidateOutcome, Swarm};
 pub use tools::{
     builtin_bash_deny, AskRequest, AskUserTool, EditRecord, PlanItem, Tool, ToolCtx, ToolRegistry,
 };
+pub use trace::{FailureCounters, TraceWriter};
 
 /// System prompt tuned for local models: short (every token counts against
 /// num_ctx), explicit about tool mechanics, and firm that tool calls must be

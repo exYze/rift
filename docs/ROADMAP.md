@@ -115,8 +115,26 @@ one implementation, not the foundation.
 - [ ] Cost display for metered providers (`/stats` shows $ next to tokens)
 - [ ] Swarm auto-judge: optional referee model scores candidate diffs and
   recommends a winner
+- [x] **Turn traces + failure counters** — the hardening layer already
+  *detects* the interesting failures (textual tool-call recovery, alias
+  resolution, doom-loop guard, truncation detection, fuzzy edit misses)
+  and then discards the signal. Count them per turn in `TurnStats`, and add
+  an opt-in JSONL trace export (`--trace <path>` / config) recording model,
+  tokens, tool calls, failure flags, and outcome per turn. Local files
+  only, never on by default — this is the data source every optimization
+  item below consumes
+- [x] **Bench model matrix** — `bench.py --models a,b,c` runs the suite
+  across models and diffs pass rate / prompt tokens / wall time per model;
+  bench runs always emit traces. Every model-specific optimization needs
+  this as its fitness function
 
 ## v0.8 — Context engine v2
+
+Method for this phase: design offline, implement deterministically. Feed
+traces + compaction logs + bench results to a frontier model acting as
+performance engineer; implement its packing strategy as plain Rust; gate
+every change on the bench matrix. The frontier model is never in the
+inference path.
 
 - [ ] Hydrate-on-demand: outline first, then fetch exact line ranges as the
   model asks — measure token savings vs v1 in the bench suite
@@ -126,6 +144,27 @@ one implementation, not the foundation.
   not mid-turn when the user is waiting
 - [ ] Benchmark suite v2: more tasks, multi-run variance, long-session
   tests that exercise compaction, published per-release
+- [ ] Repo-map ranking heuristics v2: which files make the top-10, whether
+  symbols/imports should weight selection — small deterministic heuristics
+  (no embeddings, no index), designed against trace data, benchmarked
+
+## v0.8.5 — Model targets
+
+One hardcoded system prompt goes to every model today, but open models
+differ dramatically in what prompting and formatting they want. Treat each
+model family as a compiler target, with the bench matrix as the fitness
+function.
+
+- [ ] **Per-family prompt files** — `prompts/<family>.toml` embedded at
+  compile time (`include_str!` — keeps the one-binary promise), selected by
+  model-family detection in the provider layer; an override directory for
+  local experimentation
+- [ ] **Prompt evolution gate** — prompt files are versioned; a change
+  merges only if it beats the incumbent on the bench matrix. Prompts are
+  code: benchmark → review → revise → benchmark → merge
+- [ ] **Tool-schema A/B on the matrix** — richer parameter schemas may help
+  one family and hurt another (more params = more places for a small model
+  to hallucinate); measure per family, don't assume
 
 ## v0.9 — Distribution + community
 
@@ -144,6 +183,23 @@ green in CI against live servers, benchmark numbers published per release,
 and `rift update` has carried users through 10+ versions without a manual
 reinstall. 1.0 means breaking changes now require a major version — trust,
 codified.
+
+---
+
+## Engineering process (ongoing, not versioned)
+
+Frontier models (Fable/Opus-class) act as an **offline performance
+engineer** — they profile, recommend, and leave. Never in the inference
+path, never a runtime dependency, so the local-first promise holds.
+
+- **Per-release architectural review**: source tree + bench deltas +
+  PROJECT.md in; prioritized engineering tasks out
+- **Failure-cluster analysis** as traces accumulate: cluster failure
+  counters by model/task/tool, turn root causes into roadmap items —
+  improving rift itself, not just prompts
+- **Offline design, deterministic implementation**: prompt, packing, and
+  ranking strategies are designed against trace data, land as plain Rust
+  (or frozen prompt files), and must win on the bench matrix to merge
 
 ---
 

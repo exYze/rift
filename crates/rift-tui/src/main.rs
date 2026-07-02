@@ -87,6 +87,10 @@ struct Cli {
     /// Sampling temperature, low = reliable tool calling [default: 0.2, or `temperature` in config]
     #[arg(long)]
     temp: Option<f64>,
+    /// Append one JSON line per turn (model, tokens, tool calls, failure
+    /// counters, outcome) to this file. Local file only; off by default
+    #[arg(long, env = "RIFT_TRACE")]
+    trace: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -307,6 +311,18 @@ async fn main() -> Result<()> {
     }
 
     let mut agent = Agent::new(client, cfg, registry, ctx, prompt_text);
+
+    // Opt-in turn traces (--trace / RIFT_TRACE). A bad path is a warning,
+    // not a startup failure — tracing must never block actual work.
+    if let Some(path) = &cli.trace {
+        match rift_core::TraceWriter::new(path) {
+            Ok(w) => {
+                eprintln!("tracing turns to {}", path.display());
+                agent.set_trace(Some(w));
+            }
+            Err(e) => eprintln!("warning: turn tracing disabled: {e:#}"),
+        }
+    }
 
     // Session: resume an existing file or start a new one.
     let resume_path = if let Some(p) = cli.resume {
@@ -540,8 +556,12 @@ async fn run_headless(mut agent: Agent, prompt: String, store: SessionStore) -> 
                         eprintln!("\x1b[0m");
                         in_thinking = false;
                     }
+                    let recoveries = match stats.failures.model_failures() {
+                        0 => String::new(),
+                        n => format!(", {n} recoveries"),
+                    };
                     println!(
-                        "\n\x1b[2m[{} iterations, {} prompt tok, {} out tok, {:.1} tok/s, {:.1}s]\x1b[0m",
+                        "\n\x1b[2m[{} iterations, {} prompt tok, {} out tok, {:.1} tok/s, {:.1}s{recoveries}]\x1b[0m",
                         stats.iterations,
                         stats.prompt_tokens,
                         stats.output_tokens,

@@ -69,7 +69,7 @@ rift swarm "Refactor the auth middleware" --models gemma4:26b,qwen3:27b
 rift merge 0-gemma4-26b --cleanup
 ```
 
-Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-iterations`, `-c/--continue` (resume last session).
+Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-iterations`, `-c/--continue` (resume last session), `--trace <file>` (append one JSON line per turn — tokens, tool calls, failure counters — for offline analysis; also `RIFT_TRACE`).
 
 ## Slash commands (inside the TUI)
 

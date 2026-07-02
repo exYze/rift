@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::compact;
 use crate::tools::{ToolCtx, ToolRegistry};
+use crate::trace::{FailureCounters, ToolTraceRecord, TraceWriter, TurnTrace};
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -64,6 +65,9 @@ pub struct TurnStats {
     pub output_tokens: u64,
     pub duration_ms: u128,
     pub tokens_per_sec: f64,
+    /// How often the hardening layer had to intervene this turn — the
+    /// per-model failure signal traces and /stats aggregate.
+    pub failures: FailureCounters,
 }
 
 #[derive(Debug, Clone)]
@@ -92,11 +96,17 @@ pub struct Agent {
     /// Running ratio of actual/estimated prompt tokens, fed back from
     /// `prompt_eval_count` so the chars/4 heuristic self-corrects per model.
     calibration: f64,
+    /// Opt-in JSONL turn traces (`--trace`); None = no tracing.
+    trace: Option<TraceWriter>,
 }
 
 impl Agent {
     pub fn new(client: Arc<dyn Provider>, cfg: AgentConfig, registry: ToolRegistry, ctx: ToolCtx, system_prompt: String) -> Self {
-        Self { client, cfg, registry, ctx, messages: vec![Message::system(system_prompt)], calibration: 1.0 }
+        Self { client, cfg, registry, ctx, messages: vec![Message::system(system_prompt)], calibration: 1.0, trace: None }
+    }
+
+    pub fn set_trace(&mut self, trace: Option<TraceWriter>) {
+        self.trace = trace;
     }
 
     pub fn client(&self) -> &Arc<dyn Provider> {
@@ -129,7 +139,12 @@ impl Agent {
 
     /// Enforce the context budget before a request. Stage 1 prunes old tool
     /// outputs; stage 2 (LLM summarization) collapses old history entirely.
-    async fn enforce_budget(&mut self, tools_overhead: u64, tx: &UnboundedSender<AgentEvent>) {
+    async fn enforce_budget(
+        &mut self,
+        tools_overhead: u64,
+        tx: &UnboundedSender<AgentEvent>,
+        counters: &mut FailureCounters,
+    ) {
         let budget = compact::usable_budget(self.cfg.num_ctx);
         let est = compact::estimate_prompt_tokens(&self.messages, tools_overhead, self.calibration);
         if est <= budget {
@@ -138,6 +153,7 @@ impl Agent {
         let touched = compact::prune_old_turns(&mut self.messages);
         let est2 = compact::estimate_prompt_tokens(&self.messages, tools_overhead, self.calibration);
         if touched > 0 {
+            counters.compact_prunes += 1;
             let _ = tx.send(AgentEvent::Info(format!(
                 "compacted: pruned {touched} old outputs (~{est} → ~{est2} tok, budget {budget})"
             )));
@@ -149,12 +165,47 @@ impl Agent {
         match compact::summarize_history(&*self.client, &self.cfg.model, self.cfg.num_ctx, &self.messages).await {
             Ok(rebuilt) => {
                 self.messages = rebuilt;
+                counters.compact_summaries += 1;
                 let est3 = compact::estimate_prompt_tokens(&self.messages, tools_overhead, self.calibration);
                 let _ = tx.send(AgentEvent::Info(format!("compacted: history summarized (~{est3} tok)")));
             }
             Err(e) => {
                 let _ = tx.send(AgentEvent::Warning(format!("summarization failed ({e}); continuing pruned")));
             }
+        }
+    }
+
+    /// Append this turn to the JSONL trace, if tracing is enabled. Trace
+    /// failures never fail the turn — warn once and carry on.
+    fn write_trace(
+        &self,
+        user_input: &str,
+        outcome: &str,
+        stats: &TurnStats,
+        tools: &[ToolTraceRecord],
+        tx: &UnboundedSender<AgentEvent>,
+    ) {
+        let Some(writer) = &self.trace else { return };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let rec = TurnTrace {
+            ts,
+            model: &self.cfg.model,
+            provider: self.client.base_url(),
+            num_ctx: self.cfg.num_ctx,
+            prompt: preview(user_input, 240),
+            outcome,
+            iterations: stats.iterations,
+            prompt_tokens: stats.prompt_tokens,
+            output_tokens: stats.output_tokens,
+            duration_ms: stats.duration_ms,
+            tools,
+            failures: &stats.failures,
+        };
+        if let Err(e) = writer.record(&rec) {
+            let _ = tx.send(AgentEvent::Warning(format!("trace write failed: {e:#}")));
         }
     }
 
@@ -175,6 +226,7 @@ impl Agent {
         let known = self.registry.names();
         let start = Instant::now();
         let mut stats = TurnStats::default();
+        let mut tool_records: Vec<ToolTraceRecord> = vec![];
         let mut repeat_counts: HashMap<String, u32> = HashMap::new();
         // Chat-only failure mode: small models sometimes "answer" a coding
         // task by pasting the fix into the reply without touching any file.
@@ -191,7 +243,7 @@ impl Agent {
             stats.iterations = iteration;
             let _ = tx.send(AgentEvent::Iteration(iteration));
 
-            self.enforce_budget(tools_overhead, tx).await;
+            self.enforce_budget(tools_overhead, tx, &mut stats.failures).await;
 
             // Old turns' reasoning isn't needed for continuity — strip it
             // from the request (not from stored history) to save context.
@@ -241,10 +293,18 @@ impl Agent {
                 _ = cancel.cancelled() => {
                     let _ = tx.send(AgentEvent::Warning("turn cancelled".into()));
                     stats.duration_ms = start.elapsed().as_millis();
+                    self.write_trace(user_input, "cancelled", &stats, &tool_records, tx);
                     let _ = tx.send(AgentEvent::Done(stats.clone()));
                     return Ok(stats);
                 }
-                r = stream_fut => r?,
+                r = stream_fut => match r {
+                    Ok(o) => o,
+                    Err(e) => {
+                        stats.duration_ms = start.elapsed().as_millis();
+                        self.write_trace(user_input, "error", &stats, &tool_records, tx);
+                        return Err(e);
+                    }
+                },
             };
 
             stats.prompt_tokens = outcome.stats.prompt_eval_count;
@@ -259,6 +319,7 @@ impl Agent {
             }
 
             if outcome.truncation_suspected {
+                stats.failures.truncations += 1;
                 let _ = tx.send(AgentEvent::Warning(format!(
                     "context overflow: prompt filled num_ctx={} and was likely front-truncated; results may be degraded",
                     self.cfg.num_ctx
@@ -268,6 +329,7 @@ impl Agent {
             let mut msg = outcome.message;
             let cleaned = strip_template_tokens(&msg.content);
             if cleaned != msg.content.trim() {
+                stats.failures.template_strips += 1;
                 let _ = tx.send(AgentEvent::Warning("stripped leaked template tokens from output".into()));
                 msg.content = cleaned;
             }
@@ -276,6 +338,7 @@ impl Agent {
             if msg.tool_calls.is_empty() {
                 let recovered = extract_textual_tool_calls(&msg.content, &known);
                 if !recovered.is_empty() {
+                    stats.failures.textual_recoveries += 1;
                     let _ = tx.send(AgentEvent::Warning(
                         "model emitted a textual tool call; recovered it".into(),
                     ));
@@ -306,6 +369,7 @@ impl Agent {
                 // the files. Nudge once to apply for real.
                 if !used_tools && !nudged_apply && (content_has_code || actionable_prompt) {
                     nudged_apply = true;
+                    stats.failures.apply_nudges += 1;
                     let _ = tx.send(AgentEvent::Warning(
                         "model replied with code but didn't modify any files; nudging it to apply the change".into(),
                     ));
@@ -324,6 +388,7 @@ impl Agent {
                 if !used_tools && !retried_greedy && self.cfg.always_task {
                     retried_greedy = true;
                     nudged_apply = false;
+                    stats.failures.greedy_retries += 1;
                     temp_override = Some(0.0);
                     // Scrap this turn's messages. A start-of-turn index would
                     // be stale here — mid-turn compaction rebuilds the whole
@@ -344,6 +409,7 @@ impl Agent {
                     continue;
                 }
                 stats.duration_ms = start.elapsed().as_millis();
+                self.write_trace(user_input, "answered", &stats, &tool_records, tx);
                 let _ = tx.send(AgentEvent::Done(stats.clone()));
                 return Ok(stats);
             }
@@ -352,6 +418,9 @@ impl Agent {
             for call in tool_calls {
                 let requested_name = call.function.name.clone();
                 let canonical = self.registry.resolve_alias(&requested_name).to_string();
+                if canonical != requested_name {
+                    stats.failures.alias_hits += 1;
+                }
                 let args_json = serde_json::to_string(&call.function.arguments).unwrap_or_default();
 
                 // Doom-loop guard.
@@ -359,6 +428,8 @@ impl Agent {
                 let count = repeat_counts.entry(signature).or_insert(0);
                 *count += 1;
                 if *count >= 3 {
+                    stats.failures.doom_loop_trips += 1;
+                    tool_records.push(ToolTraceRecord { name: canonical.clone(), ok: false });
                     let _ = tx.send(AgentEvent::Warning(format!(
                         "tool '{canonical}' called 3x with identical arguments; refusing the repeat"
                     )));
@@ -388,18 +459,25 @@ impl Agent {
                             _ = cancel.cancelled() => (false, "ERROR: cancelled by user".to_string()),
                             r = tool.execute(&call.function.arguments, &self.ctx) => match r {
                                 Ok(out) => (true, out),
-                                Err(e) => (false, format!("ERROR: {e:#}")),
+                                Err(e) => {
+                                    stats.failures.tool_errors += 1;
+                                    (false, format!("ERROR: {e:#}"))
+                                }
                             },
                         }
                     }
-                    None => (
-                        false,
-                        format!(
-                            "ERROR: unknown tool '{requested_name}'. Available tools: {}",
-                            known.join(", ")
-                        ),
-                    ),
+                    None => {
+                        stats.failures.unknown_tools += 1;
+                        (
+                            false,
+                            format!(
+                                "ERROR: unknown tool '{requested_name}'. Available tools: {}",
+                                known.join(", ")
+                            ),
+                        )
+                    }
                 };
+                tool_records.push(ToolTraceRecord { name: canonical.clone(), ok });
 
                 let _ = tx.send(AgentEvent::ToolResult {
                     name: canonical.clone(),
@@ -420,6 +498,7 @@ impl Agent {
             if cancel.is_cancelled() {
                 let _ = tx.send(AgentEvent::Warning("turn cancelled".into()));
                 stats.duration_ms = start.elapsed().as_millis();
+                self.write_trace(user_input, "cancelled", &stats, &tool_records, tx);
                 let _ = tx.send(AgentEvent::Done(stats.clone()));
                 return Ok(stats);
             }
@@ -430,6 +509,7 @@ impl Agent {
             "stopped after {} iterations without a final answer",
             self.cfg.max_iterations
         )));
+        self.write_trace(user_input, "max_iterations", &stats, &tool_records, tx);
         let _ = tx.send(AgentEvent::Done(stats.clone()));
         Ok(stats)
     }
