@@ -252,6 +252,30 @@ pub fn api_error_message(body: &str) -> String {
         .unwrap_or_else(|| body.chars().take(600).collect())
 }
 
+/// Send a request, retrying transient transport failures (connection
+/// refused/reset, timeouts) with exponential backoff. Only the initial send
+/// is ever retried — never a stream mid-read — so this is safe for streaming
+/// endpoints: nothing has been consumed when a send fails. Non-2xx responses
+/// are returned untouched for the caller to interpret.
+pub async fn send_with_retry(builder: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+    const ATTEMPTS: u32 = 3;
+    let mut delay = std::time::Duration::from_millis(400);
+    for _ in 1..ATTEMPTS {
+        match builder.try_clone() {
+            // Non-replayable body: fall through to the single real attempt.
+            None => break,
+            Some(b) => match b.send().await {
+                Err(e) if e.is_connect() || e.is_timeout() => {
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+                other => return other,
+            },
+        }
+    }
+    builder.send().await
+}
+
 /// Control flow for [`for_each_line`] callbacks.
 pub enum LineFlow {
     Continue,

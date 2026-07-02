@@ -99,19 +99,19 @@ impl Provider for OllamaClient {
     }
 
     async fn tags(&self) -> Result<Vec<ModelEntry>> {
-        let resp = self.http.get(format!("{}/api/tags", self.base_url)).send().await?;
+        let resp = send_with_retry(self.http.get(format!("{}/api/tags", self.base_url))).await?;
         let resp = Self::check(resp).await?;
         let tags: TagsResponse = resp.json().await?;
         Ok(tags.models)
     }
 
     async fn show(&self, model: &str) -> Result<ModelCapabilities> {
-        let resp = self
-            .http
-            .post(format!("{}/api/show", self.base_url))
-            .json(&serde_json::json!({ "model": model }))
-            .send()
-            .await?;
+        let resp = send_with_retry(
+            self.http
+                .post(format!("{}/api/show", self.base_url))
+                .json(&serde_json::json!({ "model": model })),
+        )
+        .await?;
         let resp = Self::check(resp).await?;
         let show: ShowResponse = resp.json().await?;
         Ok(ModelCapabilities { context_length: show.context_length(), capabilities: show.capabilities })
@@ -125,7 +125,7 @@ impl Provider for OllamaClient {
         req: &ChatRequest,
         on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> Result<ChatOutcome> {
-        let resp = self.http.post(format!("{}/api/chat", self.base_url)).json(req).send().await?;
+        let resp = send_with_retry(self.http.post(format!("{}/api/chat", self.base_url)).json(req)).await?;
         let resp = Self::check(resp).await?;
 
         let mut acc = Message { role: Role::Assistant, content: String::new(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None };

@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use rift_provider::{
-    api_error_message, for_each_line, http_client, normalize_base_url, ChatOutcome, ChatRequest,
-    ChatStats, LineFlow, Message, ModelCapabilities, ModelEntry, Provider, Role, StreamDelta,
-    ToolCall, ToolCallFunction,
+    api_error_message, for_each_line, http_client, normalize_base_url, send_with_retry,
+    ChatOutcome, ChatRequest, ChatStats, LineFlow, Message, ModelCapabilities, ModelEntry,
+    Provider, Role, StreamDelta, ToolCall, ToolCallFunction,
 };
 
 #[derive(Clone)]
@@ -362,7 +362,7 @@ impl Provider for OpenAiClient {
         struct ModelObj {
             id: String,
         }
-        let resp = self.req(reqwest::Method::GET, "/models").send().await?;
+        let resp = send_with_retry(self.req(reqwest::Method::GET, "/models")).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -385,7 +385,7 @@ impl Provider for OpenAiClient {
         on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> Result<ChatOutcome> {
         let mut body = build_request(req);
-        let mut resp = self.req(reqwest::Method::POST, "/chat/completions").json(&body).send().await?;
+        let mut resp = send_with_retry(self.req(reqwest::Method::POST, "/chat/completions").json(&body)).await?;
         // Some older OpenAI-compatible servers 400 on stream_options wholesale;
         // drop it and retry once so they still work (only usage stats are lost).
         if resp.status() == reqwest::StatusCode::BAD_REQUEST && body.stream_options.is_some() {
@@ -394,7 +394,7 @@ impl Provider for OpenAiClient {
                 return Err(anyhow!("openai api error (400 Bad Request): {}", api_error_message(&text)));
             }
             body.stream_options = None;
-            resp = self.req(reqwest::Method::POST, "/chat/completions").json(&body).send().await?;
+            resp = send_with_retry(self.req(reqwest::Method::POST, "/chat/completions").json(&body)).await?;
         }
         if !resp.status().is_success() {
             let status = resp.status();
