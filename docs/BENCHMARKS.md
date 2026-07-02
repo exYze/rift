@@ -131,6 +131,41 @@ Also surfaced: the suite is saturating for strong models (both 35Bs at
 v2 with a harder tier (multi-file, longer-horizon, compaction-exercising
 tasks) is the planned fix (docs/ROADMAP.md, v0.8).
 
+## Swarm judge accuracy (2026-07-02, rift v0.8.0, DGX Spark server)
+
+First run of `bench/judge_bench.py`: on each of the 50 tasks, gemma4:26b
+and ornith:35b raced in isolated worktrees, **qwen3.6:35b judged the two
+diffs** (task + diffs + self-summaries; judged by the changes only), and
+the harness then established ground truth the judge never saw — applying
+each candidate's patch to a clean fixture and running verify.sh.
+
+| bucket | result |
+|---|---|
+| discriminative (exactly one candidate passes) | **14/14 correct** |
+| none-pass (neither passes; judge should say none) | 1/1 correct |
+| all-pass (both pass; any pick acceptable) | 34/35 (one over-strict "none") |
+| errors / unparsed verdicts | 0 |
+
+The headline is the discriminative row: 14 cases where the judge had a
+right answer and a coin flip scores 50%, and it went 14/14 (p ≈ 6×10⁻⁵
+under the null). The failures it caught went both directions — sometimes
+gemma was the broken one, sometimes ornith — and its picks weren't
+position-locked (it selected the second-listed candidate repeatedly in
+all-pass cases). Its single mistake all run was declaring "none" once
+when both candidates were actually correct — the safe failure direction:
+a false "none" means no auto-merge recommendation and the user reviews
+manually; it never recommended a broken diff.
+
+Along the way the judge also demonstrated the value of diff-level review:
+in the live smoke test it docked a correct candidate for shipping
+`__pycache__` noise in its patch — which exposed (and got fixed) a real
+harness bug where run-artifacts leaked into swarm diffs.
+
+Caveat: one judge, one racer pairing, one run — treat as a strong first
+data point, not a leaderboard. `bench/judge_bench.py --dir tasks2` runs
+the same protocol on the hard tier, where discriminative cases should be
+more frequent.
+
 ## Caveats (honest ones)
 
 - Small suite, single run per task, nondeterministic models: treat as directional, not a rigorous eval. Observed run-to-run variance on the same task was ~±30% tokens for opencode (40k–71k on t1).

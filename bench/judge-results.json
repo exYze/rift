@@ -1,0 +1,508 @@
+[
+  {
+    "judge": "qwen3.6:35b",
+    "models": "gemma4:26b,ornith:35b",
+    "results": [
+      {
+        "task": "t06_pct",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t07_avg",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t08_clamp",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t09_compound",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t10_median",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t11_fizz",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t12_cents",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t13_leap",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t14_snake",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t15_trunc",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t16_initials",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t17_pal",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t18_csv",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t19_plural",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t1_offbyone",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t20_dedupe",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t21_chunk",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t22_flatten",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t23_topn",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t24_counts",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t25_merge",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t26_deepget",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t27_div",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t28_parseint",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t29_retry",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t2_default",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t30_age",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t31_cfg",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t32_slugify",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t33_roman",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t34_caesar",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t35_rle",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t36_balanced",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t37_humanize",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t38_transpose",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t39_interleave",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t3_feature",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "none",
+        "kind": "all_pass",
+        "judge_correct": false
+      },
+      {
+        "task": "t40_greet",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t41_tax",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t42_email",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t43_logger",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t44_settings",
+        "candidates": {
+          "0-gemma4-26b": false,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "none",
+        "kind": "none_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t45_shapes",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t46_rename",
+        "candidates": {
+          "0-gemma4-26b": false,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t47_temps",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t48_storage",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "1-ornith-35b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t49_user",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t4_multifile",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      },
+      {
+        "task": "t50_cli",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": false
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "discriminative",
+        "judge_correct": true
+      },
+      {
+        "task": "t5_rename",
+        "candidates": {
+          "0-gemma4-26b": true,
+          "1-ornith-35b": true
+        },
+        "judge_pick": "0-gemma4-26b",
+        "kind": "all_pass",
+        "judge_correct": true
+      }
+    ]
+  }
+]
