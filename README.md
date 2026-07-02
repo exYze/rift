@@ -29,8 +29,10 @@ Full details and rationale in [docs/ROADMAP.md](docs/ROADMAP.md).
 **Homebrew** (macOS / Linux):
 
 ```sh
-brew install exYze/tap/rift
+brew tap exYze/tap && brew install rift
 ```
+
+(Newer Homebrew asks once to trust third-party taps: `brew trust exyze/tap`.)
 
 **macOS / Linux** (one line, no dependencies):
 
