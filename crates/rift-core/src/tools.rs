@@ -37,11 +37,12 @@ pub fn builtin_bash_deny() -> &'static [&'static str] {
 
 /// One file mutation made by the write/edit tools, with enough state to
 /// restore the file to how it was before (`prior` = None means the file
-/// didn't exist).
+/// didn't exist). Prior content is kept as raw bytes so overwriting a
+/// non-UTF-8 file (binary, UTF-16 — common on Windows) stays undoable.
 #[derive(Debug, Clone)]
 pub struct EditRecord {
     pub path: PathBuf,
-    pub prior: Option<String>,
+    pub prior: Option<Vec<u8>>,
     pub turn: u64,
 }
 
@@ -181,8 +182,16 @@ impl ToolCtx {
     }
 
     fn bash_denied(&self, command: &str) -> bool {
-        let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
-        self.deny.lock().map(|d| d.0.is_match(&normalized)).unwrap_or(false)
+        let Ok(deny) = self.deny.lock() else { return false };
+        // Match every chained segment, not just the whole string — otherwise
+        // `true && sudo …` or `echo x; rm -rf /` sails past patterns anchored
+        // at the start. Splitting on subshell/backtick chars too errs on the
+        // side of denying. Still best-effort (quoting can evade it); approval
+        // mode is the real gate.
+        command
+            .split(['&', '|', ';', '\n', '(', ')', '`'])
+            .map(|seg| seg.split_whitespace().collect::<Vec<_>>().join(" "))
+            .any(|seg| !seg.is_empty() && deny.0.is_match(&seg))
     }
 
     /// Mark the start of a new agent turn; edits recorded after this group
@@ -191,9 +200,14 @@ impl ToolCtx {
         self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn record_edit(&self, path: PathBuf, prior: Option<String>) {
+    fn record_edit(&self, path: PathBuf, prior: Option<Vec<u8>>) {
+        // How many turns back /undo can reach. Bounds journal memory: a long
+        // session rewriting large files would otherwise hold every prior
+        // version until exit.
+        const UNDO_KEEP_TURNS: u64 = 3;
         let turn = self.turn.load(std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut j) = self.journal.lock() {
+            j.retain(|r| r.turn + UNDO_KEEP_TURNS > turn);
             // One snapshot per (turn, path) is enough — the FIRST prior state
             // of the turn is what undo must restore.
             if !j.iter().any(|r| r.turn == turn && r.path == path) {
@@ -423,8 +437,15 @@ fn suggest_similar_paths(cwd: &Path, missing: &Path) -> Vec<String> {
     exact
 }
 
-fn enoent_hint(cwd: &Path, path: &Path) -> String {
-    let found = suggest_similar_paths(cwd, path);
+// The similar-path walk is synchronous directory I/O (up to 5000 entries) —
+// run it off the async runtime like the grep/glob walks, or a bad path on a
+// big repo / network drive stalls the whole event loop.
+async fn enoent_hint(cwd: &Path, path: &Path) -> String {
+    let cwd = cwd.to_path_buf();
+    let missing = path.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || suggest_similar_paths(&cwd, &missing))
+        .await
+        .unwrap_or_default();
     if found.is_empty() {
         format!("{} does not exist. Use ls or glob to find the right path.", path.display())
     } else {
@@ -498,7 +519,7 @@ impl Tool for ReadTool {
         let path = ctx.resolve(req_str(args, "path")?);
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", enoent_hint(&ctx.cwd, &path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", enoent_hint(&ctx.cwd, &path).await),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
         if looks_binary(&bytes) {
@@ -510,6 +531,11 @@ impl Tool for ReadTool {
         let limit = limit.min(READ_MAX_LINES);
 
         let total_lines = text.lines().count();
+        if total_lines == 0 {
+            // A legitimately empty file, not a bad offset — an error here
+            // sends the model chasing other offsets.
+            return Ok("(empty file)\n".into());
+        }
         let mut out = String::new();
         let mut shown = 0usize;
         for (i, line) in text.lines().enumerate().skip(offset - 1).take(limit) {
@@ -570,7 +596,15 @@ impl Tool for WriteTool {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        ctx.record_edit(path.clone(), tokio::fs::read_to_string(&path).await.ok());
+        // Snapshot as bytes: a prior read failure other than NotFound must
+        // abort the write, not degrade to "file didn't exist" — undo would
+        // then delete a file it should restore.
+        let prior = match tokio::fs::read(&path).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("cannot snapshot {} for undo", path.display())),
+        };
+        ctx.record_edit(path.clone(), prior);
         tokio::fs::write(&path, content).await.with_context(|| format!("cannot write {}", path.display()))?;
         Ok(format!("Wrote {} bytes to {}", content.len(), path.display()))
     }
@@ -613,7 +647,7 @@ impl Tool for EditTool {
         let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
         let text = match tokio::fs::read_to_string(&path).await {
             Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", enoent_hint(&ctx.cwd, &path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", enoent_hint(&ctx.cwd, &path).await),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
         let count = text.matches(old).count();
@@ -642,7 +676,7 @@ impl Tool for EditTool {
         }
         ctx.check_approval("edit", &path.display().to_string()).await?;
         let updated = if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) };
-        ctx.record_edit(path.clone(), Some(text.clone()));
+        ctx.record_edit(path.clone(), Some(text.clone().into_bytes()));
         tokio::fs::write(&path, &updated).await?;
         Ok(format!("Edited {} ({} replacement{})", path.display(), count, if count == 1 { "" } else { "s" }))
     }
@@ -1228,6 +1262,18 @@ mod tests {
     }
 
     #[test]
+    fn bash_deny_matches_chained_segments() {
+        let ctx = ToolCtx::with_extra_deny("/tmp", &["docker push *".to_string()]);
+        // A harmless prefix must not smuggle a denied command through.
+        assert!(ctx.bash_denied("true && sudo whoami"));
+        assert!(ctx.bash_denied("echo hi; docker push evil"));
+        assert!(ctx.bash_denied("ls | sudo tee /etc/passwd"));
+        assert!(ctx.bash_denied("(sudo rm x)"));
+        assert!(ctx.bash_denied("echo `sudo id`"));
+        assert!(!ctx.bash_denied("echo safe && ls -la"));
+    }
+
+    #[test]
     fn server_command_detection() {
         assert!(looks_like_server_command("npm run dev"));
         assert!(looks_like_server_command("cd app && npm run dev"));
@@ -1324,12 +1370,12 @@ mod tests {
         assert!(closest_line(text, "zzz qqq totally unrelated www").is_none());
     }
 
-    #[test]
-    fn enoent_suggests_similar_paths() {
+    #[tokio::test]
+    async fn enoent_suggests_similar_paths() {
         let dir = std::env::temp_dir().join(format!("rift-enoent-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/App.jsx"), "x").unwrap();
-        let hint = enoent_hint(&dir, &dir.join("App.jsx"));
+        let hint = enoent_hint(&dir, &dir.join("App.jsx")).await;
         // Normalize separators: enoent_hint renders paths via Display, which
         // uses `\` on Windows, so compare against forward slashes either way.
         assert!(
@@ -1372,6 +1418,32 @@ mod tests {
         assert!(!created.exists());
         // Journal drained: a second undo is a no-op.
         assert!(ctx.undo_last_turn().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Overwriting a non-UTF-8 file (binary, UTF-16) must stay undoable —
+    // the prior snapshot is bytes, not text, so undo restores instead of
+    // deleting.
+    #[tokio::test]
+    async fn undo_restores_non_utf8_files() {
+        let dir = std::env::temp_dir().join(format!("rift-undo-bin-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("data.bin");
+        let original: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0x41, 0x80]; // not valid UTF-8
+        std::fs::write(&binary, &original).unwrap();
+
+        let ctx = ToolCtx::new(&dir);
+        ctx.begin_turn();
+        let mut args = Map::new();
+        args.insert("path".into(), Value::from(binary.to_str().unwrap()));
+        args.insert("content".into(), Value::from("plain text now"));
+        WriteTool.execute(&args, &ctx).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&binary).unwrap(), "plain text now");
+
+        let restored = ctx.undo_last_turn().unwrap();
+        assert_eq!(restored, vec![binary.clone()]);
+        assert!(binary.exists(), "undo must restore the file, not delete it");
+        assert_eq!(std::fs::read(&binary).unwrap(), original);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

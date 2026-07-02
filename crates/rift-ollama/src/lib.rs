@@ -7,7 +7,6 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -78,27 +77,18 @@ pub struct OllamaClient {
 
 impl OllamaClient {
     pub fn new(base_url: impl AsRef<str>) -> Self {
-        let mut base = base_url.as_ref().trim_end_matches('/').to_string();
-        if !base.starts_with("http") {
-            base = format!("http://{base}");
-        }
-        Self { base_url: base, http: reqwest::Client::new() }
+        Self { base_url: normalize_base_url(base_url.as_ref()), http: http_client() }
     }
 
     async fn check(resp: reqwest::Response) -> Result<reqwest::Response, OllamaError> {
         if resp.status().is_success() {
             return Ok(resp);
         }
+        let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        Err(Self::api_error(body))
-    }
-
-    fn api_error(body: String) -> OllamaError {
-        let msg = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-            .unwrap_or(body);
-        OllamaError::Api(msg)
+        // Keep the HTTP status: an HTML 502 from a reverse proxy carries no
+        // JSON error, so the status is the only useful signal.
+        Err(OllamaError::Api(format!("{status}: {}", api_error_message(&body))))
     }
 }
 
@@ -136,29 +126,24 @@ impl Provider for OllamaClient {
         on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> Result<ChatOutcome> {
         let resp = self.http.post(format!("{}/api/chat", self.base_url)).json(req).send().await?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Self::api_error(body).into());
-        }
+        let resp = Self::check(resp).await?;
 
         let mut acc = Message { role: Role::Assistant, content: String::new(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None };
         let mut stats = ChatStats::default();
         let mut done_reason = None;
 
-        let mut handle_line = |line: &str,
-                               acc: &mut Message,
-                               stats: &mut ChatStats,
-                               done_reason: &mut Option<String>|
-         -> Result<(), OllamaError> {
-            let line = line.trim();
+        // NDJSON: one complete JSON object per line (for_each_line also
+        // flushes a final unterminated line, which is how non-streaming
+        // responses arrive).
+        for_each_line(resp.bytes_stream(), |line| {
             if line.is_empty() {
-                return Ok(());
+                return Ok(LineFlow::Continue);
             }
-            let value: Value = serde_json::from_str(line)?;
+            let value: Value = serde_json::from_str(line).map_err(OllamaError::Json)?;
             if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
-                return Err(OllamaError::Api(err.to_string()));
+                return Err(OllamaError::Api(err.to_string()).into());
             }
-            let chunk: ChatChunk = serde_json::from_value(value)?;
+            let chunk: ChatChunk = serde_json::from_value(value).map_err(OllamaError::Json)?;
             if let Some(msg) = &chunk.message {
                 if let Some(t) = &msg.thinking {
                     if !t.is_empty() {
@@ -176,34 +161,17 @@ impl Provider for OllamaClient {
                 }
             }
             if chunk.done {
-                *done_reason = chunk.done_reason.clone();
-                *stats = ChatStats {
+                done_reason = chunk.done_reason.clone();
+                stats = ChatStats {
                     prompt_eval_count: chunk.prompt_eval_count.unwrap_or(0),
                     eval_count: chunk.eval_count.unwrap_or(0),
                     total_duration: chunk.total_duration.unwrap_or(0),
                     eval_duration: chunk.eval_duration.unwrap_or(0),
                 };
             }
-            Ok(())
-        };
-
-        let mut buf: Vec<u8> = Vec::new();
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            buf.extend_from_slice(&chunk?);
-            // NDJSON: one complete JSON object per line.
-            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                let line: Vec<u8> = buf.drain(..=pos).collect();
-                let line = String::from_utf8_lossy(&line);
-                handle_line(&line, &mut acc, &mut stats, &mut done_reason)?;
-            }
-        }
-        // Non-streaming responses (and a final unterminated line) arrive without
-        // a trailing newline — flush whatever is left.
-        if !buf.is_empty() {
-            let line = String::from_utf8_lossy(&buf).to_string();
-            handle_line(&line, &mut acc, &mut stats, &mut done_reason)?;
-        }
+            Ok(LineFlow::Continue)
+        })
+        .await?;
 
         let num_ctx = req.options.as_ref().and_then(|o| o.num_ctx).unwrap_or(4096);
         // prompt_eval_count within ~2% of num_ctx ⇒ the prompt almost certainly

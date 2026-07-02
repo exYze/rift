@@ -11,15 +11,15 @@
 //! - streamed tool-call arguments arrive as fragments accumulated by index;
 //! - there's no `/api/show`, so capabilities are best-known defaults.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use rift_provider::{
-    ChatOutcome, ChatRequest, ChatStats, Message, ModelCapabilities, ModelEntry, Provider, Role,
-    StreamDelta, ToolCall, ToolCallFunction,
+    api_error_message, for_each_line, http_client, normalize_base_url, ChatOutcome, ChatRequest,
+    ChatStats, LineFlow, Message, ModelCapabilities, ModelEntry, Provider, Role, StreamDelta,
+    ToolCall, ToolCallFunction,
 };
 
 #[derive(Clone)]
@@ -33,14 +33,11 @@ impl OpenAiClient {
     /// `base_url` is the API root (e.g. `https://openrouter.ai/api/v1` or
     /// `http://localhost:11434/v1`); a trailing `/v1` is added if missing.
     pub fn new(base_url: impl AsRef<str>, api_key: Option<String>) -> Self {
-        let mut base = base_url.as_ref().trim_end_matches('/').to_string();
-        if !base.starts_with("http") {
-            base = format!("http://{base}");
-        }
+        let mut base = normalize_base_url(base_url.as_ref());
         if !base.ends_with("/v1") {
             base = format!("{base}/v1");
         }
-        Self { base_url: base, api_key, http: reqwest::Client::new() }
+        Self { base_url: base, api_key, http: http_client() }
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -65,7 +62,9 @@ struct OaiRequest {
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<i64>,
-    stream_options: StreamOptions,
+    /// `None` after a retry against servers that reject the parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
 }
 
 #[derive(Serialize)]
@@ -131,6 +130,10 @@ fn to_oai_message(m: &Message) -> OaiMessage {
         .iter()
         .enumerate()
         .map(|(i, tc)| OaiToolCall {
+            // Ids are normally guaranteed: the agent synthesizes one for any
+            // call the provider left id-less, and session load backfills old
+            // histories. The fallback is a last resort and may not match the
+            // paired tool result.
             id: tc.id.clone().unwrap_or_else(|| format!("call_{i}")),
             kind: "function",
             function: OaiToolCallFn {
@@ -149,8 +152,8 @@ fn to_oai_message(m: &Message) -> OaiMessage {
         role: role_str(m.role),
         content,
         tool_calls,
-        // A tool result needs the id it answers; fall back to the name if the
-        // upstream call carried no id (rare, non-compliant servers).
+        // A tool result needs the id it answers; ids are synthesized by the
+        // agent when missing, so the name fallback is a last resort only.
         tool_call_id: if m.role == Role::Tool {
             m.tool_call_id.clone().or_else(|| m.tool_name.clone())
         } else {
@@ -181,7 +184,7 @@ fn build_request(req: &ChatRequest) -> OaiRequest {
         // Ollama's num_predict maps to OpenAI's max_tokens; num_ctx has no
         // equivalent (context is fixed per model) and `think` isn't sent.
         max_tokens: req.options.as_ref().and_then(|o| o.num_predict),
-        stream_options: StreamOptions { include_usage: true },
+        stream_options: Some(StreamOptions { include_usage: true }),
     }
 }
 
@@ -261,13 +264,40 @@ struct StreamAcc {
     done_reason: Option<String>,
 }
 
+fn preview(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+/// Parse an accumulated tool-argument string. Empty means "no arguments"
+/// (models send nothing for zero-arg tools); some servers double-encode the
+/// object as a JSON string, so unwrap one level of that.
+fn parse_call_arguments(raw: &str) -> Result<serde_json::Map<String, Value>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(serde_json::Map::new());
+    }
+    match serde_json::from_str::<Value>(raw)? {
+        Value::Object(m) => Ok(m),
+        Value::String(inner) => match serde_json::from_str::<Value>(&inner)? {
+            Value::Object(m) => Ok(m),
+            _ => bail!("arguments are not a JSON object"),
+        },
+        _ => bail!("arguments are not a JSON object"),
+    }
+}
+
+/// More parallel tool calls than any real model emits; `tool_calls[].index`
+/// comes off the wire, so an implausible value means a broken (or hostile)
+/// server — reject it instead of `resize_with`-allocating gigabytes.
+const MAX_TOOL_CALLS: usize = 128;
+
 /// Apply one streamed chunk to the running accumulators, emitting content/
 /// thinking deltas as they arrive.
 fn apply_chunk(
     chunk: OaiChunk,
     acc: &mut StreamAcc,
     on_delta: &mut (dyn FnMut(StreamDelta) + Send),
-) {
+) -> Result<()> {
     if let Some(u) = chunk.usage {
         if u.prompt_tokens > 0 {
             acc.prompt_tokens = u.prompt_tokens;
@@ -276,7 +306,7 @@ fn apply_chunk(
             acc.completion_tokens = u.completion_tokens;
         }
     }
-    let Some(choice) = chunk.choices.into_iter().next() else { return };
+    let Some(choice) = chunk.choices.into_iter().next() else { return Ok(()) };
     if let Some(fr) = choice.finish_reason {
         acc.done_reason = Some(fr);
     }
@@ -294,6 +324,9 @@ fn apply_chunk(
         }
     }
     for tc in delta.tool_calls.into_iter().flatten() {
+        if tc.index >= MAX_TOOL_CALLS {
+            bail!("server sent tool_calls index {} (max {MAX_TOOL_CALLS})", tc.index);
+        }
         if tc.index >= acc.calls.len() {
             acc.calls.resize_with(tc.index + 1, ToolCallAcc::default);
         }
@@ -310,6 +343,7 @@ fn apply_chunk(
             }
         }
     }
+    Ok(())
 }
 
 #[async_trait]
@@ -330,7 +364,9 @@ impl Provider for OpenAiClient {
         }
         let resp = self.req(reqwest::Method::GET, "/models").send().await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("{}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("{status}: {}", api_error_message(&text)));
         }
         let models: Models = resp.json().await?;
         Ok(models.data.into_iter().map(|m| ModelEntry { name: m.id, capabilities: vec![] }).collect())
@@ -348,57 +384,80 @@ impl Provider for OpenAiClient {
         req: &ChatRequest,
         on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> Result<ChatOutcome> {
-        let body = build_request(req);
-        let resp = self.req(reqwest::Method::POST, "/chat/completions").json(&body).send().await?;
+        let mut body = build_request(req);
+        let mut resp = self.req(reqwest::Method::POST, "/chat/completions").json(&body).send().await?;
+        // Some older OpenAI-compatible servers 400 on stream_options wholesale;
+        // drop it and retry once so they still work (only usage stats are lost).
+        if resp.status() == reqwest::StatusCode::BAD_REQUEST && body.stream_options.is_some() {
+            let text = resp.text().await.unwrap_or_default();
+            if !text.contains("stream_options") {
+                return Err(anyhow!("openai api error (400 Bad Request): {}", api_error_message(&text)));
+            }
+            body.stream_options = None;
+            resp = self.req(reqwest::Method::POST, "/chat/completions").json(&body).send().await?;
+        }
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            let msg = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).map(str::to_string))
-                .unwrap_or(text);
-            return Err(anyhow!("openai api error ({status}): {msg}"));
+            return Err(anyhow!("openai api error ({status}): {}", api_error_message(&text)));
         }
 
         let mut acc = StreamAcc::default();
 
-        let mut buf: Vec<u8> = Vec::new();
-        let mut stream = resp.bytes_stream();
-        'outer: while let Some(chunk) = stream.next().await {
-            buf.extend_from_slice(&chunk?);
-            // Server-Sent Events: `data: {json}` lines, terminated by `data: [DONE]`.
-            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                let line: Vec<u8> = buf.drain(..=pos).collect();
-                let line = String::from_utf8_lossy(&line);
-                let Some(payload) = line.trim().strip_prefix("data:") else { continue };
-                let payload = payload.trim();
-                if payload == "[DONE]" {
-                    break 'outer;
-                }
-                if payload.is_empty() {
-                    continue;
-                }
-                if let Ok(parsed) = serde_json::from_str::<OaiChunk>(payload) {
-                    apply_chunk(parsed, &mut acc, on_delta);
-                }
+        // Server-Sent Events: `data: {json}` lines, terminated by `data: [DONE]`.
+        for_each_line(resp.bytes_stream(), |line| {
+            let Some(payload) = line.strip_prefix("data:") else { return Ok(LineFlow::Continue) };
+            let payload = payload.trim();
+            if payload == "[DONE]" {
+                return Ok(LineFlow::Break);
             }
-        }
+            if payload.is_empty() {
+                return Ok(LineFlow::Continue);
+            }
+            let value: Value = serde_json::from_str(payload)
+                .with_context(|| format!("malformed stream event: {}", preview(payload, 200)))?;
+            // Mid-stream failures (rate limits, upstream errors on OpenRouter/
+            // LiteLLM/vLLM) arrive as an `error` event; surface them instead of
+            // returning a silently truncated message.
+            if let Some(err) = value.get("error") {
+                let msg = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+                    .or_else(|| err.as_str().map(str::to_string))
+                    .unwrap_or_else(|| err.to_string());
+                bail!("openai api error (mid-stream): {msg}");
+            }
+            let parsed: OaiChunk = serde_json::from_value(value).context("unexpected stream event shape")?;
+            apply_chunk(parsed, &mut acc, on_delta)?;
+            Ok(LineFlow::Continue)
+        })
+        .await?;
 
-        let tool_calls: Vec<ToolCall> = acc
-            .calls
-            .into_iter()
-            .enumerate()
-            .filter(|(_, c)| !c.name.is_empty())
-            .map(|(i, c)| {
-                let arguments = serde_json::from_str::<serde_json::Map<String, Value>>(&c.args).unwrap_or_default();
-                let call = ToolCall {
-                    id: (!c.id.is_empty()).then_some(c.id),
-                    function: ToolCallFunction { index: Some(i as i64), name: c.name, arguments },
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        for (i, c) in acc.calls.into_iter().enumerate() {
+            if c.name.is_empty() {
+                continue;
+            }
+            let arguments = parse_call_arguments(&c.args).map_err(|e| {
+                let truncated = if acc.done_reason.as_deref() == Some("length") {
+                    " (output truncated by the token limit)"
+                } else {
+                    ""
                 };
-                on_delta(StreamDelta::ToolCall(call.clone()));
-                call
-            })
-            .collect();
+                anyhow!(
+                    "model emitted invalid JSON arguments for tool '{}'{truncated}: {e}; raw: {}",
+                    c.name,
+                    preview(&c.args, 300)
+                )
+            })?;
+            let call = ToolCall {
+                id: (!c.id.is_empty()).then_some(c.id),
+                function: ToolCallFunction { index: Some(i as i64), name: c.name, arguments },
+            };
+            on_delta(StreamDelta::ToolCall(call.clone()));
+            tool_calls.push(call);
+        }
 
         let message = Message {
             role: Role::Assistant,
@@ -462,7 +521,7 @@ mod tests {
             json!({"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}),
         ] {
             let chunk: OaiChunk = serde_json::from_value(frag).unwrap();
-            apply_chunk(chunk, &mut acc, &mut sink);
+            apply_chunk(chunk, &mut acc, &mut sink).unwrap();
         }
         assert_eq!(acc.calls.len(), 1);
         assert_eq!(acc.calls[0].id, "call_1");
@@ -487,7 +546,7 @@ mod tests {
             for piece in ["Hel", "lo"] {
                 let chunk: OaiChunk =
                     serde_json::from_value(json!({"choices":[{"delta":{"content":piece}}]})).unwrap();
-                apply_chunk(chunk, &mut acc, &mut sink);
+                apply_chunk(chunk, &mut acc, &mut sink).unwrap();
             }
         }
         assert_eq!(acc.content, "Hello");

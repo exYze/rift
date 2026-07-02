@@ -89,9 +89,14 @@ pub fn prune_old_turns(messages: &mut [Message]) -> usize {
 }
 
 /// Render history (minus the system prompt and the current turn) as plain
-/// text for the summarizer, with per-message caps.
-fn transcript_for_summary(messages: &[Message]) -> String {
-    let mut out = String::new();
+/// text for the summarizer, with per-message caps AND a total cap. The total
+/// cap matters: compaction fires precisely when history is over budget, and
+/// an over-budget summarization request would itself be front-truncated by
+/// the server — losing the oldest context (the goal/constraints), which is
+/// exactly what the summary needs most. When over the cap, keep both ends
+/// and drop the middle.
+fn transcript_for_summary(messages: &[Message], max_chars: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
     for m in messages {
         let role = match m.role {
             Role::System => continue,
@@ -101,16 +106,42 @@ fn transcript_for_summary(messages: &[Message]) -> String {
         };
         let content: String = m.content.chars().take(1500).collect();
         if !content.trim().is_empty() {
-            out.push_str(&format!("{role}: {content}\n"));
+            lines.push(format!("{role}: {content}\n"));
         }
         for tc in &m.tool_calls {
-            out.push_str(&format!(
-                "ASSISTANT CALLED: {}({})\n",
-                tc.function.name,
-                serde_json::to_string(&tc.function.arguments).unwrap_or_default()
-            ));
+            let args = serde_json::to_string(&tc.function.arguments).unwrap_or_default();
+            let args: String = args.chars().take(400).collect();
+            lines.push(format!("ASSISTANT CALLED: {}({args})\n", tc.function.name));
         }
     }
+    let total: usize = lines.iter().map(String::len).sum();
+    if total <= max_chars {
+        return lines.concat();
+    }
+    // 40% head (goal, constraints, early decisions), 60% tail (recent state).
+    let head_budget = max_chars * 2 / 5;
+    let tail_budget = max_chars - head_budget;
+    let mut head_end = 0;
+    let mut used = 0;
+    for l in &lines {
+        if used + l.len() > head_budget {
+            break;
+        }
+        used += l.len();
+        head_end += 1;
+    }
+    let mut tail_start = lines.len();
+    let mut used_tail = 0;
+    for l in lines.iter().rev() {
+        if used_tail + l.len() > tail_budget || tail_start == head_end {
+            break;
+        }
+        used_tail += l.len();
+        tail_start -= 1;
+    }
+    let mut out = lines[..head_end].concat();
+    out.push_str(&format!("[... {} messages omitted for length ...]\n", tail_start - head_end));
+    out.push_str(&lines[tail_start..].concat());
     out
 }
 
@@ -133,7 +164,10 @@ pub async fn summarize_history(
     let head = &messages[..current_turn_start];
     let tail = &messages[current_turn_start..];
 
-    let transcript = transcript_for_summary(head);
+    // ~4 chars/token estimate with margin: keep the request itself inside
+    // the summarizer's own num_ctx.
+    let max_chars = (usable_budget(num_ctx) as usize).saturating_mul(3);
+    let transcript = transcript_for_summary(head, max_chars);
     let req = ChatRequest {
         model: model.to_string(),
         messages: vec![
@@ -203,5 +237,20 @@ mod tests {
     #[test]
     fn budget_subtracts_reserves() {
         assert_eq!(usable_budget(32_768), 32_768 - OUTPUT_RESERVE - SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn transcript_cap_keeps_head_and_tail() {
+        let msgs: Vec<Message> = (0..50)
+            .map(|i| Message::user(format!("message number {i} {}", "x".repeat(100))))
+            .collect();
+        let full = transcript_for_summary(&msgs, usize::MAX);
+        let capped = transcript_for_summary(&msgs, 2000);
+        assert!(full.len() > capped.len());
+        assert!(capped.len() < 2300, "cap overshot: {}", capped.len());
+        // The goal lives at the start, current state at the end — both must survive.
+        assert!(capped.contains("message number 0"));
+        assert!(capped.contains("message number 49"));
+        assert!(capped.contains("omitted for length"));
     }
 }

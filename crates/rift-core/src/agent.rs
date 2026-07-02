@@ -8,7 +8,8 @@
 //! - alias resolution for hallucinated tool names (`read_file` → `read`)
 //! - unknown tools / bad arguments are returned to the model as tool-result
 //!   errors so it can self-correct, instead of crashing the turn
-//! - doom-loop detection: an identical (name, args) call repeated 3× aborts
+//! - doom-loop detection: an identical (name, args) call repeated 3× is
+//!   refused with an error tool-result instead of being executed again
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -163,9 +164,6 @@ impl Agent {
     ) -> Result<TurnStats> {
         self.messages.push(Message::user(user_input));
         self.ctx.begin_turn();
-        // Everything before this index survives a greedy retry; the user
-        // message itself is kept.
-        let turn_start = self.messages.len();
 
         let tools = self.registry.tool_defs();
         let known = self.registry.names();
@@ -280,6 +278,17 @@ impl Agent {
                 }
             }
 
+            // Providers may omit tool-call ids (Ollama always does). Synthesize
+            // them before the message is stored so the id in history and the
+            // tool_call_id on the result below always agree — strict
+            // OpenAI-compatible servers reject histories where they don't.
+            let msg_index = self.messages.len();
+            for (i, call) in msg.tool_calls.iter_mut().enumerate() {
+                if call.id.is_none() {
+                    call.id = Some(format!("call_{msg_index}_{i}"));
+                }
+            }
+
             let tool_calls = msg.tool_calls.clone();
             let content_has_code = msg.content.contains("```");
             self.messages.push(msg);
@@ -310,7 +319,19 @@ impl Agent {
                     retried_greedy = true;
                     nudged_apply = false;
                     temp_override = Some(0.0);
-                    self.messages.truncate(turn_start);
+                    // Scrap this turn's messages. A start-of-turn index would
+                    // be stale here — mid-turn compaction rebuilds the whole
+                    // list — so cut after the turn's user message instead
+                    // (compaction keeps it; fall back to the last user-role
+                    // message if it was reworded away).
+                    let cut = self
+                        .messages
+                        .iter()
+                        .rposition(|m| m.role == Role::User && m.content == user_input)
+                        .or_else(|| self.messages.iter().rposition(|m| m.role == Role::User))
+                        .map(|i| i + 1)
+                        .unwrap_or(self.messages.len());
+                    self.messages.truncate(cut);
                     let _ = tx.send(AgentEvent::Warning(
                         "model never used tools on a work item; retrying the turn at temperature 0".into(),
                     ));
@@ -333,11 +354,18 @@ impl Agent {
                 *count += 1;
                 if *count >= 3 {
                     let _ = tx.send(AgentEvent::Warning(format!(
-                        "aborting: tool '{canonical}' called 3x with identical arguments"
+                        "tool '{canonical}' called 3x with identical arguments; refusing the repeat"
                     )));
-                    self.messages.push(Message::user(
-                        "[system] You repeated the same tool call three times. Stop and summarize what you have so far.",
-                    ));
+                    // Answer the call anyway: every id in the assistant's
+                    // tool_calls must get a tool result or strict
+                    // OpenAI-compatible servers reject the whole history.
+                    let mut result_msg = Message::tool_result(
+                        requested_name,
+                        "ERROR: repeated identical tool call refused. You already ran this exact call \
+                         and have its result. Take a different action or summarize what you have so far.",
+                    );
+                    result_msg.tool_call_id = call.id.clone();
+                    self.messages.push(result_msg);
                     continue;
                 }
 

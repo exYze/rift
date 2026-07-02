@@ -48,6 +48,9 @@ pub enum UiEffect {
     /// Ask the terminal to set the clipboard (OSC 52) — emitted by the UI
     /// loop, which owns stdout.
     Osc52(String),
+    /// Update the status line only — for UI-side async tasks whose late
+    /// completion must not reset a newer turn's busy/cancel state.
+    Status(String),
     /// Command finished; status-line text. Always the final effect.
     Done(String),
 }
@@ -148,7 +151,7 @@ pub async fn run_command(
         "/undo" => cmd_undo(agent, fx),
         "/update" => cmd_update(fx, cancel).await,
         "/diff" => cmd_diff(cx, fx).await,
-        "/host" => cmd_host(rest, agent, fx, cancel).await,
+        "/host" => cmd_host(rest, agent, cx, fx, cancel).await,
         "/think" => cmd_think(rest, agent, fx).await,
         "/export" => cmd_export(agent, cx, fx),
         "/system" => cmd_system(rest, agent, fx),
@@ -824,6 +827,7 @@ async fn cmd_diff(cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> 
 async fn cmd_host(
     arg: &str,
     agent: &mut Agent,
+    cx: &mut CmdCx,
     fx: &UnboundedSender<UiEffect>,
     cancel: &CancellationToken,
 ) -> Result<String> {
@@ -843,6 +847,9 @@ async fn cmd_host(
     let url = candidate.base_url().to_string();
     let has_model = models.iter().any(|m| m.name == agent.cfg.model);
     agent.set_client(candidate);
+    // Keep the default host in sync so a later bare `/model <name>` rebuilds
+    // its client against this server, not the stale startup one.
+    cx.host = url.clone();
     let mut msg = format!("switched to {url} ({} model(s))", models.len());
     if !has_model {
         msg.push_str(&format!("\n! current model '{}' not found there — pick one with /model", agent.cfg.model));

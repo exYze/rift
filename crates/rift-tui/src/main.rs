@@ -208,9 +208,27 @@ async fn main() -> Result<()> {
     };
 
     // MCP servers + permission policy come from the config loaded up top.
+    // Entries from a *project* .rift.json spawn arbitrary commands and the
+    // file may have arrived inside a cloned repo — require one-time approval
+    // (remembered in the user-level trust store) before running them.
+    let from_project_config = config_path.as_deref() == Some(cwd.join(".rift.json").as_path());
     let mut registry = ToolRegistry::standard();
     let mut mcp_status: Vec<(String, usize)> = vec![];
     for (name, server_cfg) in &config.mcp {
+        if from_project_config && !rift_core::mcp_entry_trusted(name, server_cfg) {
+            let cmdline = format!("{} {}", server_cfg.command, server_cfg.args.join(" "));
+            if interactive && confirm_mcp(name, cmdline.trim()) {
+                if let Err(e) = rift_core::trust_mcp_entry(name, server_cfg) {
+                    eprintln!("warning: could not persist MCP approval: {e:#}");
+                }
+            } else {
+                eprintln!(
+                    "mcp '{name}' skipped: defined in project .rift.json and not yet trusted{}",
+                    if interactive { "" } else { " (approve it in an interactive session, or move it to the user config)" }
+                );
+                continue;
+            }
+        }
         match McpClient::spawn(name, server_cfg).await {
             Ok(mcp) => match mcp.list_tools().await {
                 Ok(tools) => {
@@ -407,6 +425,20 @@ async fn run_swarm_cli(
     Ok(())
 }
 
+/// Startup y/N prompt for an untrusted project-config MCP server. Runs before
+/// the TUI takes over the terminal, so plain stdin is fine. Any error or
+/// non-"y" answer counts as "no".
+fn confirm_mcp(name: &str, cmdline: &str) -> bool {
+    use std::io::Write;
+    eprint!("project .rift.json defines MCP server '{name}': `{cmdline}`\nrun it now and trust it on this machine? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim(), "y" | "Y" | "yes" | "YES")
+}
+
 fn indent(s: &str, pad: &str) -> String {
     s.lines().map(|l| format!("{pad}{l}")).collect::<Vec<_>>().join("\n")
 }
@@ -414,6 +446,7 @@ fn indent(s: &str, pad: &str) -> String {
 /// One-shot mode: prints the event stream to stdout. Used for scripting and
 /// as the harness entry point for benchmarks.
 async fn run_headless(mut agent: Agent, prompt: String, store: SessionStore) -> Result<()> {
+    use std::io::Write;
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     let printer = tokio::spawn(async move {
         let mut in_thinking = false;
@@ -437,6 +470,9 @@ async fn run_headless(mut agent: Agent, prompt: String, store: SessionStore) -> 
                         in_thinking = false;
                     }
                     print!("{c}");
+                    // print! buffers until a newline — flush so streamed
+                    // paragraphs appear as they arrive instead of at the end.
+                    let _ = std::io::stdout().flush();
                 }
                 AgentEvent::ToolStart { name, args } => {
                     if in_thinking {

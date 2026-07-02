@@ -137,11 +137,24 @@ impl McpClient {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        self.send_raw(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await?;
-        let resp = tokio::time::timeout(REQUEST_TIMEOUT, rx)
-            .await
-            .map_err(|_| anyhow!("MCP server '{}' timed out on {method}", self.name))?
-            .map_err(|_| anyhow!("MCP server '{}' closed during {method}", self.name))?;
+        // Every early exit must remove the pending entry, or a wedged server
+        // (accepts requests, never answers) grows the map for the whole
+        // session — one dead oneshot per 60s-timeout call.
+        let outcome = async {
+            self.send_raw(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await?;
+            tokio::time::timeout(REQUEST_TIMEOUT, rx)
+                .await
+                .map_err(|_| anyhow!("MCP server '{}' timed out on {method}", self.name))?
+                .map_err(|_| anyhow!("MCP server '{}' closed during {method}", self.name))
+        }
+        .await;
+        let resp = match outcome {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.pending.lock().await.remove(&id);
+                return Err(e);
+            }
+        };
         if let Some(err) = resp.get("error") {
             bail!(
                 "MCP '{}' {method} error: {}",
