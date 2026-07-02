@@ -23,6 +23,7 @@ use rift_ollama::{Message, Role};
 use tokio::sync::oneshot;
 
 use crate::commands::{self, CmdCx, PickerItem, UiEffect};
+use crate::theme;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -60,20 +61,20 @@ impl Kind {
     }
 }
 
-pub(crate) fn style_for(kind: Kind) -> Style {
+pub(crate) fn style_for(kind: Kind, t: &theme::Theme) -> Style {
     match kind {
-        Kind::User => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Kind::User => Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
         Kind::Assistant => Style::default(),
-        Kind::Code => Style::default().fg(Color::Green),
-        Kind::Thinking => Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        Kind::Tool => Style::default().fg(Color::White),
-        Kind::ToolErr => Style::default().fg(Color::Red),
-        Kind::Warn => Style::default().fg(Color::Yellow),
-        Kind::Info => Style::default().fg(Color::DarkGray),
-        Kind::DiffAdd => Style::default().fg(Color::Green),
-        Kind::DiffDel => Style::default().fg(Color::Red),
-        Kind::DiffHunk => Style::default().fg(Color::Cyan),
-        Kind::DiffMeta => Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+        Kind::Code => Style::default().fg(t.code),
+        Kind::Thinking => Style::default().fg(t.muted).add_modifier(Modifier::ITALIC),
+        Kind::Tool => Style::default().fg(t.tool),
+        Kind::ToolErr => Style::default().fg(t.error),
+        Kind::Warn => Style::default().fg(t.warn),
+        Kind::Info => Style::default().fg(t.muted),
+        Kind::DiffAdd => Style::default().fg(t.diff_add),
+        Kind::DiffDel => Style::default().fg(t.diff_del),
+        Kind::DiffHunk => Style::default().fg(t.diff_hunk),
+        Kind::DiffMeta => Style::default().fg(t.muted).add_modifier(Modifier::BOLD),
     }
 }
 
@@ -84,10 +85,27 @@ struct BlockEntry {
     gap: bool,
 }
 
+/// One pre-wrapped visual line. `spans` (fenced code only) carries syntect
+/// foreground colors; plain lines style by `kind` at draw time so a theme
+/// switch recolors them without a re-wrap.
+struct WrappedLine {
+    kind: Kind,
+    text: String,
+    spans: Option<Vec<(Color, String)>>,
+}
+
+impl WrappedLine {
+    fn plain(kind: Kind, text: String) -> Self {
+        Self { kind, text, spans: None }
+    }
+}
+
 /// A scrollable region with its own content and bottom-anchored scroll state.
 pub(crate) struct Pane {
     blocks: Vec<BlockEntry>,
-    wrapped: Vec<(Kind, String)>,
+    wrapped: Vec<WrappedLine>,
+    /// syntect theme for fenced code; None = flat theme color.
+    syntax: Option<&'static str>,
     /// Wrapped line count per block (parallel to `blocks`), so a streaming
     /// append re-wraps only the tail block instead of the whole transcript.
     line_counts: Vec<usize>,
@@ -152,6 +170,7 @@ impl Pane {
         Self {
             blocks: vec![],
             wrapped: vec![],
+            syntax: None,
             line_counts: vec![],
             first_dirty: 0,
             wrap_width: 0,
@@ -159,6 +178,15 @@ impl Pane {
             scroll_from_bottom: 0,
             view_height: 0,
             area: Rect::default(),
+        }
+    }
+
+    /// Enable/switch syntect highlighting for fenced code (transcript only).
+    /// Forces a full re-wrap: cached spans hold the old theme's colors.
+    pub(crate) fn set_syntax(&mut self, syntax: Option<&'static str>) {
+        if self.syntax != syntax {
+            self.syntax = syntax;
+            self.dirty = true;
         }
     }
 
@@ -215,42 +243,72 @@ impl Pane {
                 Kind::User => format!("❯ {}", block.text),
                 _ => block.text.clone(),
             };
-            // Fenced code blocks inside assistant text get their own style.
+            // Fenced code blocks inside assistant text get their own style,
+            // and (when the pane has a syntect theme) real highlighting. The
+            // highlighter is stateful per block so multi-line strings and
+            // comments color correctly.
             let mut in_fence = false;
+            let mut hl: Option<crate::highlight::BlockHighlighter> = None;
             for raw_line in prefixed.lines() {
                 let mut kind = block.kind;
+                let mut fence_marker = false;
                 if block.kind == Kind::Assistant {
                     if raw_line.trim_start().starts_with("```") {
-                        in_fence = !in_fence;
+                        fence_marker = true;
+                        if in_fence {
+                            in_fence = false;
+                            hl = None;
+                        } else {
+                            in_fence = true;
+                            let lang = raw_line.trim_start().trim_start_matches('`').trim();
+                            hl = match (self.syntax, lang.is_empty()) {
+                                (Some(theme), false) => crate::highlight::BlockHighlighter::new(lang, theme),
+                                _ => None,
+                            };
+                        }
                         kind = Kind::Code;
                     } else if in_fence {
                         kind = Kind::Code;
                     }
                 }
                 if raw_line.is_empty() {
-                    self.wrapped.push((kind, String::new()));
+                    self.wrapped.push(WrappedLine::plain(kind, String::new()));
                     continue;
                 }
                 if kind.hard_cut() {
                     // Don't re-wrap code/diffs: hard-cut so alignment stays exact.
                     let indent = if kind == Kind::Code { "  " } else { "" };
-                    let mut rest = raw_line;
-                    loop {
-                        let cut = floor_boundary(rest, w.saturating_sub(indent.len()).max(1));
-                        self.wrapped.push((kind, format!("{indent}{}", &rest[..cut])));
-                        rest = &rest[cut..];
-                        if rest.is_empty() {
-                            break;
+                    let cut_w = w.saturating_sub(indent.len()).max(1);
+                    let spans = if fence_marker { None } else { hl.as_mut().and_then(|h| h.line(raw_line)) };
+                    match spans {
+                        Some(spans) => {
+                            // Highlight the whole source line first, then cut,
+                            // so colors survive wrapping intact.
+                            for piece in cut_spans(spans, cut_w, indent) {
+                                let text: String = piece.iter().map(|(_, s)| s.as_str()).collect();
+                                self.wrapped.push(WrappedLine { kind, text, spans: Some(piece) });
+                            }
+                        }
+                        None => {
+                            let mut rest = raw_line;
+                            loop {
+                                let cut = floor_boundary(rest, cut_w);
+                                self.wrapped.push(WrappedLine::plain(kind, format!("{indent}{}", &rest[..cut])));
+                                rest = &rest[cut..];
+                                if rest.is_empty() {
+                                    break;
+                                }
+                            }
                         }
                     }
                 } else {
                     for piece in textwrap::wrap(raw_line, w) {
-                        self.wrapped.push((kind, piece.into_owned()));
+                        self.wrapped.push(WrappedLine::plain(kind, piece.into_owned()));
                     }
                 }
             }
             if block.gap {
-                self.wrapped.push((block.kind, String::new()));
+                self.wrapped.push(WrappedLine::plain(block.kind, String::new()));
             }
             self.line_counts.push(self.wrapped.len() - lines_before);
         }
@@ -272,14 +330,22 @@ impl Pane {
         self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(n);
     }
 
-    pub(crate) fn visible_lines(&mut self) -> Vec<Line<'static>> {
+    pub(crate) fn visible_lines(&mut self, t: &theme::Theme) -> Vec<Line<'static>> {
         self.scroll_from_bottom = self.scroll_from_bottom.min(self.max_scroll());
         let total = self.wrapped.len();
         let end = total - self.scroll_from_bottom.min(total);
         let start = end.saturating_sub(self.view_height);
         self.wrapped[start..end]
             .iter()
-            .map(|(kind, text)| Line::from(Span::styled(text.clone(), style_for(*kind))))
+            .map(|wl| match &wl.spans {
+                Some(spans) => Line::from(
+                    spans
+                        .iter()
+                        .map(|(c, s)| Span::styled(s.clone(), Style::default().fg(*c)))
+                        .collect::<Vec<_>>(),
+                ),
+                None => Line::from(Span::styled(wl.text.clone(), style_for(wl.kind, t))),
+            })
             .collect()
     }
 
@@ -330,6 +396,37 @@ enum PickerKind {
     Command { template: String },
     /// Enter answers a pending ask_user question.
     Elicit { reply: Option<oneshot::Sender<String>> },
+}
+
+/// Hard-cut colored spans into visual lines of at most `width` chars, each
+/// prefixed with `indent`. The char under the cut keeps its color; span
+/// boundaries never shift.
+fn cut_spans(spans: Vec<(Color, String)>, width: usize, indent: &str) -> Vec<Vec<(Color, String)>> {
+    let mut out: Vec<Vec<(Color, String)>> = vec![];
+    let mut cur: Vec<(Color, String)> = vec![(Color::Reset, indent.to_string())];
+    let mut cur_len = 0usize;
+    for (color, text) in spans {
+        let mut buf = String::new();
+        for ch in text.chars() {
+            if cur_len >= width {
+                if !buf.is_empty() {
+                    cur.push((color, std::mem::take(&mut buf)));
+                }
+                out.push(std::mem::take(&mut cur));
+                cur.push((Color::Reset, indent.to_string()));
+                cur_len = 0;
+            }
+            buf.push(ch);
+            cur_len += 1;
+        }
+        if !buf.is_empty() {
+            cur.push((color, buf));
+        }
+    }
+    if out.is_empty() || cur.len() > 1 {
+        out.push(cur);
+    }
+    out
 }
 
 fn floor_boundary(s: &str, max: usize) -> usize {
@@ -398,6 +495,50 @@ mod tests {
         assert_eq!(sanitize_for_pane("bell\x07backspace\x08"), "bellbackspace");
         assert_eq!(sanitize_for_pane("plain text"), "plain text");
     }
+
+    #[test]
+    fn cut_spans_preserves_text_and_colors_across_cuts() {
+        let spans = vec![
+            (Color::Red, "let x".to_string()),
+            (Color::Blue, " = 42;".to_string()),
+        ];
+        let lines = cut_spans(spans, 6, "  ");
+        // 11 content chars at width 6 → two visual lines, each indent-prefixed.
+        let text = |l: &Vec<(Color, String)>| l.iter().map(|(_, s)| s.as_str()).collect::<String>();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(text(&lines[0]), "  let x ");
+        assert_eq!(text(&lines[1]), "  = 42;");
+        // The char under the cut keeps its span's color.
+        assert!(lines[0].iter().any(|(c, s)| *c == Color::Blue && s == " "));
+        assert!(lines[1].iter().any(|(c, s)| *c == Color::Blue && s == "= 42;"));
+    }
+
+    #[test]
+    fn expand_mentions_attaches_outline_and_reports_missing() {
+        let dir = std::env::temp_dir().join(format!("rift-mention-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.rs"), "pub fn hello() -> u32 { 41 + 1 }\n").unwrap();
+
+        let (expanded, notes) = expand_mentions("check @lib.rs and @nope.rs please", &dir);
+        assert!(expanded.starts_with("check @lib.rs and @nope.rs please"));
+        assert!(expanded.contains("pub fn hello() -> u32"), "outline missing: {expanded}");
+        assert!(!expanded.contains("41 + 1"), "body should be elided: {expanded}");
+        assert!(notes.iter().any(|n| n.contains("nope.rs not found")));
+        // No mentions → prompt passes through untouched.
+        let (same, notes2) = expand_mentions("no mentions here", &dir);
+        assert_eq!(same, "no mentions here");
+        assert!(notes2.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn head_of_caps_long_files() {
+        let content: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let head = head_of(&content);
+        assert!(head.contains("line 79"));
+        assert!(!head.contains("line 80\n"));
+        assert!(head.contains("120 more lines"));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,12 +547,32 @@ enum Focus {
     Log,
 }
 
+/// What the right-hand pane shows: the activity log or the live working-tree
+/// diff (Ctrl+D toggles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogView {
+    Activity,
+    Diff,
+}
+
 struct App {
     model: String,
+    theme: &'static theme::Theme,
     transcript: Pane,
     log: Pane,
+    /// Live working-tree diff, refreshed after each write/edit tool result.
+    diff: Pane,
+    log_view: LogView,
+    /// A write/edit landed since the last diff refresh.
+    diff_stale: bool,
+    /// A `git diff` task is in flight (don't stack them).
+    diff_refreshing: bool,
     show_log: bool,
     focus: Focus,
+    /// Project root, for @-mention expansion and file completion.
+    cwd: PathBuf,
+    /// Lazily built file list backing @-mention completion.
+    file_index: Option<Vec<String>>,
     input: String,
     /// Byte offset of the input cursor (always on a char boundary).
     cursor: usize,
@@ -458,13 +619,22 @@ struct SessionStats {
 }
 
 impl App {
-    fn new(model: String, skills: Vec<Skill>) -> Self {
+    fn new(model: String, skills: Vec<Skill>, theme: &'static theme::Theme, cwd: PathBuf) -> Self {
+        let mut transcript = Pane::new();
+        transcript.set_syntax(theme.syntax);
         Self {
             model,
-            transcript: Pane::new(),
+            theme,
+            transcript,
             log: Pane::new(),
+            diff: Pane::new(),
+            log_view: LogView::Activity,
+            diff_stale: false,
+            diff_refreshing: false,
             show_log: true,
             focus: Focus::Transcript,
+            cwd,
+            file_index: None,
             input: String::new(),
             cursor: 0,
             history: vec![],
@@ -570,7 +740,82 @@ impl App {
     fn focused_pane(&mut self) -> &mut Pane {
         match self.focus {
             Focus::Transcript => &mut self.transcript,
-            Focus::Log => &mut self.log,
+            Focus::Log => self.log_like_pane(),
+        }
+    }
+
+    /// Whichever pane the right-hand slot currently displays.
+    fn log_like_pane(&mut self) -> &mut Pane {
+        match self.log_view {
+            LogView::Activity => &mut self.log,
+            LogView::Diff => &mut self.diff,
+        }
+    }
+
+    /// File list for @-mention completion: workspace files (ignore-aware),
+    /// relative forward-slash paths. Built once per session on first use;
+    /// the walk is capped so a giant repo can't wedge the UI thread.
+    fn file_index(&mut self) -> &[String] {
+        if self.file_index.is_none() {
+            let mut v: Vec<String> = ignore::WalkBuilder::new(&self.cwd)
+                .build()
+                .take(10_000)
+                .flatten()
+                .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+                .filter_map(|e| {
+                    e.path()
+                        .strip_prefix(&self.cwd)
+                        .ok()
+                        .map(|p| p.display().to_string().replace('\\', "/"))
+                })
+                .collect();
+            v.sort();
+            self.file_index = Some(v);
+        }
+        self.file_index.as_deref().unwrap_or_default()
+    }
+
+    /// The @-token containing the cursor, if any: (byte start, query).
+    fn mention_token(&self) -> Option<(usize, String)> {
+        let start = self.input[..self.cursor]
+            .rfind(char::is_whitespace)
+            .map(|i| i + self.input[i..].chars().next().map_or(1, char::len_utf8))
+            .unwrap_or(0);
+        let token = &self.input[start..self.cursor];
+        let q = token.strip_prefix('@')?;
+        (!q.contains('@')).then(|| (start, q.to_string()))
+    }
+
+    /// Completion candidates for the @-token under the cursor.
+    fn mention_palette(&mut self) -> Vec<String> {
+        if self.palette_off || self.picker.is_some() || self.answering.is_some() {
+            return vec![];
+        }
+        let Some((_, q)) = self.mention_token() else { return vec![] };
+        let q = q.to_lowercase();
+        let mut hits: Vec<String> = self
+            .file_index()
+            .iter()
+            .filter(|p| p.to_lowercase().contains(&q))
+            .take(50)
+            .cloned()
+            .collect();
+        // Filename-prefix matches read as the intended target — surface them.
+        hits.sort_by_key(|p| {
+            let name = p.rsplit('/').next().unwrap_or(p).to_lowercase();
+            (!name.starts_with(&q), p.len())
+        });
+        hits.truncate(8);
+        hits
+    }
+
+    /// Replace the @-token under the cursor with the chosen path.
+    fn complete_mention(&mut self, path: &str) {
+        if let Some((start, _)) = self.mention_token() {
+            let replacement = format!("@{path} ");
+            self.input.replace_range(start..self.cursor, &replacement);
+            self.cursor = start + replacement.len();
+            self.palette_idx = 0;
         }
     }
 
@@ -596,6 +841,9 @@ impl App {
                 self.status = format!("running {name}…");
             }
             AgentEvent::ToolResult { name, ok, preview } => {
+                if ok && matches!(name.as_str(), "write" | "edit") {
+                    self.diff_stale = true;
+                }
                 self.log.push_block(
                     if ok { Kind::Tool } else { Kind::ToolErr },
                     format!("{} {name}: {preview}", if ok { '✓' } else { '✗' }),
@@ -614,6 +862,8 @@ impl App {
             }
             AgentEvent::Done(stats) => {
                 self.idle();
+                // Catch changes made via bash (git checkout, formatters…) too.
+                self.diff_stale = true;
                 if stats.iterations > 0 {
                     self.session_stats.turns += 1;
                     self.session_stats.model_calls += stats.iterations as u64;
@@ -649,12 +899,30 @@ impl App {
             }
             UiEffect::Clear => {
                 self.transcript = Pane::new();
+                self.transcript.set_syntax(self.theme.syntax);
                 self.log = Pane::new();
+                self.diff = Pane::new();
             }
             UiEffect::Seed(messages) => {
                 self.transcript = Pane::new();
+                self.transcript.set_syntax(self.theme.syntax);
                 self.log = Pane::new();
                 self.seed_from_messages(&messages);
+            }
+            UiEffect::TurnDiff(text) => {
+                self.diff_refreshing = false;
+                let scroll = self.diff.scroll_from_bottom;
+                self.diff = Pane::new();
+                if text.trim().is_empty() {
+                    self.diff.push_line(Kind::Info, "working tree clean — no uncommitted changes".into());
+                } else {
+                    for line in text.lines().take(4000) {
+                        self.diff.push_line(diff_kind(line), line.to_string());
+                    }
+                }
+                // Keep the user's reading position across refreshes; a fresh
+                // pane anchors to the top (usize::MAX clamps to max_scroll).
+                self.diff.scroll_from_bottom = if scroll == 0 { usize::MAX } else { scroll };
             }
             UiEffect::Model(name) => self.model = name,
             UiEffect::Plan(items) => self.plan = items,
@@ -690,8 +958,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
         (main_area, None)
     };
 
-    let focused_style = Style::default().fg(Color::Cyan);
-    let unfocused_style = Style::default().fg(Color::DarkGray);
+    let t = app.theme;
+    let focused_style = Style::default().fg(t.accent);
+    let unfocused_style = Style::default().fg(t.muted);
 
     // Transcript pane.
     {
@@ -703,16 +972,21 @@ fn draw(frame: &mut Frame, app: &mut App) {
         app.transcript.area = inner;
         app.transcript.rebuild(inner.width);
         app.transcript.view_height = inner.height as usize;
-        let lines = app.transcript.visible_lines();
+        let lines = app.transcript.visible_lines(t);
         frame.render_widget(block, transcript_area);
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
-    // Tool-log pane, with the model's plan checklist pinned on top.
+    // Right-hand pane (activity log or live diff), with the model's plan
+    // checklist pinned on top.
     if let Some(log_area) = log_area {
         let focused = app.focus == Focus::Log;
+        let title = match app.log_view {
+            LogView::Activity => " activity (Ctrl+D diff) ",
+            LogView::Diff => " diff — working tree (Ctrl+D activity) ",
+        };
         let block = Block::bordered()
-            .title(" activity ")
+            .title(title)
             .border_style(if focused { focused_style } else { unfocused_style });
         let inner = block.inner(log_area);
         frame.render_widget(block, log_area);
@@ -731,18 +1005,18 @@ fn draw(frame: &mut Frame, app: &mut App) {
             let mut plines: Vec<Line> = Vec::with_capacity(rows + 1);
             for (i, item) in app.plan.iter().enumerate().skip(start).take(rows) {
                 let (mark, style) = if item.done {
-                    ("☑", Style::default().fg(Color::DarkGray))
+                    ("☑", Style::default().fg(t.muted))
                 } else if Some(i) == current {
-                    ("◐", Style::default().fg(Color::Yellow))
+                    ("◐", Style::default().fg(t.warn))
                 } else {
-                    ("☐", Style::default().fg(Color::White))
+                    ("☐", Style::default().fg(t.tool))
                 };
                 plines.push(Line::from(Span::styled(format!("{mark} {}", item.text), style)));
             }
             let bar = format!("─ plan {done}/{} {}", app.plan.len(), "─".repeat(inner.width as usize));
             plines.push(Line::from(Span::styled(
                 bar.chars().take(inner.width as usize).collect::<String>(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             )));
             let plan_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: plan_h };
             frame.render_widget(Paragraph::new(plines), plan_area);
@@ -754,19 +1028,29 @@ fn draw(frame: &mut Frame, app: &mut App) {
             width: inner.width,
             height: inner.height.saturating_sub(plan_h),
         };
-        app.log.area = log_inner;
-        app.log.rebuild(log_inner.width);
-        app.log.view_height = log_inner.height as usize;
-        let lines = app.log.visible_lines();
+        // The hidden pane gets a zero area so mouse routing can't hit it.
+        match app.log_view {
+            LogView::Activity => app.diff.area = Rect::default(),
+            LogView::Diff => app.log.area = Rect::default(),
+        }
+        let pane = app.log_like_pane();
+        pane.area = log_inner;
+        pane.rebuild(log_inner.width);
+        pane.view_height = log_inner.height as usize;
+        let lines = pane.visible_lines(t);
         frame.render_widget(Paragraph::new(lines), log_inner);
     } else {
         app.log.area = Rect::default();
+        app.diff.area = Rect::default();
     }
 
     // Status line.
     let pane = match app.focus {
         Focus::Transcript => &app.transcript,
-        Focus::Log => &app.log,
+        Focus::Log => match app.log_view {
+            LogView::Activity => &app.log,
+            LogView::Diff => &app.diff,
+        },
     };
     let scroll_note = if pane.scroll_from_bottom > 0 {
         format!("  [↑{} — End to follow]", pane.scroll_from_bottom)
@@ -785,10 +1069,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
         _ => String::new(),
     };
     let status = Line::from(vec![
-        Span::styled(format!(" {} ", app.model), Style::default().fg(Color::Black).bg(Color::Cyan)),
-        Span::styled(busy_marker, Style::default().fg(if app.busy { Color::Yellow } else { Color::Green })),
-        Span::styled(format!("{}{elapsed_note}", app.status), Style::default().fg(Color::DarkGray)),
-        Span::styled(scroll_note, Style::default().fg(Color::Yellow)),
+        Span::styled(format!(" {} ", app.model), Style::default().fg(t.sel_fg).bg(t.accent)),
+        Span::styled(busy_marker, Style::default().fg(if app.busy { t.warn } else { t.ok })),
+        Span::styled(format!("{}{elapsed_note}", app.status), Style::default().fg(t.muted)),
+        Span::styled(scroll_note, Style::default().fg(t.warn)),
     ]);
     frame.render_widget(Paragraph::new(status), status_area);
 
@@ -817,7 +1101,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     for (i, l) in input_lines[start..].iter().take(shown).enumerate() {
         let abs = start + i;
         let prefix = if abs == 0 { "❯ " } else { "… " };
-        let mut spans = vec![Span::styled(prefix, Style::default().fg(Color::Cyan))];
+        let mut spans = vec![Span::styled(prefix, Style::default().fg(t.accent))];
         if abs == cur_line_idx {
             // Split the line at the cursor; render the char under it reversed.
             let split = col.min(l.len());
@@ -836,12 +1120,23 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
     frame.render_widget(Paragraph::new(lines), input_inner);
 
-    // Slash-command palette: overlay anchored above the input pane, filtered
-    // live by what's typed; Up/Down select, Tab completes, Enter runs.
+    // Completion popups anchored above the input pane, filtered live by
+    // what's typed; Up/Down select, Tab completes, Enter runs (commands).
+    // Commands (input starts with '/') and @-file mentions are mutually
+    // exclusive by construction.
     let palette = app.palette();
-    if !palette.is_empty() {
-        app.palette_idx = app.palette_idx.min(palette.len() - 1);
-        let rows = palette.len().min(8);
+    let mention = if palette.is_empty() { app.mention_palette() } else { vec![] };
+    let (entries, popup_title): (Vec<(String, String, String)>, &str) = if !palette.is_empty() {
+        (palette, " commands — ↑↓ select · Tab complete · Enter run · Esc dismiss ")
+    } else {
+        (
+            mention.into_iter().map(|p| (format!("@{p}"), String::new(), String::new())).collect(),
+            " files — ↑↓ select · Tab attach outline · Esc dismiss ",
+        )
+    };
+    if !entries.is_empty() {
+        app.palette_idx = app.palette_idx.min(entries.len() - 1);
+        let rows = entries.len().min(8);
         let height = (rows + 2) as u16;
         let width = (frame.area().width.saturating_sub(2)).min(72);
         let area = Rect {
@@ -853,24 +1148,22 @@ fn draw(frame: &mut Frame, app: &mut App) {
         // Keep the selection inside the visible window when the list scrolls.
         let start = (app.palette_idx + 1).saturating_sub(rows);
         let mut lines: Vec<Line> = Vec::with_capacity(rows);
-        for (row, (name, args, desc)) in palette.iter().enumerate().skip(start).take(rows) {
+        for (row, (name, args, desc)) in entries.iter().enumerate().skip(start).take(rows) {
             let selected = row == app.palette_idx;
             let left = if args.is_empty() { name.to_string() } else { format!("{name} {args}") };
             let base = if selected {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
+                Style::default().bg(t.accent).fg(t.sel_fg)
             } else {
                 Style::default()
             };
             let pad = (width as usize).saturating_sub(2 + 30 + desc.len());
             lines.push(Line::from(vec![
                 Span::styled(format!(" {left:<29} "), base.add_modifier(Modifier::BOLD)),
-                Span::styled(desc.to_string(), if selected { base } else { Style::default().fg(Color::DarkGray) }),
+                Span::styled(desc.to_string(), if selected { base } else { Style::default().fg(t.muted) }),
                 Span::styled(" ".repeat(pad), base),
             ]));
         }
-        let block = Block::bordered()
-            .title(" commands — ↑↓ select · Tab complete · Enter run · Esc dismiss ")
-            .border_style(Style::default().fg(Color::Cyan));
+        let block = Block::bordered().title(popup_title).border_style(Style::default().fg(t.accent));
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
@@ -896,7 +1189,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         for (row, item) in p.items.iter().enumerate().skip(start).take(rows) {
             let selected = row == p.selected;
             let base = if selected {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
+                Style::default().bg(t.accent).fg(t.sel_fg)
             } else {
                 Style::default()
             };
@@ -907,7 +1200,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             if !detail.is_empty() {
                 spans.push(Span::styled(
                     format!(" {detail}"),
-                    if selected { base } else { Style::default().fg(Color::DarkGray) },
+                    if selected { base } else { Style::default().fg(t.muted) },
                 ));
             }
             spans.push(Span::styled(" ".repeat(pad), base));
@@ -916,12 +1209,64 @@ fn draw(frame: &mut Frame, app: &mut App) {
         let title: String = p.title.chars().take(inner_w.saturating_sub(28)).collect();
         let block = Block::bordered()
             .title(format!(" {title} — ↑↓ · Enter · Esc "))
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(Style::default().fg(t.warn));
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(lines), inner);
     }
+}
+
+/// Expand `@path` tokens: for each existing file, append an outline (or a
+/// capped head for unsupported types) to the prompt. Token-stingy on purpose
+/// — the model can still `read` for exact lines. Returns the expanded prompt
+/// and activity-log notes about what was attached.
+fn expand_mentions(input: &str, cwd: &std::path::Path) -> (String, Vec<String>) {
+    let mut expanded = input.to_string();
+    let mut notes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in input.split_whitespace() {
+        let Some(rel) = token.strip_prefix('@') else { continue };
+        let rel = rel.trim_end_matches([',', '.', ';', ':', '!', '?', ')']);
+        if rel.is_empty() || !seen.insert(rel.to_string()) {
+            continue;
+        }
+        let path = if std::path::Path::new(rel).is_absolute() {
+            PathBuf::from(rel)
+        } else {
+            cwd.join(rel)
+        };
+        if !path.is_file() {
+            notes.push(format!("@{rel} not found — sent as plain text"));
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            notes.push(format!("@{rel} unreadable (binary?) — sent as plain text"));
+            continue;
+        };
+        let (attach, label) = if rift_core::outline::supports(&path) {
+            match rift_core::outline::outline_source(&path, &content) {
+                Ok(o) => (o, "outline"),
+                Err(_) => (head_of(&content), "head"),
+            }
+        } else {
+            (head_of(&content), "head")
+        };
+        let attach: String = attach.chars().take(6000).collect();
+        expanded.push_str(&format!("\n\n[attached {label} of {rel} — mentioned as @{rel}]\n{attach}"));
+        notes.push(format!("attached {label} of {rel} ({} chars)", attach.chars().count()));
+    }
+    (expanded, notes)
+}
+
+/// First lines of a file, for @-mentions of types the outliner doesn't know.
+fn head_of(content: &str) -> String {
+    let total = content.lines().count();
+    let mut out: String = content.lines().take(80).collect::<Vec<_>>().join("\n");
+    if total > 80 {
+        out.push_str(&format!("\n[... {} more lines — use the read tool for the rest]", total - 80));
+    }
+    out
 }
 
 /// The `/init` command body — a normal agent turn with a canned prompt.
@@ -938,10 +1283,11 @@ pub struct TuiOptions {
     pub skills: Vec<Skill>,
     pub host: String,
     pub providers: std::collections::HashMap<String, rift_core::ProviderConfig>,
+    pub theme: &'static theme::Theme,
 }
 
 pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
-    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, providers } = opts;
+    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, providers, theme } = opts;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<UiMsg>();
@@ -960,6 +1306,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
     });
 
     let cwd = std::env::current_dir()?;
+    let cwd_ui = cwd.clone();
     // UI-side effect sender: for commands the UI handles itself (/copy log).
     let fx_ui = fx_tx.clone();
     let agent_task = tokio::spawn(async move {
@@ -995,7 +1342,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
         prev_hook(info);
     }));
 
-    let mut app = App::new(model, skills);
+    let mut app = App::new(model, skills, theme, cwd_ui.clone());
     app.seed_from_messages(&resumed);
 
     let result = (|| -> Result<()> {
@@ -1061,6 +1408,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     }
                     app.transcript.dirty = true;
                     app.log.dirty = true;
+                    app.diff.dirty = true;
                     match status {
                         Ok(s) if s.success() => {
                             let _ = prompt_tx
@@ -1074,6 +1422,28 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     app.handle_ui_effect(fx);
                 }
                 needs_redraw = true;
+            }
+            // Live diff refresh: a write/edit landed (or the view was just
+            // opened) — run `git diff` off-thread and feed it back as an
+            // effect. Guarded so refreshes never stack.
+            if app.diff_stale && !app.diff_refreshing && app.log_view == LogView::Diff {
+                app.diff_stale = false;
+                app.diff_refreshing = true;
+                let fx2 = fx_ui.clone();
+                let dir = cwd_ui.clone();
+                tokio::spawn(async move {
+                    let text = match tokio::process::Command::new("git")
+                        .args(["diff"])
+                        .current_dir(&dir)
+                        .output()
+                        .await
+                    {
+                        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+                        Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(),
+                        Err(e) => format!("git diff failed: {e}"),
+                    };
+                    let _ = fx2.send(UiEffect::TurnDiff(text));
+                });
             }
             // Defer the (expensive) full redraw while more input is already
             // queued, so a burst of events is consumed in a single frame. This
@@ -1105,6 +1475,8 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     needs_redraw = true;
                     let palette = app.palette();
+                    let mention = if palette.is_empty() { app.mention_palette() } else { vec![] };
+                    let popup_len = palette.len().max(mention.len());
                     // An open picker owns the keyboard.
                     if app.picker.is_some() {
                         match key.code {
@@ -1191,6 +1563,21 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                             app.focus = Focus::Transcript;
                         }
                     }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Toggle the right-hand pane between activity and the
+                        // live working-tree diff.
+                        app.log_view = match app.log_view {
+                            LogView::Activity => LogView::Diff,
+                            LogView::Diff => LogView::Activity,
+                        };
+                        if app.log_view == LogView::Diff {
+                            app.show_log = true;
+                            if app.diff.is_empty() {
+                                app.diff_stale = true;
+                            }
+                            app.status = "diff view — refreshes as the agent edits · Ctrl+D back".into();
+                        }
+                    }
                     KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.mouse_capture = !app.mouse_capture;
                         if app.mouse_capture {
@@ -1229,6 +1616,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                             // if it takes arguments (which also hides the popup).
                             app.input = if args.is_empty() { name.clone() } else { format!("{name} ") };
                             app.cursor = app.input.len();
+                        } else if let Some(path) = mention.get(app.palette_idx.min(mention.len().saturating_sub(1))) {
+                            let path = path.clone();
+                            app.complete_mention(&path);
                         } else {
                             app.focus = match app.focus {
                                 Focus::Transcript if app.show_log => Focus::Log,
@@ -1237,7 +1627,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                         }
                     }
                     KeyCode::Esc => {
-                        if !palette.is_empty() {
+                        if popup_len > 0 {
                             app.palette_off = true;
                         } else if app.answering.is_some() {
                             // Dropping the sender tells the tool the user skipped.
@@ -1377,6 +1767,33 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                     }
                                     app.transcript.push_block(Kind::Info, out.trim_end().to_string());
                                 }
+                            } else if trimmed == "/theme" || trimmed.starts_with("/theme ") {
+                                // UI-side: the theme is pure presentation state.
+                                app.idle();
+                                let arg = trimmed.strip_prefix("/theme").unwrap_or_default().trim();
+                                if arg.is_empty() {
+                                    app.transcript.push_block(
+                                        Kind::Info,
+                                        format!(
+                                            "themes: {} (current: {})\nswitch with /theme <name>; persist with \"theme\": \"<name>\" in config",
+                                            theme::names().join(", "),
+                                            app.theme.name
+                                        ),
+                                    );
+                                } else if let Some(th) = theme::find(arg) {
+                                    app.theme = th;
+                                    // Cached code spans hold the old syntect colors.
+                                    app.transcript.set_syntax(th.syntax);
+                                    app.transcript.dirty = true;
+                                    app.log.dirty = true;
+                                    app.diff.dirty = true;
+                                    app.status = format!("theme: {}", th.name);
+                                } else {
+                                    app.transcript.push_block(
+                                        Kind::Warn,
+                                        format!("! unknown theme '{arg}' — available: {}", theme::names().join(", ")),
+                                    );
+                                }
                             } else if trimmed == "/quit" {
                                 app.quit = true;
                             } else if trimmed == "/retry" {
@@ -1409,8 +1826,15 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                 let _ = prompt_tx.send(UiMsg::Command(trimmed, cancel));
                             } else {
                                 app.status = "sending…".into();
-                                app.last_prompt = Some(raw.clone());
-                                let _ = prompt_tx.send(UiMsg::Prompt(raw, cancel));
+                                // Expand @-mentions into attached outlines so
+                                // the model sees structure without the tokens
+                                // of a full file read.
+                                let (expanded, notes) = expand_mentions(&raw, &app.cwd);
+                                for n in notes {
+                                    app.log.push_block(Kind::Info, format!("· {n}"));
+                                }
+                                app.last_prompt = Some(expanded.clone());
+                                let _ = prompt_tx.send(UiMsg::Prompt(expanded, cancel));
                             }
                         }
                     }
@@ -1461,17 +1885,17 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                         app.focused_pane().scroll_down(page);
                     }
                     KeyCode::Up => {
-                        if palette.is_empty() {
+                        if popup_len == 0 {
                             app.focused_pane().scroll_up(1);
                         } else {
-                            app.palette_idx = app.palette_idx.min(palette.len() - 1).saturating_sub(1);
+                            app.palette_idx = app.palette_idx.min(popup_len - 1).saturating_sub(1);
                         }
                     }
                     KeyCode::Down => {
-                        if palette.is_empty() {
+                        if popup_len == 0 {
                             app.focused_pane().scroll_down(1);
                         } else {
-                            app.palette_idx = (app.palette_idx + 1).min(palette.len() - 1);
+                            app.palette_idx = (app.palette_idx + 1).min(popup_len - 1);
                         }
                     }
                     KeyCode::Home => {
@@ -1512,9 +1936,12 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     app.palette_idx = 0;
                 }
                 Event::Mouse(mouse) => {
-                    // Route the wheel to the pane under the cursor.
+                    // Route the wheel to the pane under the cursor (the hidden
+                    // log-slot pane has a zero area, so at most one matches).
                     let pane = if app.log.contains(mouse.column, mouse.row) {
                         &mut app.log
+                    } else if app.diff.contains(mouse.column, mouse.row) {
+                        &mut app.diff
                     } else if app.transcript.contains(mouse.column, mouse.row) {
                         &mut app.transcript
                     } else {
@@ -1536,6 +1963,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     needs_redraw = true;
                     app.transcript.dirty = true;
                     app.log.dirty = true;
+                    app.diff.dirty = true;
                 }
                 _ => {}
             }

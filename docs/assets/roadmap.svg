@@ -19,9 +19,9 @@
     <text x="18" y="150" font-size="12" fill="#8b949e">· MCP + 23 slash commands</text>
   </g>
   <g transform="translate(355,110)">
-    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.5"/>
-    <rect x="178" y="16" width="74" height="20" rx="10" fill="#39c5cf"/>
-    <text x="215" y="30" font-size="11" font-weight="700" fill="#0d1117" text-anchor="middle">shipped</text>
+    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+    <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">shipped</text>
     <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.4</text>
     <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">plan view + trust</text>
     <text x="18" y="84" font-size="12" fill="#8b949e">· live task checklist in the TUI</text>
@@ -31,6 +31,8 @@
   </g>
   <g transform="translate(655,110)">
     <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+    <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">shipped</text>
     <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.5</text>
     <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">commands + UX</text>
     <text x="18" y="84" font-size="12" fill="#8b949e">· /retry /stats /system /save</text>
@@ -39,13 +41,15 @@
     <text x="18" y="150" font-size="12" fill="#8b949e">· streaming diff pane</text>
   </g>
   <g transform="translate(955,110)">
-    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.5"/>
+    <rect x="178" y="16" width="74" height="20" rx="10" fill="#39c5cf"/>
+    <text x="215" y="30" font-size="11" font-weight="700" fill="#0d1117" text-anchor="middle">shipped</text>
     <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.6</text>
     <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">local providers</text>
     <text x="18" y="84" font-size="12" fill="#8b949e">· Provider trait abstraction</text>
     <text x="18" y="106" font-size="12" fill="#8b949e">· vLLM, LM Studio, llama.cpp</text>
     <text x="18" y="128" font-size="12" fill="#8b949e">· OpenRouter via compat API</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· per-provider hardening tests</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· retries, timeouts, MCP trust</text>
   </g>
 
   <!-- row 1 chevrons -->

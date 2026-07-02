@@ -60,35 +60,40 @@ The agent should *show its plan* and *ask before dangerous things*.
   - `/worktrees` — list swarm worktrees + patches with cleanup hints
   - `/save <name>` · `/sessions` named sessions (not just timestamps)
   - `/quit`
-- [ ] **@-file mentions** — `@src/main.rs` in a prompt auto-attaches an
-  outline (not the raw file — stay token-stingy), with palette completion
-  like the `/` popup
-- [ ] **Syntax highlighting** in code blocks (syntect) — watch binary size;
-  feature-flag if it pushes past ~12MB
-- [ ] **Streaming diff pane** in the main TUI: live colored diff of what the
-  agent is changing this turn (the GhostWriter concept, finally)
-- [ ] Themes (a few built-in palettes; the activity-pane contrast issue
-  showed colors need to be configurable)
+- [x] **@-file mentions** (shipped 0.6.x) — `@src/main.rs` in a prompt
+  auto-attaches an outline (not the raw file — stay token-stingy), with
+  palette completion like the `/` popup; unsupported file types attach a
+  capped head instead
+- [x] **Syntax highlighting** (shipped 0.6.x) — syntect in fenced code
+  blocks, stateful per block; pushed the binary to ~12MB so it sits behind a
+  default-on `highlight` feature (`--no-default-features` builds lean)
+- [x] **Streaming diff pane** (shipped 0.6.x) — Ctrl+D flips the activity
+  pane to a live working-tree diff, refreshed after every write/edit tool
+  result and at turn end
+- [x] Themes (shipped 0.6.x) — built-in `dark`/`light`/`mono` palettes;
+  `"theme"` in config, `/theme <name>` at runtime; syntect theme follows
 
 ## v0.6 — Provider abstraction (beyond Ollama, part 1: local)
 
 The architectural step: extract a `Provider` trait so `OllamaClient` becomes
 one implementation, not the foundation.
 
-- [ ] `Provider` trait: `chat_stream`, `capabilities(model)`, `list_models`
-  — everything the agent loop and swarm already consume
-- [ ] **OpenAI-compatible provider** — one implementation unlocks vLLM,
-  LM Studio, llama.cpp server, LiteLLM, OpenRouter, and Ollama's own
-  compat endpoint
-  - This is exactly the shim whose bugs rift was built to escape, so it
-    ships with a **per-provider hardening test suite**: tool-call
-    correlation, context-overflow behavior, streaming quirks — run against
-    real servers before a provider is called supported
-- [ ] Config + model addressing: `ollama/gemma4:26b`,
-  `openai-compat/qwen3` with per-provider base URLs and keys in
-  `.rift.json`; `/model` and `/host` grow provider awareness
-- [ ] Token accounting per provider (usage fields differ; the Compactor's
-  calibration loop already adapts, keep it provider-generic)
+- [x] `Provider` trait (shipped 0.6.0): `chat_stream`, `show`, `tags` —
+  everything the agent loop and swarm already consume
+- [x] **OpenAI-compatible provider** (shipped 0.6.0, hardened 0.6.1/0.6.2) —
+  unlocks vLLM, LM Studio, llama.cpp server, LiteLLM, OpenRouter, and
+  Ollama's own compat endpoint; 0.6.x added timeouts, transport retries,
+  mid-stream error surfacing, SSE tail flushing, and tool-call id repair
+- [x] Config + model addressing (shipped 0.6.0): `openrouter/qwen3` routes
+  through per-provider base URLs and keys in config; project config merges
+  over user config with tighten-only permissions (0.6.2)
+- [x] Token accounting per provider (shipped 0.6.0; usage fields normalized
+  into the shared `ChatStats`)
+- [ ] **Per-provider hardening test suite** — tool-call correlation,
+  context-overflow behavior, streaming quirks, run against real servers
+  (vLLM, LM Studio, llama.cpp, Ollama `/v1`) before a provider is called
+  supported. The one v0.6 item still open — gates v0.7's cloud providers
+  and v1.0's "provider matrix green in CI"
 
 ## v0.7 — Cloud providers + cross-provider swarm
 
