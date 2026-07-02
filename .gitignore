@@ -5,3 +5,5 @@
 .rift.json
 __pycache__/
 *.pyc
+# Per-turn JSONL traces from bench runs — local analysis corpus, not history.
+bench/traces/

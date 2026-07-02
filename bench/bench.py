@@ -173,6 +173,9 @@ def main():
                     help="agents to run (default: rift opencode)")
     ap.add_argument("--models", default=MODEL,
                     help="comma-separated models; the suite runs once per model")
+    ap.add_argument("--tasks", default=None,
+                    help="comma-separated task names to run (default: all) — "
+                         "for quick prompt/schema experiments before a full run")
     args = ap.parse_args()
     agents = args.agents or ["rift", "opencode"]
     models = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -180,6 +183,12 @@ def main():
     os.makedirs(os.path.join(ROOT, "traces"), exist_ok=True)
     tasks = sorted(d for d in os.listdir(os.path.join(ROOT, "tasks"))
                    if os.path.isdir(os.path.join(ROOT, "tasks", d)))
+    if args.tasks:
+        wanted = [t.strip() for t in args.tasks.split(",") if t.strip()]
+        missing = [t for t in wanted if t not in tasks]
+        if missing:
+            raise SystemExit(f"unknown tasks: {', '.join(missing)}")
+        tasks = wanted
     results = []
     for model in models:
         for agent in agents:
