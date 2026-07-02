@@ -3,7 +3,7 @@ members = ["crates/rift-provider", "crates/rift-ollama", "crates/rift-openai", "
 resolver = "2"
 
 [workspace.package]
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 
