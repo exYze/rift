@@ -106,10 +106,16 @@ async fn main() -> Result<()> {
     // for each: CLI flag > env var (clap folds both into `cli`) > config file >
     // built-in default — so `rift` with no flags uses your configured server.
     let cwd = std::env::current_dir()?;
-    let (config, config_path) = Config::load(&cwd)?;
-    if let Some(p) = &config_path {
+    let loaded = Config::load(&cwd)?;
+    for p in &loaded.paths {
         eprintln!("config: {}", p.display());
     }
+    for w in &loaded.warnings {
+        eprintln!("warning: {w}");
+    }
+    let config = loaded.config;
+    // The file `/config edit` opens: highest-precedence existing one.
+    let config_path = loaded.paths.last().cloned();
     let host = cli
         .host
         .clone()
@@ -210,22 +216,26 @@ async fn main() -> Result<()> {
     // MCP servers + permission policy come from the config loaded up top.
     // Entries from a *project* .rift.json spawn arbitrary commands and the
     // file may have arrived inside a cloned repo — require one-time approval
-    // (remembered in the user-level trust store) before running them.
-    let from_project_config = config_path.as_deref() == Some(cwd.join(".rift.json").as_path());
+    // (remembered in the user-level trust store) before running them. User
+    // config entries run without prompting.
     let mut registry = ToolRegistry::standard();
     let mut mcp_status: Vec<(String, usize)> = vec![];
-    for (name, server_cfg) in &config.mcp {
-        if from_project_config && !rift_core::mcp_entry_trusted(name, server_cfg) {
+    let user_mcp = config.mcp.iter().map(|(n, s)| (n, s, false));
+    let project_mcp = config.project_mcp.iter().map(|(n, s)| (n, s, true));
+    for (name, server_cfg, from_project) in user_mcp.chain(project_mcp) {
+        if from_project && !rift_core::mcp_entry_trusted(name, server_cfg) {
             let cmdline = format!("{} {}", server_cfg.command, server_cfg.args.join(" "));
             if interactive && confirm_mcp(name, cmdline.trim()) {
                 if let Err(e) = rift_core::trust_mcp_entry(name, server_cfg) {
                     eprintln!("warning: could not persist MCP approval: {e:#}");
                 }
             } else {
-                eprintln!(
-                    "mcp '{name}' skipped: defined in project .rift.json and not yet trusted{}",
-                    if interactive { "" } else { " (approve it in an interactive session, or move it to the user config)" }
-                );
+                let hint = if interactive {
+                    format!(" (/mcp trust {name} to enable it)")
+                } else {
+                    " (approve it in an interactive session, or move it to the user config)".into()
+                };
+                eprintln!("mcp '{name}' skipped: defined in project .rift.json and not yet trusted{hint}");
                 continue;
             }
         }

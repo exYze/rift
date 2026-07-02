@@ -9,7 +9,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use rift_core::{builtin_bash_deny, compact, run_swarm, Agent, AgentEvent, Candidate, SessionStore, Swarm};
+use rift_core::{
+    builtin_bash_deny, compact, run_swarm, Agent, AgentEvent, Candidate, McpClient, McpTool,
+    SessionStore, Swarm,
+};
 use rift_ollama::{Message, OllamaClient, Provider, Role};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -80,7 +83,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/help", "", "list commands and keys"),
     ("/host", "[url]", "show or switch the Ollama server"),
     ("/init", "", "generate a RIFT.md project guide"),
-    ("/mcp", "", "connected MCP servers"),
+    ("/mcp", "[trust|untrust <name>]", "list MCP servers; manage project-config trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
     ("/permissions", "", "active shell deny patterns"),
@@ -143,7 +146,7 @@ pub async fn run_command(
         "/tokens" => cmd_tokens(agent, fx),
         "/sessions" => cmd_sessions(rest, agent, cx, fx),
         "/tools" => cmd_tools(agent, fx),
-        "/mcp" => cmd_mcp(cx, fx),
+        "/mcp" => cmd_mcp(rest, agent, cx, fx).await,
         "/permissions" => cmd_permissions(agent, cx, fx),
         "/plan" => cmd_plan(rest, agent, fx),
         "/swarm" => cmd_swarm(rest, agent, cx, fx, cancel).await,
@@ -475,23 +478,89 @@ fn cmd_tools(agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     Ok(format!("{} tool(s)", defs.len()))
 }
 
-fn cmd_mcp(cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
-    let mut out = String::new();
-    match &cx.config_path {
-        Some(p) => out.push_str(&format!("config: {}\n", p.display())),
-        None => out.push_str("config: none found (.rift.json or ~/.config/rift/config.json)\n"),
-    }
-    if cx.mcp.is_empty() {
-        out.push_str("no MCP servers connected");
-    } else {
-        out.push_str("MCP servers:\n");
-        for (name, count) in &cx.mcp {
-            out.push_str(&format!("  {name}: {count} tool(s), exposed as {name}_<tool>\n"));
+async fn cmd_mcp(
+    arg: &str,
+    agent: &mut Agent,
+    cx: &mut CmdCx,
+    fx: &UnboundedSender<UiEffect>,
+) -> Result<String> {
+    // Re-read the config so trust operations see current file contents, not
+    // the startup snapshot.
+    let config = rift_core::Config::load(&cx.cwd)?.config;
+    let (sub, name) = match arg.split_once(char::is_whitespace) {
+        Some((s, n)) => (s, n.trim()),
+        None => (arg, ""),
+    };
+    match (sub, name) {
+        ("", _) => {
+            let mut out = String::new();
+            match &cx.config_path {
+                Some(p) => out.push_str(&format!("config: {}\n", p.display())),
+                None => out.push_str("config: none found (.rift.json or ~/.config/rift/config.json)\n"),
+            }
+            if config.mcp.is_empty() && config.project_mcp.is_empty() {
+                out.push_str("no MCP servers configured");
+            } else {
+                let active = |n: &str| {
+                    cx.mcp
+                        .iter()
+                        .find(|(an, _)| an == n)
+                        .map(|(_, c)| format!("running, {c} tool(s) as {n}_<tool>"))
+                        .unwrap_or_else(|| "not running".into())
+                };
+                out.push_str("MCP servers:\n");
+                for (n, s) in &config.mcp {
+                    out.push_str(&format!("  {n}: {} — user config, {}\n", s.command, active(n)));
+                }
+                for (n, s) in &config.project_mcp {
+                    let trust = if rift_core::mcp_entry_trusted(n, s) { "trusted" } else { "NOT trusted" };
+                    out.push_str(&format!("  {n}: {} — project config, {trust}, {}\n", s.command, active(n)));
+                }
+                out.push_str("(/mcp trust <name> starts an untrusted project server; /mcp untrust <name> revokes)");
+            }
+            let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+            Ok(format!("{} server(s) running", cx.mcp.len()))
         }
-        out.push_str("(config changes need a restart)");
+        ("trust", "") | ("untrust", "") => bail!("usage: /mcp {sub} <name>"),
+        ("trust", n) => {
+            let server = config
+                .project_mcp
+                .get(n)
+                .ok_or_else(|| anyhow!("no MCP server '{n}' in the project config (only project entries need trusting)"))?;
+            rift_core::trust_mcp_entry(n, server)?;
+            if cx.mcp.iter().any(|(an, _)| an == n) {
+                let msg = format!("mcp '{n}' already running; trust recorded");
+                let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+                return Ok(msg);
+            }
+            // Spawn live — tool defs rebuild per request, so it's usable now.
+            let mcp = McpClient::spawn(n, server).await?;
+            let tools = mcp.list_tools().await?;
+            let count = tools.len();
+            for info in tools {
+                agent.register_tool(Box::new(McpTool::new(mcp.clone(), info)));
+            }
+            cx.mcp.push((n.to_string(), count));
+            let msg = format!("mcp '{n}' trusted and started: {count} tool(s) registered as {n}_<tool>");
+            let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+            Ok(msg)
+        }
+        ("untrust", n) => {
+            let server = config
+                .project_mcp
+                .get(n)
+                .ok_or_else(|| anyhow!("no MCP server '{n}' in the project config"))?;
+            rift_core::untrust_mcp_entry(n, server)?;
+            let running = cx.mcp.iter().any(|(an, _)| an == n);
+            let msg = format!(
+                "mcp '{n}' untrusted — it won't start next session{}",
+                if running { " (still running in this one)" } else { "" }
+            );
+            let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+            Ok(msg)
+        }
+        (other, _) => bail!("usage: /mcp [trust|untrust <name>] — got '{other}'"),
     }
-    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
-    Ok(format!("{} server(s)", cx.mcp.len()))
 }
 
 fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
@@ -695,10 +764,14 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
         }
         // Internal: dispatched by the UI after $EDITOR exits.
         "reload" => {
-            let (config, path) = rift_core::Config::load(&cx.cwd)?;
+            let loaded = rift_core::Config::load(&cx.cwd)?;
+            for w in &loaded.warnings {
+                let _ = fx.send(UiEffect::Out(Kind::Warn, format!("! {w}")));
+            }
+            let config = loaded.config;
             agent.ctx().set_deny(&config.permissions.bash_deny);
             agent.ctx().set_approval(config.permissions.approve);
-            cx.config_path = path;
+            cx.config_path = loaded.paths.last().cloned();
             let msg = format!(
                 "config reloaded — approval {}, {} user deny pattern(s) (host/model/MCP changes need a restart)",
                 if config.permissions.approve { "ON" } else { "off" },
