@@ -1,7 +1,9 @@
 mod app;
 mod clipboard;
 mod commands;
+mod highlight;
 mod swarm_ui;
+mod theme;
 mod update;
 
 use std::collections::HashMap;
@@ -313,6 +315,16 @@ async fn main() -> Result<()> {
         None => (SessionStore::create()?, vec![]),
     };
 
+    // Theme: config-selected, defaulting to dark; unknown names warn and fall
+    // back rather than failing startup.
+    let ui_theme = match config.theme.as_deref() {
+        None => &theme::DARK,
+        Some(name) => theme::find(name).unwrap_or_else(|| {
+            eprintln!("warning: unknown theme '{name}' (available: {}); using dark", theme::names().join(", "));
+            &theme::DARK
+        }),
+    };
+
     match cli.prompt {
         Some(prompt) => run_headless(agent, prompt, store).await,
         None => {
@@ -328,6 +340,7 @@ async fn main() -> Result<()> {
                     skills,
                     host: host.clone(),
                     providers: config.providers.clone(),
+                    theme: ui_theme,
                 },
             )
             .await

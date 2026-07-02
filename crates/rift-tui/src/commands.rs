@@ -54,6 +54,8 @@ pub enum UiEffect {
     /// Update the status line only — for UI-side async tasks whose late
     /// completion must not reset a newer turn's busy/cancel state.
     Status(String),
+    /// Fresh `git diff` output for the live diff pane (UI-side refresh task).
+    TurnDiff(String),
     /// Command finished; status-line text. Always the final effect.
     Done(String),
 }
@@ -98,6 +100,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/stats", "", "session totals: turns, tokens, tools, compactions"),
     ("/system", "[text]", "show or override the system prompt"),
     ("/temp", "<0.0-2.0>", "set sampling temperature"),
+    ("/theme", "[name]", "switch color theme (dark, light, mono)"),
     ("/ctx", "<n>", "set context window (num_ctx)"),
     ("/retry", "", "re-run the last prompt"),
     ("/quit", "", "exit rift"),
@@ -113,8 +116,9 @@ fn help_text() -> String {
         out.push_str(&format!("  {left:<30}{desc}\n"));
     }
     out.push_str(
-        "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+T toggle mouse capture \
-         (off = select/copy text natively) · Esc cancel · /quit exit",
+        "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+D live diff · Ctrl+T toggle \
+         mouse capture (off = select/copy text natively) · Esc cancel · /quit exit\n\
+         @path in a prompt attaches a file outline (Tab completes)",
     );
     out
 }

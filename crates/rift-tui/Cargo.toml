@@ -22,3 +22,12 @@ anyhow.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.29"
 textwrap = "0.16"
+ignore = "0.4"
+# Pure-Rust build (fancy-regex, no onig C dep). Costs ~2.5MB of binary — the
+# roadmap's size budget line — so it's flaggable: --no-default-features
+# builds a lean binary with flat code coloring.
+syntect = { version = "5", default-features = false, features = ["default-fancy"], optional = true }
+
+[features]
+default = ["highlight"]
+highlight = ["dep:syntect"]

@@ -169,7 +169,7 @@ fn draw(frame: &mut Frame, app: &mut SwarmApp, task: &str) {
     c.log.area = inner;
     c.log.rebuild(inner.width);
     c.log.view_height = inner.height as usize;
-    let lines = c.log.visible_lines();
+    let lines = c.log.visible_lines(&crate::theme::DARK);
     frame.render_widget(log_block, log_area);
     frame.render_widget(Paragraph::new(lines), inner);
 
@@ -193,7 +193,7 @@ fn draw(frame: &mut Frame, app: &mut SwarmApp, task: &str) {
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
-        c.diff.visible_lines()
+        c.diff.visible_lines(&crate::theme::DARK)
     };
     frame.render_widget(diff_block, diff_area);
     frame.render_widget(Paragraph::new(lines), inner);

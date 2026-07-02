@@ -42,6 +42,9 @@ pub struct Config {
     /// Default max agent-loop iterations per turn. Overridden by `--max-iterations`.
     #[serde(default)]
     pub max_iterations: Option<usize>,
+    /// TUI color theme name ("dark", "light", "mono"); runtime `/theme` overrides.
+    #[serde(default)]
+    pub theme: Option<String>,
     /// Named OpenAI-compatible providers. Address a model as `<name>/<model>`
     /// (e.g. `openrouter/qwen3`) to route it through one of these.
     #[serde(default)]
@@ -139,6 +142,9 @@ impl Config {
         }
         if p.max_iterations.is_some() {
             self.max_iterations = p.max_iterations;
+        }
+        if p.theme.is_some() {
+            self.theme = p.theme;
         }
         for (name, prov) in p.providers {
             match self.providers.entry(name) {
