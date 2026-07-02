@@ -167,7 +167,7 @@ fn draw(frame: &mut Frame, app: &mut SwarmApp, task: &str) {
         .border_style(if app.focus == Focus::Log { focused } else { unfocused });
     let inner = log_block.inner(log_area);
     c.log.area = inner;
-    c.log.rebuild(inner.width);
+    c.log.rebuild(inner.width, &crate::theme::DARK);
     c.log.view_height = inner.height as usize;
     let lines = c.log.visible_lines(&crate::theme::DARK);
     frame.render_widget(log_block, log_area);
@@ -185,7 +185,7 @@ fn draw(frame: &mut Frame, app: &mut SwarmApp, task: &str) {
         .border_style(if app.focus == Focus::Diff { focused } else { unfocused });
     let inner = diff_block.inner(diff_area);
     c.diff.area = inner;
-    c.diff.rebuild(inner.width);
+    c.diff.rebuild(inner.width, &crate::theme::DARK);
     c.diff.view_height = inner.height as usize;
     let lines = if c.diff.is_empty() {
         vec![Line::from(Span::styled(
