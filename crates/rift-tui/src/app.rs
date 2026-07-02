@@ -220,7 +220,7 @@ impl Pane {
         self.blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n")
     }
 
-    pub(crate) fn rebuild(&mut self, width: u16) {
+    pub(crate) fn rebuild(&mut self, width: u16, t: &theme::Theme) {
         let width_changed = width != self.wrap_width;
         if self.dirty || width_changed {
             // Width change (or external invalidation) voids every block's cache.
@@ -243,57 +243,55 @@ impl Pane {
                 Kind::User => format!("❯ {}", block.text),
                 _ => block.text.clone(),
             };
-            // Fenced code blocks inside assistant text get their own style,
-            // and (when the pane has a syntect theme) real highlighting. The
-            // highlighter is stateful per block so multi-line strings and
-            // comments color correctly.
+            // Fenced code blocks inside assistant text render as a bordered
+            // box with a language-labeled header; the raw ``` fences are
+            // consumed, not shown. The highlighter is stateful per block so
+            // multi-line strings and comments color correctly.
             let mut in_fence = false;
             let mut hl: Option<crate::highlight::BlockHighlighter> = None;
             for raw_line in prefixed.lines() {
-                let mut kind = block.kind;
-                let mut fence_marker = false;
-                if block.kind == Kind::Assistant {
-                    if raw_line.trim_start().starts_with("```") {
-                        fence_marker = true;
-                        if in_fence {
-                            in_fence = false;
-                            hl = None;
-                        } else {
-                            in_fence = true;
-                            let lang = raw_line.trim_start().trim_start_matches('`').trim();
-                            hl = match (self.syntax, lang.is_empty()) {
-                                (Some(theme), false) => crate::highlight::BlockHighlighter::new(lang, theme),
-                                _ => None,
-                            };
-                        }
-                        kind = Kind::Code;
-                    } else if in_fence {
-                        kind = Kind::Code;
+                // A ``` line opens or closes the box (and is not itself drawn).
+                if block.kind == Kind::Assistant && raw_line.trim_start().starts_with("```") {
+                    if in_fence {
+                        in_fence = false;
+                        hl = None;
+                        self.wrapped.push(code_box_border(false, "", w, t.muted));
+                    } else {
+                        in_fence = true;
+                        let lang = raw_line.trim_start().trim_start_matches('`').trim();
+                        hl = match (self.syntax, lang.is_empty()) {
+                            (Some(theme), false) => crate::highlight::BlockHighlighter::new(lang, theme),
+                            _ => None,
+                        };
+                        self.wrapped.push(code_box_border(true, lang, w, t.muted));
                     }
-                }
-                if raw_line.is_empty() {
-                    self.wrapped.push(WrappedLine::plain(kind, String::new()));
                     continue;
                 }
-                if kind.hard_cut() {
-                    // Don't re-wrap code/diffs: hard-cut so alignment stays exact.
-                    let indent = if kind == Kind::Code { "  " } else { "" };
-                    let cut_w = w.saturating_sub(indent.len()).max(1);
-                    let spans = if fence_marker { None } else { hl.as_mut().and_then(|h| h.line(raw_line)) };
-                    match spans {
+                if in_fence {
+                    // Boxed code content: a `│ ` gutter + hard-cut source (so
+                    // alignment stays exact), highlighted when a syntect theme
+                    // and known language are set, else the flat code color.
+                    if raw_line.is_empty() {
+                        self.wrapped.push(WrappedLine {
+                            kind: Kind::Code,
+                            text: "│".into(),
+                            spans: Some(vec![(t.muted, "│".into())]),
+                        });
+                        continue;
+                    }
+                    let cut_w = w.saturating_sub(2).max(1);
+                    match hl.as_mut().and_then(|h| h.line(raw_line)) {
                         Some(spans) => {
-                            // Highlight the whole source line first, then cut,
-                            // so colors survive wrapping intact.
-                            for piece in cut_spans(spans, cut_w, indent) {
-                                let text: String = piece.iter().map(|(_, s)| s.as_str()).collect();
-                                self.wrapped.push(WrappedLine { kind, text, spans: Some(piece) });
+                            for piece in cut_spans(spans, cut_w, "") {
+                                self.wrapped.push(code_box_line(piece, t.muted));
                             }
                         }
                         None => {
                             let mut rest = raw_line;
                             loop {
                                 let cut = floor_boundary(rest, cut_w);
-                                self.wrapped.push(WrappedLine::plain(kind, format!("{indent}{}", &rest[..cut])));
+                                self.wrapped
+                                    .push(code_box_line(vec![(t.code, rest[..cut].to_string())], t.muted));
                                 rest = &rest[cut..];
                                 if rest.is_empty() {
                                     break;
@@ -301,11 +299,32 @@ impl Pane {
                             }
                         }
                     }
+                    continue;
+                }
+                // Non-fenced content: diffs hard-cut, everything else wraps.
+                let kind = block.kind;
+                if raw_line.is_empty() {
+                    self.wrapped.push(WrappedLine::plain(kind, String::new()));
+                } else if kind.hard_cut() {
+                    let mut rest = raw_line;
+                    loop {
+                        let cut = floor_boundary(rest, w);
+                        self.wrapped.push(WrappedLine::plain(kind, rest[..cut].to_string()));
+                        rest = &rest[cut..];
+                        if rest.is_empty() {
+                            break;
+                        }
+                    }
                 } else {
                     for piece in textwrap::wrap(raw_line, w) {
                         self.wrapped.push(WrappedLine::plain(kind, piece.into_owned()));
                     }
                 }
+            }
+            // Auto-close an unterminated fence (normal mid-stream, or a model
+            // that dropped the closing ```), so the box always looks complete.
+            if in_fence {
+                self.wrapped.push(code_box_border(false, "", w, t.muted));
             }
             if block.gap {
                 self.wrapped.push(WrappedLine::plain(block.kind, String::new()));
@@ -429,6 +448,32 @@ fn cut_spans(spans: Vec<(Color, String)>, width: usize, indent: &str) -> Vec<Vec
     out
 }
 
+/// Top (`╭─ python ────`) or bottom (`╰──────`) border of a fenced code box,
+/// spanning the full pane width. `label` is the fence's language tag ("" →
+/// "code" on the top border; ignored on the bottom).
+fn code_box_border(top: bool, label: &str, w: usize, border: Color) -> WrappedLine {
+    let s = if top {
+        let mut head = format!("╭─ {} ", if label.is_empty() { "code" } else { label });
+        let used = head.chars().count();
+        if used < w {
+            head.push_str(&"─".repeat(w - used));
+        }
+        head
+    } else {
+        format!("╰{}", "─".repeat(w.saturating_sub(1)))
+    };
+    WrappedLine { kind: Kind::Code, text: s.clone(), spans: Some(vec![(border, s)]) }
+}
+
+/// One code line inside the box: a border-colored `│ ` gutter followed by the
+/// (already width-cut) content spans.
+fn code_box_line(inner: Vec<(Color, String)>, border: Color) -> WrappedLine {
+    let mut spans = vec![(border, "│ ".to_string())];
+    spans.extend(inner);
+    let text = spans.iter().map(|(_, s)| s.as_str()).collect();
+    WrappedLine { kind: Kind::Code, text, spans: Some(spans) }
+}
+
 fn floor_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
         return s.len();
@@ -494,6 +539,46 @@ mod tests {
         assert_eq!(sanitize_for_pane("\x1b]0;win title\x07text"), "text");
         assert_eq!(sanitize_for_pane("bell\x07backspace\x08"), "bellbackspace");
         assert_eq!(sanitize_for_pane("plain text"), "plain text");
+    }
+
+    #[test]
+    fn fenced_code_renders_as_a_labeled_box() {
+        let mut p = Pane::new();
+        p.set_syntax(None); // flat colors -> deterministic text assertions
+        p.push_block(
+            Kind::Assistant,
+            "before\n```python\nx = 1\n\ny = 2\n```\nafter".into(),
+        );
+        p.rebuild(40, &theme::DARK);
+        let texts: Vec<&str> = p.wrapped.iter().map(|w| w.text.as_str()).collect();
+
+        // Prose around the block survives unchanged.
+        assert!(texts.contains(&"before"));
+        assert!(texts.contains(&"after"));
+        // Language-labeled top border and a bottom border, full width.
+        let top = texts.iter().find(|t| t.starts_with("╭")).expect("top border");
+        assert!(top.starts_with("╭─ python "), "label missing: {top}");
+        assert_eq!(top.chars().count(), 40, "top border should span the width");
+        assert!(texts.iter().any(|t| t.starts_with("╰")), "bottom border");
+        // Raw fences are consumed, never rendered.
+        assert!(!texts.iter().any(|t| t.contains("```")), "raw ``` leaked");
+        // Content is gutter-prefixed; a blank code line keeps the bar.
+        assert!(texts.contains(&"│ x = 1"));
+        assert!(texts.contains(&"│ y = 2"));
+        assert!(texts.contains(&"│"), "blank code line keeps the gutter");
+    }
+
+    #[test]
+    fn unterminated_fence_auto_closes_the_box() {
+        // Mid-stream: opening fence + content but no closing ``` yet.
+        let mut p = Pane::new();
+        p.set_syntax(None);
+        p.push_block(Kind::Assistant, "```rust\nfn main() {}".into());
+        p.rebuild(30, &theme::DARK);
+        let texts: Vec<&str> = p.wrapped.iter().map(|w| w.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.starts_with("╭─ rust")));
+        assert!(texts.contains(&"│ fn main() {}"));
+        assert!(texts.iter().any(|t| t.starts_with("╰")), "box auto-closes");
     }
 
     #[test]
@@ -970,7 +1055,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             .border_style(if focused { focused_style } else { unfocused_style });
         let inner = block.inner(transcript_area);
         app.transcript.area = inner;
-        app.transcript.rebuild(inner.width);
+        app.transcript.rebuild(inner.width, t);
         app.transcript.view_height = inner.height as usize;
         let lines = app.transcript.visible_lines(t);
         frame.render_widget(block, transcript_area);
@@ -1035,7 +1120,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         }
         let pane = app.log_like_pane();
         pane.area = log_inner;
-        pane.rebuild(log_inner.width);
+        pane.rebuild(log_inner.width, t);
         pane.view_height = log_inner.height as usize;
         let lines = pane.visible_lines(t);
         frame.render_widget(Paragraph::new(lines), log_inner);
