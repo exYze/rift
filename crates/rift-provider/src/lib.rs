@@ -212,6 +212,85 @@ pub trait Provider: Send + Sync {
     ) -> Result<ChatOutcome>;
 }
 
+// ---- shared HTTP/streaming plumbing for provider implementations ----------
+
+/// HTTP client with sane timeouts for streaming LLM traffic: bounded connect
+/// and per-read idle timeouts, but no whole-request timeout (that would kill
+/// long generations mid-stream). `reqwest::Client::new()` has NO timeouts at
+/// all — a hung server would stall a turn forever.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Canonicalize a user-supplied endpoint: trim the trailing slash and default
+/// the scheme to `http://` (LAN/localhost servers are the common case).
+pub fn normalize_base_url(url: &str) -> String {
+    let base = url.trim_end_matches('/');
+    if base.starts_with("http") {
+        base.to_string()
+    } else {
+        format!("http://{base}")
+    }
+}
+
+/// Human-readable message from an API error body. Handles `{"error": "..."}`
+/// (Ollama) and `{"error": {"message": "..."}}` (OpenAI), falling back to the
+/// raw body — truncated so an HTML 502 page from a reverse proxy stays legible.
+pub fn api_error_message(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            let e = v.get("error")?;
+            e.as_str()
+                .map(str::to_string)
+                .or_else(|| e.get("message").and_then(|m| m.as_str()).map(str::to_string))
+        })
+        .unwrap_or_else(|| body.chars().take(600).collect())
+}
+
+/// Control flow for [`for_each_line`] callbacks.
+pub enum LineFlow {
+    Continue,
+    /// Stop consuming the stream (e.g. after an SSE `[DONE]` sentinel).
+    Break,
+}
+
+/// Feed every newline-terminated line of a byte stream to `f`, then the
+/// unterminated tail if any. The tail flush matters: non-streaming bodies and
+/// servers that close without a trailing newline (or without SSE `[DONE]`)
+/// put their final — often stats-carrying — line there.
+pub async fn for_each_line<S, B, E, F>(mut stream: S, mut f: F) -> Result<()>
+where
+    S: futures_util::Stream<Item = std::result::Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: Into<anyhow::Error>,
+    F: FnMut(&str) -> Result<LineFlow>,
+{
+    use futures_util::StreamExt;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(chunk.map_err(Into::into)?.as_ref());
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line = String::from_utf8_lossy(&buf[..pos]).into_owned();
+            buf.drain(..=pos);
+            if matches!(f(line.trim())?, LineFlow::Break) {
+                return Ok(());
+            }
+        }
+    }
+    if !buf.is_empty() {
+        let line = String::from_utf8_lossy(&buf).into_owned();
+        if !line.trim().is_empty() {
+            f(line.trim())?;
+        }
+    }
+    Ok(())
+}
+
 /// Fallback for the failure mode where a model emits its tool call as plain JSON
 /// text in `content` instead of a structured `tool_calls` entry. Recognizes
 /// `{"name": ..., "arguments"|"parameters": {...}}`, an array of those, and
@@ -300,5 +379,41 @@ mod tests {
         assert_eq!(v["role"], "tool");
         assert_eq!(v["tool_name"], "read");
         assert!(v.get("tool_calls").is_none());
+    }
+
+    fn byte_stream(
+        chunks: &[&str],
+    ) -> impl futures_util::Stream<Item = std::result::Result<Vec<u8>, std::io::Error>> + Unpin {
+        futures_util::stream::iter(
+            chunks.iter().map(|c| Ok(c.as_bytes().to_vec())).collect::<Vec<_>>(),
+        )
+    }
+
+    #[tokio::test]
+    async fn for_each_line_reassembles_split_lines_and_flushes_tail() {
+        // Lines split across network reads; the last line has no trailing
+        // newline (a server that closes without one) and must still arrive.
+        let stream = byte_stream(&["first ", "line\nsec", "ond\ntail no newline"]);
+        let mut seen = vec![];
+        for_each_line(stream, |line| {
+            seen.push(line.to_string());
+            Ok(LineFlow::Continue)
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen, ["first line", "second", "tail no newline"]);
+    }
+
+    #[tokio::test]
+    async fn for_each_line_break_stops_early() {
+        let stream = byte_stream(&["a\nSTOP\nnever\n"]);
+        let mut seen = vec![];
+        for_each_line(stream, |line| {
+            seen.push(line.to_string());
+            Ok(if line == "STOP" { LineFlow::Break } else { LineFlow::Continue })
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen, ["a", "STOP"]);
     }
 }
