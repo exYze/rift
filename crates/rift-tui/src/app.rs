@@ -1417,6 +1417,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                     if let Err(e) = cx.store.save(&agent.cfg.model, &cwd_str, &agent.messages) {
                         let _ = ev_tx.send(AgentEvent::Warning(format!("session save failed: {e:#}")));
                     }
+                    // Compact during idle time (user is reading the reply),
+                    // not mid-turn when they're waiting on the next answer.
+                    agent.idle_compact(&ev_tx).await;
                 }
                 UiMsg::Command(line, cancel) => {
                     commands::run_command(&line, &mut agent, &mut cx, &fx_tx, &cancel).await;

@@ -146,10 +146,12 @@ inference path.
 
 - [ ] Hydrate-on-demand: outline first, then fetch exact line ranges as the
   model asks — measure token savings vs v1 in the bench suite
-- [ ] Persistent repo-map cache (invalidate by mtime) so big repos don't
-  re-outline every session
-- [ ] Smarter compaction triggers: compact during idle time between turns,
-  not mid-turn when the user is waiting
+- [x] Persistent repo-map cache (shipped 0.8.x) — outlines cached per repo
+  root keyed by (mtime, size); a hit skips the read and the tree-sitter
+  parse. Best-effort JSON under the user data dir, LRU-capped
+- [x] Smarter compaction triggers (shipped 0.8.x) — the budget check also
+  runs right after each turn completes, so pruning/summarizing happens
+  while the user reads the reply instead of mid-turn while they wait
 - [ ] Benchmark suite v2: more tasks, multi-run variance, long-session
   tests that exercise compaction, published per-release
 - [ ] Repo-map ranking heuristics v2: which files make the top-10, whether

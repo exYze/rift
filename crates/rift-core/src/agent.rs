@@ -179,6 +179,21 @@ impl Agent {
         }
     }
 
+    /// Proactive compaction between turns: run the same budget enforcement
+    /// the next LLM call would run, but now — during idle time while the
+    /// user reads the reply — instead of mid-turn while they wait on it.
+    /// The trigger is identical, so firing here means the mid-turn check
+    /// finds the history already inside budget.
+    pub async fn idle_compact(&mut self, tx: &UnboundedSender<AgentEvent>) {
+        let tools = self.registry.tool_defs();
+        let overhead =
+            compact::estimate_tokens(&serde_json::to_string(&tools).unwrap_or_default());
+        // Idle compaction is bookkeeping between turns; its compaction
+        // counters aren't attributed to any turn's trace.
+        let mut counters = FailureCounters::default();
+        self.enforce_budget(overhead, tx, &mut counters).await;
+    }
+
     /// Append this turn to the JSONL trace, if tracing is enabled. Trace
     /// failures never fail the turn — warn once and carry on.
     fn write_trace(
