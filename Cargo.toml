@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rift-provider", "crates/rift-ollama", "crates/rift-openai", "crates/rift-core", "crates/rift-tui"]
+members = ["crates/rift-provider", "crates/rift-ollama", "crates/rift-openai", "crates/rift-anthropic", "crates/rift-core", "crates/rift-tui"]
 resolver = "2"
 
 [workspace.package]

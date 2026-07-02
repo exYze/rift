@@ -1243,6 +1243,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rift-anthropic"
+version = "0.6.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "reqwest",
+ "rift-provider",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rift-core"
 version = "0.6.4"
 dependencies = [
@@ -1317,6 +1331,7 @@ dependencies = [
  "ignore",
  "ratatui",
  "reqwest",
+ "rift-anthropic",
  "rift-core",
  "rift-ollama",
  "rift-openai",

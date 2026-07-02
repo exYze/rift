@@ -128,7 +128,15 @@ impl Provider for OllamaClient {
         let resp = send_with_retry(self.http.post(format!("{}/api/chat", self.base_url)).json(req)).await?;
         let resp = Self::check(resp).await?;
 
-        let mut acc = Message { role: Role::Assistant, content: String::new(), thinking: None, tool_calls: vec![], tool_name: None, tool_call_id: None };
+        let mut acc = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![],
+            tool_name: None,
+            tool_call_id: None,
+            provider_data: None,
+        };
         let mut stats = ChatStats::default();
         let mut done_reason = None;
 
