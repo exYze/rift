@@ -3,6 +3,7 @@ pub mod compact;
 pub mod config;
 pub mod mcp;
 pub mod outline;
+pub mod outline_cache;
 pub mod paths;
 pub mod prompts;
 pub mod session;

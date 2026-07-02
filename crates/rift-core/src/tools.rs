@@ -1165,11 +1165,23 @@ impl Tool for RepoMapTool {
             }
             files.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
             let total_found = files.len();
+            // Persistent outline cache: a (mtime, size) hit skips the read
+            // AND the tree-sitter parse — on big repos that's most of the
+            // tool's cost across sessions.
+            let mut cache = crate::outline_cache::OutlineCache::load(&root);
             let mut out = String::new();
             let mut included = 0;
             for (_, path) in files.into_iter().take(max_files) {
-                let Ok(source) = std::fs::read_to_string(&path) else { continue };
-                let Ok(outline) = crate::outline::outline_source(&path, &source) else { continue };
+                let Ok(meta) = std::fs::metadata(&path) else { continue };
+                let outline = match cache.get(&path, &meta) {
+                    Some(hit) => hit,
+                    None => {
+                        let Ok(source) = std::fs::read_to_string(&path) else { continue };
+                        let Ok(fresh) = crate::outline::outline_source(&path, &source) else { continue };
+                        cache.insert(&path, &meta, fresh.clone());
+                        fresh
+                    }
+                };
                 let display = path.strip_prefix(&cwd).unwrap_or(&path);
                 out.push_str(&format!("=== {} ===\n{outline}\n", display.display()));
                 included += 1;
@@ -1178,6 +1190,7 @@ impl Tool for RepoMapTool {
                     break;
                 }
             }
+            cache.save();
             if total_found > included {
                 out.push_str(&format!(
                     "[{included} of {total_found} source files shown, newest first; use outline for specific files]\n"
