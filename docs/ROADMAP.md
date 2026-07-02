@@ -155,10 +155,17 @@ differ dramatically in what prompting and formatting they want. Treat each
 model family as a compiler target, with the bench matrix as the fitness
 function.
 
-- [ ] **Per-family prompt files** — `prompts/<family>.toml` embedded at
-  compile time (`include_str!` — keeps the one-binary promise), selected by
-  model-family detection in the provider layer; an override directory for
-  local experimentation
+- [x] **Prompt-target machinery** (landed early, alongside v0.7 phase 2) —
+  `crates/rift-core/prompts/<family>.md` (markdown + frontmatter, the
+  SKILL.md idiom: multi-line-friendly, zero new deps) embedded at compile
+  time (`include_str!` — keeps the one-binary promise); `match:` substrings
+  select a target by model name; `~/.config/rift/prompts/` overrides for
+  experimenting without recompiling (user-level only — a cloned repo must
+  never be able to replace the system prompt). Swarm candidates each get
+  their own family prompt, so cross-provider races compare tuned targets
+- [ ] **Family targets** — actual qwen/deepseek/glm/mistral files. Only
+  `default.md` ships until a candidate beats the incumbent through the
+  evolution gate; workflow in `crates/rift-core/prompts/README.md`
 - [ ] **Prompt evolution gate** — prompt files are versioned; a change
   merges only if it beats the incumbent on the bench matrix. Prompts are
   code: benchmark → review → revise → benchmark → merge

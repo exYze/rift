@@ -270,12 +270,15 @@ pub async fn run_swarm(
                 }
             }
 
+            // Per-candidate prompt: cross-provider races pick each model's
+            // family target, not one generic prompt for the whole swarm.
+            let system_prompt = crate::system_prompt_with_guide(&cfg.model, &worktree).0;
             let mut agent = Agent::new(
                 client,
                 cfg,
                 ToolRegistry::standard(),
                 ToolCtx::new(&worktree),
-                crate::system_prompt_with_guide(&worktree).0,
+                system_prompt,
             );
 
             // Forward this candidate's events tagged with its index.

@@ -296,7 +296,7 @@ async fn main() -> Result<()> {
         eprintln!("note: approval mode needs the interactive TUI; running headless without it");
     }
 
-    let (mut prompt_text, guide_files) = rift_core::system_prompt_with_guide(&cwd);
+    let (mut prompt_text, guide_files) = rift_core::system_prompt_with_guide(&model, &cwd);
     if !guide_files.is_empty() {
         eprintln!("loaded project context: {}", guide_files.join(", "));
     }
