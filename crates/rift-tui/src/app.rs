@@ -474,6 +474,15 @@ fn code_box_line(inner: Vec<(Color, String)>, border: Color) -> WrappedLine {
     WrappedLine { kind: Kind::Code, text, spans: Some(spans) }
 }
 
+/// Short token count for the status line: `999`, `1.2k`, `12.3k`.
+fn humanize_tokens(n: u64) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else {
+        format!("{:.1}k", n as f64 / 1000.0)
+    }
+}
+
 fn floor_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
         return s.len();
@@ -539,6 +548,32 @@ mod tests {
         assert_eq!(sanitize_for_pane("\x1b]0;win title\x07text"), "text");
         assert_eq!(sanitize_for_pane("bell\x07backspace\x08"), "bellbackspace");
         assert_eq!(sanitize_for_pane("plain text"), "plain text");
+    }
+
+    #[test]
+    fn humanize_tokens_scales() {
+        assert_eq!(humanize_tokens(0), "0");
+        assert_eq!(humanize_tokens(999), "999");
+        assert_eq!(humanize_tokens(1000), "1.0k");
+        assert_eq!(humanize_tokens(12_345), "12.3k");
+    }
+
+    #[test]
+    fn token_status_shows_live_estimate_then_session_total() {
+        let mut app = App::new("m".into(), vec![], &theme::DARK, std::env::temp_dir());
+        // Idle with no usage yet → nothing to show.
+        assert_eq!(app.token_status(), "");
+        // Idle with session totals → cumulative sent (↑) / received (↓).
+        app.session_stats.prompt_tokens = 1200;
+        app.session_stats.output_tokens = 3400;
+        assert_eq!(app.token_status(), " · Σ 1.2k↑ 3.4k↓");
+        // Mid-turn → live ~chars/4 estimate of this turn's output.
+        app.busy = true;
+        app.turn_output_chars = 400;
+        assert_eq!(app.token_status(), " · ~100↓");
+        // Busy but nothing streamed yet (prompt still processing) → empty.
+        app.turn_output_chars = 0;
+        assert_eq!(app.token_status(), "");
     }
 
     #[test]
@@ -677,6 +712,10 @@ struct App {
     /// When the in-flight turn/command started (drives the spinner + elapsed
     /// time so long prompt-processing waits visibly aren't a hang).
     turn_started: Option<Instant>,
+    /// Chars streamed (content + thinking) so far this turn, for a live
+    /// token estimate in the status line. Providers only report real counts
+    /// at end-of-turn, so ~chars/4 stands in until then. Reset each turn.
+    turn_output_chars: usize,
     /// Open interactive list (model picker, session picker, elicit choices).
     picker: Option<PickerState>,
     /// Pending free-text ask_user question; Enter sends the input as the answer.
@@ -732,6 +771,7 @@ impl App {
             palette_off: false,
             mouse_capture: true,
             turn_started: None,
+            turn_output_chars: 0,
             picker: None,
             answering: None,
             plan: vec![],
@@ -911,14 +951,44 @@ impl App {
         self.turn_started = None;
     }
 
+    /// Compact token readout for the status line: a live estimate of this
+    /// turn's output while a turn runs (providers report real counts only at
+    /// the end), else the session's cumulative sent (↑) / received (↓) totals.
+    /// Empty until there's something to show.
+    fn token_status(&self) -> String {
+        if self.busy {
+            if self.turn_output_chars == 0 {
+                return String::new();
+            }
+            format!(" · ~{}↓", humanize_tokens((self.turn_output_chars / 4) as u64))
+        } else {
+            let s = &self.session_stats;
+            if s.prompt_tokens == 0 && s.output_tokens == 0 {
+                return String::new();
+            }
+            format!(" · Σ {}↑ {}↓", humanize_tokens(s.prompt_tokens), humanize_tokens(s.output_tokens))
+        }
+    }
+
     fn handle_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::Iteration(i) => {
+                // Iteration 1 is the turn's first event; reset the live token
+                // estimate so it counts this turn's output (across tool loops).
+                if i == 1 {
+                    self.turn_output_chars = 0;
+                }
                 self.log.push_block(Kind::Info, format!("· step {i}"));
                 self.status = format!("step {i} — waiting for {}…", self.model);
             }
-            AgentEvent::Thinking(t) => self.transcript.append_stream(Kind::Thinking, &t),
-            AgentEvent::Content(c) => self.transcript.append_stream(Kind::Assistant, &c),
+            AgentEvent::Thinking(t) => {
+                self.turn_output_chars += t.chars().count();
+                self.transcript.append_stream(Kind::Thinking, &t);
+            }
+            AgentEvent::Content(c) => {
+                self.turn_output_chars += c.chars().count();
+                self.transcript.append_stream(Kind::Assistant, &c);
+            }
             AgentEvent::ToolStart { name, args } => {
                 self.session_stats.tool_calls += 1;
                 let args: String = args.chars().take(160).collect();
@@ -1157,6 +1227,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         Span::styled(format!(" {} ", app.model), Style::default().fg(t.sel_fg).bg(t.accent)),
         Span::styled(busy_marker, Style::default().fg(if app.busy { t.warn } else { t.ok })),
         Span::styled(format!("{}{elapsed_note}", app.status), Style::default().fg(t.muted)),
+        Span::styled(app.token_status(), Style::default().fg(t.accent)),
         Span::styled(scroll_note, Style::default().fg(t.warn)),
     ]);
     frame.render_widget(Paragraph::new(status), status_area);
