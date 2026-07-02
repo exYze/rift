@@ -86,8 +86,8 @@ def tokens_since(path, mark):
     return {"prompt_tok": prompt, "output_tok": output, "llm_calls": calls}
 
 
-def run_task(agent, task, model):
-    src = os.path.join(ROOT, "tasks", task)
+def run_task(agent, task, model, tasks_dir="tasks"):
+    src = os.path.join(ROOT, tasks_dir, task)
     tmp = tempfile.mkdtemp(prefix=f"bench-{agent}-{task}-")
     for f in os.listdir(src):
         if f in ("prompt.txt", "verify.sh") or f.startswith("__"):
@@ -176,13 +176,15 @@ def main():
     ap.add_argument("--tasks", default=None,
                     help="comma-separated task names to run (default: all) — "
                          "for quick prompt/schema experiments before a full run")
+    ap.add_argument("--dir", default="tasks",
+                    help="task directory under bench/ (e.g. tasks2 for the hard tier)")
     args = ap.parse_args()
     agents = args.agents or ["rift", "opencode"]
     models = [m.strip() for m in args.models.split(",") if m.strip()]
 
     os.makedirs(os.path.join(ROOT, "traces"), exist_ok=True)
-    tasks = sorted(d for d in os.listdir(os.path.join(ROOT, "tasks"))
-                   if os.path.isdir(os.path.join(ROOT, "tasks", d)))
+    tasks = sorted(d for d in os.listdir(os.path.join(ROOT, args.dir))
+                   if os.path.isdir(os.path.join(ROOT, args.dir, d)))
     if args.tasks:
         wanted = [t.strip() for t in args.tasks.split(",") if t.strip()]
         missing = [t for t in wanted if t not in tasks]
@@ -194,7 +196,7 @@ def main():
         for agent in agents:
             for task in tasks:
                 print(f"=== {agent} / {model} / {task} ...", flush=True)
-                r = run_task(agent, task, model)
+                r = run_task(agent, task, model, args.dir)
                 print(f"    ok={r['ok']} {r['secs']}s prompt={r['prompt_tok']} "
                       f"out={r['output_tok']} calls={r['llm_calls']}", flush=True)
                 results.append(r)

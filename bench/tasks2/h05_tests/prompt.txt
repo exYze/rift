@@ -1,0 +1,1 @@
+Run the test suite (python3 -m unittest discover -v) and make every test pass WITHOUT modifying test_booking.py. The tests encode the intended behaviour of the interval and booking helpers; the implementation is what's wrong. Intervals are half-open [start, end) throughout.

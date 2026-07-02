@@ -1,0 +1,7 @@
+python3 main.py is supposed to print the end-of-month balance of every account in the March export (one "account cents" line, sorted by account name), but it currently aborts with a validation error on transaction t3 and prints nothing. The export contains account-to-account transfers, which the ledger must support: a transfer moves amount_cents out of `account` and into `target`, and a transfer is invalid when target is missing/empty or names the same account it is drawn from. Deposits and withdrawals must keep working exactly as before, and a transfer read back through the serializer must not lose any information. Expected output for the bundled export:
+
+checking 6000
+savings 7400
+vault 100
+
+Find and fix the underlying problems.

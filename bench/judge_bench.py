@@ -62,8 +62,8 @@ def verify_patch(task_src, patch_path):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def run_task(task, host, models, judge, timeout):
-    src = os.path.join(ROOT, "tasks", task)
+def run_task(task, host, models, judge, timeout, tasks_dir="tasks"):
+    src = os.path.join(ROOT, tasks_dir, task)
     with open(os.path.join(src, "prompt.txt")) as f:
         prompt = f.read().strip()
     repo = fresh_repo(src, f"judge-{task}-")
@@ -111,11 +111,13 @@ def main():
     ap.add_argument("--models", required=True, help="two models to race, comma-separated")
     ap.add_argument("--judge", required=True, help="referee model")
     ap.add_argument("--tasks", default=None, help="comma-separated subset (default: all)")
+    ap.add_argument("--dir", default="tasks",
+                    help="task directory under bench/ (e.g. tasks2 for the hard tier)")
     ap.add_argument("--timeout", type=int, default=900, help="seconds per task")
     args = ap.parse_args()
 
-    tasks = sorted(d for d in os.listdir(os.path.join(ROOT, "tasks"))
-                   if os.path.isdir(os.path.join(ROOT, "tasks", d)))
+    tasks = sorted(d for d in os.listdir(os.path.join(ROOT, args.dir))
+                   if os.path.isdir(os.path.join(ROOT, args.dir, d)))
     if args.tasks:
         wanted = [t.strip() for t in args.tasks.split(",") if t.strip()]
         missing = [t for t in wanted if t not in tasks]
@@ -126,7 +128,7 @@ def main():
     results = []
     for task in tasks:
         print(f"=== {task} ...", flush=True)
-        r = run_task(task, args.host, args.models, args.judge, args.timeout)
+        r = run_task(task, args.host, args.models, args.judge, args.timeout, args.dir)
         results.append(r)
         if "error" in r:
             print(f"    ERROR: {r['error']}", flush=True)

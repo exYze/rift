@@ -1,0 +1,1 @@
+Run the test suite (python3 -m unittest discover -v) and make every test pass WITHOUT modifying test_lru.py. The tests pin down the intended least-recently-USED semantics of the cache in lru.py and the memoize decorator in memo.py; fix the implementation, not the tests.

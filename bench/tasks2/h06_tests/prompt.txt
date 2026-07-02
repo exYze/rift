@@ -1,0 +1,1 @@
+Run the test suite (python3 -m unittest discover -v) and make every test pass WITHOUT modifying test_duration.py. The tests define the intended behaviour of the duration parsing/formatting helpers and the timer utilities on top of them; fix the implementation, not the tests.
