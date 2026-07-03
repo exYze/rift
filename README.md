@@ -103,6 +103,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/tokens` | context budget, usage estimate, estimator calibration |
 | `/sessions [n]` | interactive session picker, or resume the nth directly |
 | `/skills` · `/skill:<name> [task]` | list packaged skills, or run one |
+| `/skills new <desc>` · `/mcp new <desc>` | the agent builds its own extensions: writes a skill file, or writes + self-tests a local MCP server and registers it (trust-gated) — `/restart` loads them |
 | `/plan [clear]` | the agent's task checklist (also pinned live in the activity pane) |
 | `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, deny list + approval state |
 | `/swarm <task> [--models a,b] [--judge m] [--explore]` | WarpDrive race without leaving the chat — models may span providers; the optional judge scores the diffs and recommends a winner |

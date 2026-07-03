@@ -194,27 +194,41 @@ impl McpClient {
         let result = self
             .request("tools/call", json!({"name": name, "arguments": args}))
             .await?;
-        let text: String = result
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| match b.get("type").and_then(|t| t.as_str()) {
-                        Some("text") => b.get("text").and_then(|t| t.as_str()).map(str::to_string),
-                        Some(other) => Some(format!("[unsupported content block: {other}]")),
-                        None => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
-        if result.get("isError").and_then(|b| b.as_bool()).unwrap_or(false) {
+        let (text, is_error) = parse_tool_content(&result);
+        if is_error {
             bail!("{text}");
         }
         Ok(text)
     }
 }
+
+/// Extract (text, is_error) from a tools/call result. Lenient on shape:
+/// the spec says `{"content":[blocks], "isError"?}`, but hand-written and
+/// model-generated servers commonly return the bare content array — accept
+/// it rather than silently reading an empty string (the same zero-errors
+/// posture as textual tool-call recovery).
+fn parse_tool_content(result: &Value) -> (String, bool) {
+    let blocks = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .or_else(|| result.as_array());
+    let text = blocks
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| match b.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => b.get("text").and_then(|t| t.as_str()).map(str::to_string),
+                    Some(other) => Some(format!("[unsupported content block: {other}]")),
+                    None => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let is_error = result.get("isError").and_then(|b| b.as_bool()).unwrap_or(false);
+    (text, is_error)
+}
+
 
 /// An MCP server tool exposed through the regular tool registry, namespaced
 /// `<server>_<tool>` (the convention models already know from Claude Code).
@@ -247,5 +261,28 @@ impl Tool for McpTool {
     }
     async fn execute(&self, args: &Map<String, Value>, _ctx: &ToolCtx) -> Result<String> {
         self.client.call_tool(&self.remote_name, args).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_content_accepts_spec_and_bare_array_shapes() {
+        // Spec shape.
+        let spec = json!({"content": [{"type": "text", "text": "hello"}]});
+        assert_eq!(parse_tool_content(&spec), ("hello".into(), false));
+
+        // Error flag.
+        let err = json!({"content": [{"type": "text", "text": "boom"}], "isError": true});
+        assert_eq!(parse_tool_content(&err), ("boom".into(), true));
+
+        // The common near-miss: a bare content array as the whole result.
+        let bare = json!([{"type": "text", "text": "lenient"}]);
+        assert_eq!(parse_tool_content(&bare), ("lenient".into(), false));
+
+        // Garbage degrades to empty, not a panic.
+        assert_eq!(parse_tool_content(&json!(42)), (String::new(), false));
     }
 }

@@ -1570,6 +1570,15 @@ fn head_of(content: &str) -> String {
 /// The `/init` command body — a normal agent turn with a canned prompt.
 const INIT_PROMPT: &str = "Explore this repository (use repo_map and outline to stay cheap; read key files only as needed) and write a RIFT.md file at the project root: a concise guide for AI coding agents working here. Cover: what the project does, how the code is laid out, how to build/test/run it, and any conventions or gotchas you noticed. Keep it under 60 lines.";
 
+/// /skills new — the agent writes its own skill file (the /init pattern:
+/// a canned prompt through the normal agent loop, using the write tool).
+const SKILL_NEW_PROMPT: &str = "Create a new rift skill from this description:\n\n{desc}\n\nSkills are markdown instruction files the agent loads on demand. Write ONE file at .rift/skills/<name>.md — pick a short kebab-case <name> — in exactly this format:\n\n---\nname: <name>\ndescription: <one line saying when to use this skill — this line is shown to the model every session, so make it a good trigger>\n---\n<skill body>\n\nBody guidelines: imperative instructions for a coding agent, not prose for humans; concrete steps and commands; include a verification step; keep it under 80 lines; include only what an agent could NOT infer by exploring the repo. If the description is ambiguous and an ask_user tool is available, ask ONE clarifying question before writing. After writing, read the file back to confirm the frontmatter parses (--- fences, name and description lines). Finish by telling the user: the skill loads at startup — run /restart now to use it as /skill:<name> without losing this chat.";
+
+/// /mcp new — the agent writes AND self-tests a stdio MCP server matching
+/// the exact protocol subset rift's client speaks, then registers it in the
+/// project config (which is trust-gated at startup, so the user reviews it).
+const MCP_NEW_PROMPT: &str = "Build a local MCP (Model Context Protocol) server from this description:\n\n{desc}\n\nWrite ONE self-contained Python 3 file at .rift/mcp/<name>.py (pick a short kebab-case <name>) using ONLY the Python standard library.\n\nProtocol contract (JSON-RPC 2.0 over stdio; one JSON object per line; read requests line-by-line from stdin; write responses to stdout; anything you log goes to stderr — NEVER print non-JSON to stdout):\n- request method \"initialize\" -> respond {\"jsonrpc\":\"2.0\",\"id\":<same id>,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"<name>\",\"version\":\"0.1.0\"}}}\n- notification \"notifications/initialized\" (no id) -> send nothing back\n- request \"tools/list\" -> result {\"tools\":[{\"name\":\"...\",\"description\":\"...\",\"inputSchema\":{<JSON Schema object with type/properties/required>}}]}\n- request \"tools/call\" with params {\"name\":...,\"arguments\":{...}} -> the result MUST be an OBJECT of exactly this shape: {\"content\":[{\"type\":\"text\",\"text\":\"<output>\"}]} — never a bare array; on tool failure return {\"content\":[{\"type\":\"text\",\"text\":\"<error message>\"}],\"isError\":true} (not a JSON-RPC error)\n- any other request with an id -> JSON-RPC error response; ignore unknown notifications\n\nDesign 1-3 focused tools that implement the description, each with a clear description and a strict inputSchema. If the description truly requires external packages or credentials, say so and stop instead of writing a broken server.\n\nWork economically — you have a limited step budget: write the COMPLETE server in a single write call, run one test pipeline, fix only what fails, then register.\n\nMANDATORY self-test before you finish: use bash to pipe a full session through the server —\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}' '{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"<tool>\",\"arguments\":{...}}}' | python3 .rift/mcp/<name>.py\nand verify every response line is valid JSON with the right id and shape. The tools/call tests MUST include: (a) each tool called once with typical arguments, and (b) at least one call with ALL optional arguments omitted — every parameter your schema does not list in \"required\" must actually default in the implementation, not KeyError. Fix and re-test until it passes.\n\nThen register it: read .rift.json if it exists (create it if not) and merge in {\"mcp\":{\"<name>\":{\"command\":\"python3\",\"args\":[\".rift/mcp/<name>.py\"]}}} without losing any existing keys. After writing, READ .rift.json BACK and confirm the mcp entry is present — only report registration you have verified in the file, never from memory of having written it. Finish by telling the user: run /restart to load the server — rift will ask once to trust it (project-config MCP entries always are), and /mcp lists it afterwards.";
+
 /// Everything run_tui needs beyond the agent itself.
 pub struct TuiOptions {
     pub model: String,
@@ -2067,6 +2076,37 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                             format!("! unknown skill '{name}' — /skills lists what's available"),
                                         );
                                     }
+                                }
+                            } else if let Some(desc) = trimmed.strip_prefix("/skills new") {
+                                // Self-extension: the agent writes the skill
+                                // file with its own tools (the /init pattern).
+                                let desc = desc.trim().to_string();
+                                if desc.is_empty() {
+                                    app.idle();
+                                    app.transcript.push_block(
+                                        Kind::Warn,
+                                        "! usage: /skills new <what the skill should do>".into(),
+                                    );
+                                } else {
+                                    app.status = "generating skill…".into();
+                                    let _ = prompt_tx
+                                        .send(UiMsg::Prompt(SKILL_NEW_PROMPT.replace("{desc}", &desc), cancel));
+                                }
+                            } else if let Some(desc) = trimmed.strip_prefix("/mcp new") {
+                                // Self-extension: the agent writes AND tests a
+                                // stdio MCP server, then registers it in the
+                                // project config (trust-gated at next startup).
+                                let desc = desc.trim().to_string();
+                                if desc.is_empty() {
+                                    app.idle();
+                                    app.transcript.push_block(
+                                        Kind::Warn,
+                                        "! usage: /mcp new <what the server's tools should do>".into(),
+                                    );
+                                } else {
+                                    app.status = "generating MCP server…".into();
+                                    let _ = prompt_tx
+                                        .send(UiMsg::Prompt(MCP_NEW_PROMPT.replace("{desc}", &desc), cancel));
                                 }
                             } else if trimmed == "/skills" {
                                 app.idle();
