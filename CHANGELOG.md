@@ -3,6 +3,15 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v0.9.2 — 2026-07-03
+
+- **`/restart`**: relaunch rift and resume the exact session in place —
+  the post-`/update` path that keeps your chat. True exec on Unix (same
+  terminal, same PID), spawn-and-wait on Windows; `/update`'s success
+  message now points at it
+- The status line and `/restart` carry the addressable model name
+  (provider prefix intact), so `anthropic/…` models survive a restart
+
 ## v0.9.1 — 2026-07-03
 
 - **Markdown rendering in the transcript**: `## headings` render bold in
