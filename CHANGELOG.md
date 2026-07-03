@@ -3,6 +3,22 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v0.9.5 — 2026-07-03
+
+- **`/goal <condition>`**: keep working until the model verifies the goal —
+  turns auto-continue (up to 25) until a verified line-anchored `GOAL MET`,
+  `/goal clear`/Esc stops it, and the run cap stops with a resume hint.
+  A failed turn pauses the goal instead of spinning
+- **`/loop [30s|5m|2h] <prompt or /command>`**: re-run a body on a fixed
+  interval (rescheduled from fire time — no catch-up bursts) or
+  back-to-back without one; `/loop stop` or Esc ends it, and a
+  back-to-back loop halts if a run fails. Esc during a running auto-turn
+  cancels the turn and the automation
+- **Generator scope**: `/skills new` and `/mcp new` take `--global` (`-g`)
+  to install user-wide (`~/.config/rift/`, every project, absolute paths,
+  no trust prompt) instead of the project-scoped default (`.rift/`,
+  trust-gated)
+
 ## v0.9.4 — 2026-07-03
 
 - **Self-extension**: `/skills new <desc>` — the agent writes its own skill
