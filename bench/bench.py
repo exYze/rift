@@ -28,7 +28,7 @@ import time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TOKEN_LOG = "/tmp/rift-bench-tokens.jsonl"
 PROXY = "http://127.0.0.1:11435"
-RIFT = os.path.join(ROOT, "..", "target", "release", "rift")
+RIFT = os.environ.get("RIFT_BIN", os.path.join(ROOT, "..", "target", "release", "rift"))
 MODEL = "gemma4:26b"
 TIMEOUT = 600
 
@@ -165,6 +165,19 @@ def summarize(results, agents, models):
             print(f"{agent:<12} {model:<16} {ok:>2}/{len(rs):<3} "
                   f"{sum(r['prompt_tok'] for r in rs):>9} {sum(r['output_tok'] for r in rs):>8} "
                   f"{round(sum(r['secs'] for r in rs), 1):>7}")
+            # Multi-run variance: per-run pass counts + flaky tasks (passed
+            # in some runs, failed in others) — the run-to-run noise floor
+            # any claimed improvement has to clear.
+            runs = sorted({r.get("run", 0) for r in rs})
+            if len(runs) > 1:
+                per_run = [sum(r["ok"] for r in rs if r.get("run", 0) == run) for run in runs]
+                by_task = {}
+                for r in rs:
+                    by_task.setdefault(r["task"], []).append(r["ok"])
+                flaky = sorted(t for t, oks in by_task.items() if len(set(oks)) > 1)
+                print(f"{'':<12} {'':<16} per-run: {per_run} "
+                      f"(min {min(per_run)}, max {max(per_run)}); "
+                      f"flaky: {', '.join(flaky) if flaky else 'none'}")
 
 
 def main():
@@ -178,6 +191,9 @@ def main():
                          "for quick prompt/schema experiments before a full run")
     ap.add_argument("--dir", default="tasks",
                     help="task directory under bench/ (e.g. tasks2 for the hard tier)")
+    ap.add_argument("--runs", type=int, default=1,
+                    help="repetitions per task — nondeterministic models need "
+                         "multi-run variance, not single-run point estimates")
     args = ap.parse_args()
     agents = args.agents or ["rift", "opencode"]
     models = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -194,12 +210,15 @@ def main():
     results = []
     for model in models:
         for agent in agents:
-            for task in tasks:
-                print(f"=== {agent} / {model} / {task} ...", flush=True)
-                r = run_task(agent, task, model, args.dir)
-                print(f"    ok={r['ok']} {r['secs']}s prompt={r['prompt_tok']} "
-                      f"out={r['output_tok']} calls={r['llm_calls']}", flush=True)
-                results.append(r)
+            for run in range(args.runs):
+                for task in tasks:
+                    tag = f" run {run + 1}/{args.runs}" if args.runs > 1 else ""
+                    print(f"=== {agent} / {model} / {task}{tag} ...", flush=True)
+                    r = run_task(agent, task, model, args.dir)
+                    r["run"] = run
+                    print(f"    ok={r['ok']} {r['secs']}s prompt={r['prompt_tok']} "
+                          f"out={r['output_tok']} calls={r['llm_calls']}", flush=True)
+                    results.append(r)
 
     out = os.path.join(ROOT, "results.json")
     existing = []

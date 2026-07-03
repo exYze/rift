@@ -83,6 +83,10 @@ impl FailureCounters {
 pub struct ToolTraceRecord {
     pub name: String,
     pub ok: bool,
+    /// The call's file/pattern argument when it has one — the data the
+    /// repo-map ranking and retrieval heuristics are tuned against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 /// The JSONL record for one completed turn.
@@ -179,8 +183,8 @@ mod tests {
         let w = TraceWriter::new(&path).unwrap();
 
         let tools = vec![
-            ToolTraceRecord { name: "read".into(), ok: true },
-            ToolTraceRecord { name: "edit".into(), ok: false },
+            ToolTraceRecord { name: "read".into(), ok: true, target: Some("src/lib.rs".into()) },
+            ToolTraceRecord { name: "edit".into(), ok: false, target: None },
         ];
         let failures = FailureCounters { tool_errors: 1, ..Default::default() };
         w.record(&sample_trace(&tools, &failures)).unwrap();

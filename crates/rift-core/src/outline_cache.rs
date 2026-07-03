@@ -22,18 +22,28 @@ use serde::{Deserialize, Serialize};
 /// files per call, but the cache accumulates across calls).
 const MAX_ENTRIES: usize = 4096;
 
+/// Bump when Entry's shape changes meaning — a mismatched version discards
+/// the whole cache file (it only costs a re-parse).
+const CACHE_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     /// Modification time, nanos since epoch (0 if unavailable).
     mtime: u128,
     size: u64,
     outline: String,
+    /// Module names this file imports (lowercased stems) — feeds repo_map's
+    /// centrality ranking.
+    #[serde(default)]
+    imports: Vec<String>,
     /// Last time this entry was used or refreshed (unix secs) — the LRU key.
     used: u64,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct OutlineCache {
+    #[serde(default)]
+    version: u32,
     entries: HashMap<PathBuf, Entry>,
     #[serde(skip)]
     dirty: bool,
@@ -67,39 +77,42 @@ fn root_key(root: &Path) -> String {
 }
 
 impl OutlineCache {
-    /// Load the cache for a repo root (empty cache on any failure).
+    /// Load the cache for a repo root (empty cache on any failure or a
+    /// version mismatch).
     pub fn load(root: &Path) -> Self {
         let file = crate::paths::data_dir().map(|d| d.join("rift/outline-cache").join(format!("{}.json", root_key(root))));
         let mut cache: OutlineCache = file
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|text| serde_json::from_str(&text).ok())
+            .filter(|c: &OutlineCache| c.version == CACHE_VERSION)
             .unwrap_or_default();
+        cache.version = CACHE_VERSION;
         cache.file = file;
         cache
     }
 
     /// A cache that never touches disk (tests, headless one-offs).
     pub fn in_memory() -> Self {
-        Self::default()
+        Self { version: CACHE_VERSION, ..Self::default() }
     }
 
-    /// The cached outline for `path` if its (mtime, size) still match —
-    /// a hit needs no file read at all. Refreshes the LRU stamp.
-    pub fn get(&mut self, path: &Path, meta: &std::fs::Metadata) -> Option<String> {
+    /// The cached (outline, imports) for `path` if its (mtime, size) still
+    /// match — a hit needs no file read at all. Refreshes the LRU stamp.
+    pub fn get(&mut self, path: &Path, meta: &std::fs::Metadata) -> Option<(String, Vec<String>)> {
         let entry = self.entries.get_mut(path)?;
         if entry.mtime != mtime_nanos(meta) || entry.size != meta.len() || entry.mtime == 0 {
             return None;
         }
         entry.used = now_secs();
         self.dirty = true; // LRU stamp moved
-        Some(entry.outline.clone())
+        Some((entry.outline.clone(), entry.imports.clone()))
     }
 
-    pub fn insert(&mut self, path: &Path, meta: &std::fs::Metadata, outline: String) {
+    pub fn insert(&mut self, path: &Path, meta: &std::fs::Metadata, outline: String, imports: Vec<String>) {
         self.entries.insert(
             path.to_path_buf(),
-            Entry { mtime: mtime_nanos(meta), size: meta.len(), outline, used: now_secs() },
+            Entry { mtime: mtime_nanos(meta), size: meta.len(), outline, imports, used: now_secs() },
         );
         self.dirty = true;
     }
@@ -143,8 +156,10 @@ mod tests {
 
         let mut cache = OutlineCache::in_memory();
         assert!(cache.get(&f, &meta).is_none(), "cold cache misses");
-        cache.insert(&f, &meta, "OUTLINE-1".into());
-        assert_eq!(cache.get(&f, &meta).as_deref(), Some("OUTLINE-1"));
+        cache.insert(&f, &meta, "OUTLINE-1".into(), vec!["util".into()]);
+        let (outline, imports) = cache.get(&f, &meta).unwrap();
+        assert_eq!(outline, "OUTLINE-1");
+        assert_eq!(imports, vec!["util".to_string()]);
 
         // Change the content (different size) — the entry must invalidate.
         std::fs::write(&f, "def a():\n    pass\n\ndef b():\n    pass\n").unwrap();
@@ -167,12 +182,12 @@ mod tests {
         let mut cache = OutlineCache::load(&dir);
         // Redirect the save target into the temp dir regardless of HOME.
         cache.file = Some(dir.join("cache.json"));
-        cache.insert(&f, &meta, "SAVED".into());
+        cache.insert(&f, &meta, "SAVED".into(), vec![]);
         cache.save();
 
         let mut reloaded: OutlineCache =
             serde_json::from_str(&std::fs::read_to_string(dir.join("cache.json")).unwrap()).unwrap();
-        assert_eq!(reloaded.get(&f, &meta).as_deref(), Some("SAVED"));
+        assert_eq!(reloaded.get(&f, &meta).unwrap().0, "SAVED");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

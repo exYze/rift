@@ -85,6 +85,71 @@ pub fn supports(path: &Path) -> bool {
     spec_for(path).is_some()
 }
 
+/// Cheap textual extraction of imported module names (lowercased stems) —
+/// feeds repo_map's centrality ranking. Deliberately heuristic: only names
+/// that later match a sibling file's stem count, so false positives are
+/// harmless.
+pub fn extract_imports(path: &Path, source: &str) -> Vec<String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |name: &str| {
+        // Stem only: `a.b.c` → `a`, `./x/y` → `y`.
+        let name = name.trim_matches(|c: char| c == '"' || c == '\'' || c == ';' || c == ',');
+        let stem = name
+            .rsplit('/')
+            .next()
+            .unwrap_or(name)
+            .split('.')
+            .next()
+            .unwrap_or(name)
+            .to_lowercase();
+        if !stem.is_empty() && stem != "crate" && stem != "super" && stem != "self" {
+            out.push(stem);
+        }
+    };
+    for line in source.lines().take(400).map(str::trim) {
+        match ext {
+            "py" => {
+                if let Some(rest) = line.strip_prefix("import ") {
+                    for part in rest.split(',') {
+                        push(part.split_whitespace().next().unwrap_or(""));
+                    }
+                } else if let Some(rest) = line.strip_prefix("from ") {
+                    if let Some(module) = rest.split_whitespace().next() {
+                        push(module.trim_start_matches('.'));
+                    }
+                }
+            }
+            "rs" => {
+                if let Some(rest) = line.strip_prefix("use crate::") {
+                    push(rest.split("::").next().unwrap_or(""));
+                } else if let Some(rest) = line.strip_prefix("mod ") {
+                    push(rest.trim_end_matches(';'));
+                } else if let Some(rest) = line.strip_prefix("pub mod ") {
+                    push(rest.trim_end_matches(';'));
+                }
+            }
+            "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => {
+                // `from './x'` / `from "../a/x"` / require('./x')
+                for marker in ["from '", "from \"", "require('", "require(\""] {
+                    if let Some(idx) = line.find(marker) {
+                        let rest = &line[idx + marker.len()..];
+                        let end = rest.find(['\'', '"']).unwrap_or(rest.len());
+                        let spec = &rest[..end];
+                        if spec.starts_with('.') {
+                            push(spec);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Produce the signatures-only outline of `source` for the language implied
 /// by `path`'s extension.
 pub fn outline_source(path: &Path, source: &str) -> Result<String> {
@@ -218,5 +283,27 @@ export class Repo {
     #[test]
     fn unsupported_extension_errors() {
         assert!(outline_source(&PathBuf::from("a.xyz"), "x").is_err());
+    }
+
+    #[test]
+    fn extracts_imports_per_language() {
+        let py = "import util\nfrom models import Item\nfrom .local_mod import x\nimport os, sys\n";
+        let got = extract_imports(&PathBuf::from("a.py"), py);
+        for want in ["util", "models", "local_mod", "os", "sys"] {
+            assert!(got.contains(&want.to_string()), "py missing {want}: {got:?}");
+        }
+
+        let rs = "use crate::tools::ToolCtx;\nmod outline;\npub mod paths;\nuse std::fmt;\n";
+        let got = extract_imports(&PathBuf::from("a.rs"), rs);
+        for want in ["tools", "outline", "paths"] {
+            assert!(got.contains(&want.to_string()), "rs missing {want}: {got:?}");
+        }
+        assert!(!got.contains(&"std".to_string()), "external crates must not count: {got:?}");
+
+        let ts = "import { x } from './util';\nconst y = require('../lib/helpers');\nimport z from 'react';\n";
+        let got = extract_imports(&PathBuf::from("a.ts"), ts);
+        assert!(got.contains(&"util".to_string()), "{got:?}");
+        assert!(got.contains(&"helpers".to_string()), "{got:?}");
+        assert!(!got.contains(&"react".to_string()), "package imports must not count: {got:?}");
     }
 }

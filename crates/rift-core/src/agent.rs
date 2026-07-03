@@ -455,7 +455,11 @@ impl Agent {
                 *count += 1;
                 if *count >= 3 {
                     stats.failures.doom_loop_trips += 1;
-                    tool_records.push(ToolTraceRecord { name: canonical.clone(), ok: false });
+                    tool_records.push(ToolTraceRecord {
+                        name: canonical.clone(),
+                        ok: false,
+                        target: trace_target(&call.function.arguments),
+                    });
                     let _ = tx.send(AgentEvent::Warning(format!(
                         "tool '{canonical}' called 3x with identical arguments; refusing the repeat"
                     )));
@@ -503,7 +507,11 @@ impl Agent {
                         )
                     }
                 };
-                tool_records.push(ToolTraceRecord { name: canonical.clone(), ok });
+                tool_records.push(ToolTraceRecord {
+                    name: canonical.clone(),
+                    ok,
+                    target: trace_target(&call.function.arguments),
+                });
 
                 // bash counts as mutating: a command can apply changes and we
                 // can't tell a read-only one apart; erring this way only
@@ -546,6 +554,17 @@ impl Agent {
         let _ = tx.send(AgentEvent::Done(stats.clone()));
         Ok(stats)
     }
+}
+
+/// The file/pattern argument of a tool call, for traces — what retrieval
+/// heuristics (repo-map ranking, hydration) are tuned against.
+fn trace_target(args: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    for key in ["path", "pattern"] {
+        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+            return Some(v.chars().take(200).collect());
+        }
+    }
+    None
 }
 
 /// Does the user's prompt ask for changes (vs. a question/explanation)?

@@ -14,6 +14,10 @@ use serde_json::{json, Map, Value};
 const READ_MAX_LINES: usize = 2000;
 const READ_MAX_LINE_CHARS: usize = 2000;
 const READ_MAX_BYTES: usize = 50_000;
+/// Hydrate-on-demand: an unbounded `read` of a source file longer than this
+/// returns its line-numbered outline instead of a huge head — the model then
+/// fetches exactly the ranges it needs. Explicit offset/limit always bypasses.
+const READ_HYDRATE_LINES: usize = 500;
 const GREP_MAX_MATCHES: usize = 100;
 const GLOB_MAX_RESULTS: usize = 200;
 const BASH_MAX_OUTPUT: usize = 30_000;
@@ -502,7 +506,7 @@ impl Tool for ReadTool {
         "read"
     }
     fn description(&self) -> &str {
-        "Read a text file. Returns line-numbered content. Use offset/limit for large files."
+        "Read a text file. Returns line-numbered content. An unbounded read of a large source file returns its outline first — pass offset/limit to read exact line ranges."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -535,6 +539,19 @@ impl Tool for ReadTool {
             // A legitimately empty file, not a bad offset — an error here
             // sends the model chasing other offsets.
             return Ok("(empty file)\n".into());
+        }
+        // Hydrate-on-demand (v0.8): outline first for big files, exact
+        // ranges as the model asks. Only when the model gave no bounds —
+        // an explicit offset/limit is always honored verbatim.
+        let bounded = args.contains_key("offset") || args.contains_key("limit");
+        if !bounded && total_lines > READ_HYDRATE_LINES && crate::outline::supports(&path) {
+            if let Ok(outline) = crate::outline::outline_source(&path, &text) {
+                return Ok(format!(
+                    "{} has {total_lines} lines — showing its outline (line numbers on the left). \
+                     Re-read with offset/limit for the exact ranges you need.\n{outline}",
+                    path.display()
+                ));
+            }
         }
         let mut out = String::new();
         let mut shown = 0usize;
@@ -1165,23 +1182,64 @@ impl Tool for RepoMapTool {
             }
             files.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
             let total_found = files.len();
+            // Bound the ranking pool: newest 200 files are outlined/parsed;
+            // in a bigger repo the long tail was never going to make the map.
+            files.truncate(200);
+
             // Persistent outline cache: a (mtime, size) hit skips the read
             // AND the tree-sitter parse — on big repos that's most of the
             // tool's cost across sessions.
             let mut cache = crate::outline_cache::OutlineCache::load(&root);
-            let mut out = String::new();
-            let mut included = 0;
-            for (_, path) in files.into_iter().take(max_files) {
+            let mut entries: Vec<(std::time::SystemTime, PathBuf, String, Vec<String>)> = Vec::new();
+            for (mtime, path) in files {
                 let Ok(meta) = std::fs::metadata(&path) else { continue };
-                let outline = match cache.get(&path, &meta) {
+                let (outline, imports) = match cache.get(&path, &meta) {
                     Some(hit) => hit,
                     None => {
                         let Ok(source) = std::fs::read_to_string(&path) else { continue };
                         let Ok(fresh) = crate::outline::outline_source(&path, &source) else { continue };
-                        cache.insert(&path, &meta, fresh.clone());
-                        fresh
+                        let imports = crate::outline::extract_imports(&path, &source);
+                        cache.insert(&path, &meta, fresh.clone(), imports.clone());
+                        (fresh, imports)
                     }
                 };
+                entries.push((mtime, path, outline, imports));
+            }
+            cache.save();
+
+            // Ranking v2 (docs/ROADMAP.md v0.8): centrality first, recency
+            // as tiebreak. A file's in-degree = how many sibling files
+            // import its stem — central modules make the map even when they
+            // weren't touched recently. Repos with no resolvable imports
+            // degrade to the old pure-recency order.
+            let mut in_degree: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+            for (_, _, _, imports) in &entries {
+                for import in imports {
+                    in_degree.entry(import.clone()).or_insert(0);
+                }
+            }
+            for (_, path, _, _) in &entries {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    let stem = stem.to_lowercase();
+                    let count = entries
+                        .iter()
+                        .filter(|(_, p, _, imports)| p != path && imports.contains(&stem))
+                        .count() as u32;
+                    in_degree.insert(stem, count);
+                }
+            }
+            entries.sort_by_key(|(mtime, path, _, _)| {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_default();
+                std::cmp::Reverse((in_degree.get(&stem).copied().unwrap_or(0), *mtime))
+            });
+
+            let mut out = String::new();
+            let mut included = 0;
+            for (_, path, outline, _) in entries.into_iter().take(max_files) {
                 let display = path.strip_prefix(&cwd).unwrap_or(&path);
                 out.push_str(&format!("=== {} ===\n{outline}\n", display.display()));
                 included += 1;
@@ -1190,10 +1248,9 @@ impl Tool for RepoMapTool {
                     break;
                 }
             }
-            cache.save();
             if total_found > included {
                 out.push_str(&format!(
-                    "[{included} of {total_found} source files shown, newest first; use outline for specific files]\n"
+                    "[{included} of {total_found} source files shown, most-imported first then newest; use outline for specific files]\n"
                 ));
             }
             Ok(out)
@@ -1305,6 +1362,65 @@ mod tests {
     // bash tool runs through cmd.exe on Windows, where this command would echo
     // a literal string and exit instead of timing out.
     #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_map_ranks_imported_modules_first() {
+        let dir = std::env::temp_dir().join(format!("rift-rmap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // core.py is imported by both others but has the OLDEST mtime —
+        // recency-only ranking would put it last; centrality puts it first.
+        std::fs::write(dir.join("core.py"), "def core_fn():\n    pass\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("a.py"), "import core\ndef a_fn():\n    pass\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("b.py"), "from core import core_fn\ndef b_fn():\n    pass\n").unwrap();
+
+        let ctx = ToolCtx::new(&dir);
+        let out = RepoMapTool.execute(&Map::new(), &ctx).await.unwrap();
+        let core_pos = out.find("core.py").expect("core.py in map");
+        let a_pos = out.find("a.py").expect("a.py in map");
+        let b_pos = out.find("b.py").expect("b.py in map");
+        assert!(core_pos < a_pos && core_pos < b_pos,
+            "imported module must rank first despite oldest mtime:\n{out}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_hydrates_large_source_files_unless_bounded() {
+        let dir = std::env::temp_dir().join(format!("rift-hydrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut src = String::from("def target_fn():\n    return 1\n");
+        for i in 0..600 {
+            src.push_str(&format!("# filler line {i}\n"));
+        }
+        std::fs::write(dir.join("big.py"), &src).unwrap();
+        let ctx = ToolCtx::new(&dir);
+
+        // Unbounded read of a big source file → outline + hint, not content.
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("big.py".into()));
+        let out = ReadTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("showing its outline"), "expected hydration: {out}");
+        assert!(out.contains("def target_fn()"));
+        assert!(!out.contains("filler line 42"), "raw content leaked: {out}");
+
+        // Explicit bounds always return the real lines.
+        args.insert("offset".into(), Value::from(3));
+        args.insert("limit".into(), Value::from(2));
+        let out = ReadTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("filler line 0"), "bounded read must be verbatim: {out}");
+
+        // Small files never hydrate.
+        std::fs::write(dir.join("small.py"), "def tiny():\n    return 2\n").unwrap();
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("small.py".into()));
+        let out = ReadTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("return 2"), "small file must read verbatim: {out}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn bash_timeout_returns_partial_output() {
         let ctx = ToolCtx::new(std::env::temp_dir());
