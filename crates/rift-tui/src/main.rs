@@ -359,15 +359,22 @@ async fn main() -> Result<()> {
     };
     let (store, resumed_messages) = match resume_path {
         Some(path) => {
-            let saved = SessionStore::load(&path)?;
-            // Keep the freshly composed system prompt (cwd may have changed).
-            let mut messages = saved.messages;
+            // Lenient on purpose: /restart resumes a session that may not
+            // have saved a turn yet (files are reserved empty at startup),
+            // and a corrupt autosave must not brick startup.
+            let (store, mut messages, notice) = SessionStore::resume(path);
+            if let Some(n) = notice {
+                eprintln!("{n}");
+            }
             if messages.first().is_some_and(|m| m.role == rift_ollama::Role::System) {
+                // Keep the freshly composed system prompt (cwd may have changed).
                 messages[0] = agent.messages[0].clone();
             }
-            agent.messages = messages.clone();
-            eprintln!("resumed session {} ({} messages)", path.display(), messages.len());
-            (SessionStore::at(path), messages)
+            if !messages.is_empty() {
+                agent.messages = messages.clone();
+                eprintln!("resumed session {} ({} messages)", store.path().display(), messages.len());
+            }
+            (store, messages)
         }
         None => (SessionStore::create()?, vec![]),
     };

@@ -157,6 +157,51 @@ impl SessionStore {
         Ok(saved)
     }
 
+    /// Resume a session file leniently — the `/restart` and `-c` path.
+    /// Session files are reserved EMPTY at startup and only written after
+    /// the first turn, so resuming a zero-turn session is normal, not an
+    /// error: it continues fresh at the same path. A corrupt file is backed
+    /// up (never silently overwritten) and the session starts fresh too —
+    /// a chat tool must not brick its own startup on a bad autosave.
+    /// Returns (store, recovered messages, optional user-facing notice).
+    pub fn resume(path: PathBuf) -> (Self, Vec<Message>, Option<String>) {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => {
+                return (
+                    Self { path },
+                    vec![],
+                    Some("session file not found — starting fresh".into()),
+                )
+            }
+        };
+        if text.trim().is_empty() {
+            return (
+                Self { path },
+                vec![],
+                Some("session has no saved turns yet — starting fresh".into()),
+            );
+        }
+        match serde_json::from_str::<SavedSession>(&text) {
+            Ok(mut saved) => {
+                normalize_tool_call_ids(&mut saved.messages);
+                (Self { path }, saved.messages, None)
+            }
+            Err(e) => {
+                let backup = path.with_extension("json.corrupt");
+                let note = match std::fs::rename(&path, &backup) {
+                    Ok(()) => format!("original kept at {}", backup.display()),
+                    Err(_) => "original left in place; the next turn will overwrite it".into(),
+                };
+                let warning = format!(
+                    "warning: session {} is unreadable ({e}); starting fresh — {note}",
+                    path.display()
+                );
+                (Self { path }, vec![], Some(warning))
+            }
+        }
+    }
+
     /// Give this session a friendly name: future autosaves go to `<name>.json`
     /// and the old (usually timestamped) file is removed. Returns the new path.
     pub fn save_as(&mut self, name: &str, model: &str, cwd: &str, messages: &[Message]) -> Result<PathBuf> {
@@ -234,6 +279,49 @@ mod tests {
         // Each result answers the call with the matching name.
         assert_eq!(messages[3].tool_call_id.as_deref(), Some(ids[0].as_str()));
         assert_eq!(messages[4].tool_call_id.as_deref(), Some(ids[1].as_str()));
+    }
+
+    #[test]
+    fn resume_is_lenient_on_empty_missing_and_corrupt_files() {
+        let dir = std::env::temp_dir().join(format!("rift-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Empty file — the exact /restart-before-first-turn shape (session
+        // files are reserved empty at startup). Must resume fresh, not die
+        // with "EOF while parsing a value".
+        let empty = dir.join("empty.json");
+        std::fs::write(&empty, "").unwrap();
+        let (store, messages, notice) = SessionStore::resume(empty.clone());
+        assert_eq!(store.path(), empty.as_path());
+        assert!(messages.is_empty());
+        assert!(notice.unwrap().contains("no saved turns"));
+
+        // Missing file — fresh at the same path.
+        let missing = dir.join("missing.json");
+        let (_, messages, notice) = SessionStore::resume(missing);
+        assert!(messages.is_empty());
+        assert!(notice.unwrap().contains("not found"));
+
+        // Corrupt file — backed up, never silently overwritten.
+        let corrupt = dir.join("corrupt.json");
+        std::fs::write(&corrupt, "{definitely not json").unwrap();
+        let (store, messages, notice) = SessionStore::resume(corrupt.clone());
+        assert!(messages.is_empty());
+        assert!(notice.unwrap().contains("unreadable"));
+        assert_eq!(store.path(), corrupt.as_path());
+        let backup = corrupt.with_extension("json.corrupt");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{definitely not json");
+        assert!(!corrupt.exists(), "corrupt original moved aside");
+
+        // A valid file round-trips with no notice.
+        let good = dir.join("good.json");
+        let store = SessionStore::at(good.clone());
+        store.save("m", "/tmp", &[Message::user("hello")]).unwrap();
+        let (_, messages, notice) = SessionStore::resume(good);
+        assert_eq!(messages.len(), 1);
+        assert!(notice.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
