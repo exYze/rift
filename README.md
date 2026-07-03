@@ -104,6 +104,8 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/sessions [n]` | interactive session picker, or resume the nth directly |
 | `/skills` · `/skill:<name> [task]` | list packaged skills, or run one |
 | `/skills new [--global] <desc>` · `/mcp new [--global] <desc>` | the agent builds its own extensions: writes a skill file, or writes + self-tests a local MCP server and registers it (trust-gated). Default is project-scoped (`.rift/`, this repo only); `--global` installs user-wide (`~/.config/rift/`, every project) — `/restart` loads them |
+| `/goal <condition>` | keep working until the model verifies the goal is met — turns auto-continue (up to 25) until a verified `GOAL MET`; `/goal clear` or Esc stops, bare `/goal` shows status |
+| `/loop [30s\|5m\|2h] <prompt or /command>` | re-run a prompt on an interval (or back-to-back without one); `/loop stop` or Esc ends it |
 | `/plan [clear]` | the agent's task checklist (also pinned live in the activity pane) |
 | `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, deny list + approval state |
 | `/swarm <task> [--models a,b] [--judge m] [--explore]` | WarpDrive race without leaving the chat — models may span providers; the optional judge scores the diffs and recommends a winner |

@@ -84,9 +84,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/copy", "[all|log]", "copy last reply / whole transcript / activity log"),
     ("/diff", "", "git diff of the working tree"),
     ("/export", "", "save the transcript as markdown"),
+    ("/goal", "<condition>|clear", "work until the model verifies the goal is met (auto-continues turns)"),
     ("/help", "", "list commands and keys"),
     ("/host", "[url]", "show or switch the Ollama server"),
     ("/init", "", "generate a RIFT.md project guide"),
+    ("/loop", "[30s|5m|2h] <prompt>|stop", "re-run a prompt or /command on an interval (or back-to-back)"),
     ("/mcp", "[new [--global] <desc>|trust <name>]", "list MCP servers, generate one (project or user-wide), manage trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
@@ -173,6 +175,9 @@ pub async fn run_command(
         "/ctx" => cmd_ctx(rest, agent, fx),
         "/save" => cmd_save(rest, agent, cx, fx),
         "/worktrees" => cmd_worktrees(cx, fx).await,
+        // Handled in the chat input (they drive the UI's turn scheduling);
+        // reachable here only via odd nesting like a /loop body.
+        "/goal" | "/loop" => Err(anyhow!("{cmd} runs from the chat input directly")),
         other => Err(anyhow!("unknown command '{other}' — /help lists available commands")),
     };
     let status = match result {

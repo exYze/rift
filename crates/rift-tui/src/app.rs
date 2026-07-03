@@ -692,6 +692,33 @@ mod tests {
     }
 
     #[test]
+    fn interval_parses_units_and_rejects_junk() {
+        assert_eq!(parse_interval("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_interval("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_interval("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(parse_interval("45"), Some(Duration::from_secs(45)));
+        assert_eq!(parse_interval("0s"), None);
+        assert_eq!(parse_interval("m"), None);
+        assert_eq!(parse_interval(""), None);
+        assert_eq!(parse_interval("soon"), None);
+        assert_eq!(parse_interval("5x"), None);
+
+        assert_eq!(fmt_interval(Duration::from_secs(90)), "90s");
+        assert_eq!(fmt_interval(Duration::from_secs(300)), "5m");
+        assert_eq!(fmt_interval(Duration::from_secs(7200)), "2h");
+    }
+
+    #[test]
+    fn goal_met_is_line_anchored() {
+        assert!(goal_met("All tests pass.\nGOAL MET — 42/42 green"));
+        assert!(goal_met("  GOAL MET: verified with cargo test"));
+        // Mentions mid-sentence (echoing the instruction) don't count.
+        assert!(!goal_met("I will write GOAL MET once the suite is green."));
+        assert!(!goal_met("still two failures — not done yet"));
+        assert!(!goal_met(""));
+    }
+
+    #[test]
     fn scope_flag_parses_and_placements_differ() {
         assert_eq!(parse_scope_flag(" make coffee"), (false, "make coffee".into()));
         assert_eq!(parse_scope_flag(" --global make coffee"), (true, "make coffee".into()));
@@ -897,6 +924,16 @@ struct App {
     /// Set by /restart: after teardown, main relaunches the (possibly
     /// updated) binary resuming this session.
     restart: bool,
+    /// /goal: completion condition; turns auto-continue until the model
+    /// verifies it (GOAL MET line) or the run cap / /goal clear stops it.
+    goal: Option<GoalState>,
+    /// /loop: recurring prompt/command, fixed interval or back-to-back.
+    loop_state: Option<LoopState>,
+    /// Auto-submission queued by goal/loop logic; the main loop (which owns
+    /// prompt_tx) picks it up when the agent is idle.
+    pending_auto: Option<String>,
+    /// Assistant text accumulated over the current turn (goal-met check).
+    turn_reply: String,
     /// Selected row in the slash-command palette popup.
     palette_idx: usize,
     /// Popup dismissed with Esc; cleared on the next input change.
@@ -963,6 +1000,10 @@ impl App {
             cancel: None,
             quit: false,
             restart: false,
+            goal: None,
+            loop_state: None,
+            pending_auto: None,
+            turn_reply: String::new(),
             palette_idx: 0,
             palette_off: false,
             mouse_capture: true,
@@ -1149,11 +1190,17 @@ impl App {
     fn handle_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::Iteration(i) => {
+                if i == 1 {
+                    self.turn_reply.clear();
+                }
                 self.log.push_block(Kind::Info, format!("· step {i}"));
                 self.status = format!("step {i} — waiting for {}…", self.model);
             }
             AgentEvent::Thinking(t) => self.transcript.append_stream(Kind::Thinking, &t),
-            AgentEvent::Content(c) => self.transcript.append_stream(Kind::Assistant, &c),
+            AgentEvent::Content(c) => {
+                self.turn_reply.push_str(&c);
+                self.transcript.append_stream(Kind::Assistant, &c);
+            }
             AgentEvent::ToolStart { name, args } => {
                 self.session_stats.tool_calls += 1;
                 let args: String = args.chars().take(160).collect();
@@ -1181,6 +1228,8 @@ impl App {
                 self.transcript.push_block(Kind::Warn, format!("! {w}"));
             }
             AgentEvent::Done(stats) => {
+                // idle() clears the cancel token — read it first.
+                let cancelled = self.cancel.as_ref().is_some_and(|c| c.is_cancelled());
                 self.idle();
                 // Catch changes made via bash (git checkout, formatters…) too.
                 self.diff_stale = true;
@@ -1197,7 +1246,60 @@ impl App {
                     "done — {} steps · {} prompt tok · {} out tok · {:.1} tok/s",
                     stats.iterations, stats.prompt_tokens, stats.output_tokens, stats.tokens_per_sec
                 );
+                self.after_turn(cancelled, stats.iterations > 0);
             }
+        }
+    }
+
+    /// Post-turn /goal and /loop bookkeeping. `ran` is false when the turn
+    /// errored out before a single model step (don't auto-continue into a
+    /// tight error loop).
+    fn after_turn(&mut self, cancelled: bool, ran: bool) {
+        if cancelled {
+            // Esc is the escape hatch from auto-continuation — always honor it.
+            self.pending_auto = None;
+            if let Some(g) = self.goal.take() {
+                self.transcript
+                    .push_block(Kind::Info, format!("◎ goal cancelled — /goal {} resumes it", g.condition));
+            }
+            if self.loop_state.take().is_some() {
+                self.transcript.push_block(Kind::Info, "↻ loop stopped".into());
+            }
+            return;
+        }
+        if let Some(mut goal) = self.goal.take() {
+            if goal_met(&self.turn_reply) {
+                self.transcript
+                    .push_block(Kind::Info, format!("◎ goal met after {} turn(s): {}", goal.runs, goal.condition));
+                self.status = "◎ goal met".into();
+            } else if !ran {
+                self.transcript.push_block(
+                    Kind::Warn,
+                    format!("! goal paused — the turn failed; /goal {} resumes it", goal.condition),
+                );
+            } else if goal.runs >= GOAL_MAX_RUNS {
+                self.transcript.push_block(
+                    Kind::Warn,
+                    format!(
+                        "! goal not met after {GOAL_MAX_RUNS} turns — stopping; /goal {} resumes it",
+                        goal.condition
+                    ),
+                );
+            } else {
+                goal.runs += 1;
+                self.transcript.push_block(
+                    Kind::Info,
+                    format!("◎ goal not met — continuing (turn {}/{GOAL_MAX_RUNS}) · Esc or /goal clear stops", goal.runs),
+                );
+                self.pending_auto = Some(goal_continuation(&goal.condition));
+                self.goal = Some(goal);
+            }
+        }
+        // A failing back-to-back loop would spin on the error; interval
+        // loops ride out one bad run.
+        if !ran && self.loop_state.as_ref().is_some_and(|l| l.every.is_none()) {
+            self.loop_state = None;
+            self.transcript.push_block(Kind::Warn, "! loop stopped — the last run failed".into());
         }
     }
 
@@ -1598,6 +1700,76 @@ fn head_of(content: &str) -> String {
 /// The `/init` command body — a normal agent turn with a canned prompt.
 const INIT_PROMPT: &str = "Explore this repository (use repo_map and outline to stay cheap; read key files only as needed) and write a RIFT.md file at the project root: a concise guide for AI coding agents working here. Cover: what the project does, how the code is laid out, how to build/test/run it, and any conventions or gotchas you noticed. Keep it under 60 lines.";
 
+/// /goal auto-continuation cap — the backstop against a condition the model
+/// can never verify. /goal again resumes where it stopped.
+const GOAL_MAX_RUNS: u32 = 25;
+/// /loop run cap — a week of half-hourly runs; /loop again re-arms.
+const LOOP_MAX_RUNS: u32 = 336;
+
+struct GoalState {
+    condition: String,
+    runs: u32,
+}
+
+struct LoopState {
+    /// The prompt (or /command) to fire each round.
+    body: String,
+    /// None = back-to-back: the next run fires as soon as one finishes.
+    every: Option<Duration>,
+    next_at: Instant,
+    runs: u32,
+}
+
+fn goal_initial(condition: &str) -> String {
+    format!(
+        "GOAL: {condition}\n\nWork toward this goal now. When — and only when — the goal is \
+         fully met and you have VERIFIED it, include a line starting with GOAL MET in your \
+         reply plus a one-line summary. If you cannot verify it yet, keep working instead of \
+         claiming it."
+    )
+}
+
+fn goal_continuation(condition: &str) -> String {
+    format!(
+        "[goal check] The session goal is not yet confirmed met:\n{condition}\n\nContinue \
+         working toward it. When it is fully met and VERIFIED, include a line starting with \
+         GOAL MET in your reply. Never write GOAL MET without having verified the condition \
+         this turn."
+    )
+}
+
+/// Did the model declare (line-anchored, to dodge instruction echoes) that
+/// the goal is met?
+fn goal_met(reply: &str) -> bool {
+    reply.lines().any(|l| l.trim_start().starts_with("GOAL MET"))
+}
+
+/// `30s` / `5m` / `2h` / bare seconds → Duration.
+fn parse_interval(tok: &str) -> Option<Duration> {
+    let (num, unit) = match tok.chars().last()? {
+        c @ ('s' | 'm' | 'h') => (&tok[..tok.len() - 1], c),
+        c if c.is_ascii_digit() => (tok, 's'),
+        _ => return None,
+    };
+    let n: u64 = num.parse().ok().filter(|n| *n > 0)?;
+    Some(Duration::from_secs(match unit {
+        'm' => n * 60,
+        'h' => n * 3600,
+        _ => n,
+    }))
+}
+
+fn fmt_interval(d: Duration) -> String {
+    let s = d.as_secs();
+    if s.is_multiple_of(3600) {
+        format!("{}h", s / 3600)
+    } else if s.is_multiple_of(60) {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
 /// `--global` (or `-g`) as the first word of a generator command targets the
 /// user-wide config; default is project scope. Returns (global, description).
 fn parse_scope_flag(rest: &str) -> (bool, String) {
@@ -1878,6 +2050,47 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     last_tick = Instant::now();
                     needs_redraw = true;
                 }
+                if !app.busy && app.picker.is_none() && app.answering.is_none() {
+                    // Fire a due /loop round (queued like any auto turn).
+                    if app.pending_auto.is_none() {
+                        if let Some(ls) = app.loop_state.as_mut() {
+                            if Instant::now() >= ls.next_at {
+                                if ls.runs >= LOOP_MAX_RUNS {
+                                    app.loop_state = None;
+                                    app.transcript
+                                        .push_block(Kind::Warn, format!("! loop stopped after {LOOP_MAX_RUNS} runs"));
+                                } else {
+                                    ls.runs += 1;
+                                    let n = ls.runs;
+                                    // Reschedule from fire time — a slow run
+                                    // never causes a burst of catch-up rounds.
+                                    ls.next_at = Instant::now() + ls.every.unwrap_or(Duration::ZERO);
+                                    let body = ls.body.clone();
+                                    app.transcript
+                                        .push_block(Kind::Info, format!("↻ loop run {n}: {body}"));
+                                    app.pending_auto = Some(body);
+                                }
+                                needs_redraw = true;
+                            }
+                        }
+                    }
+                    // Submit a queued goal/loop turn now that the agent is idle.
+                    if let Some(text) = app.pending_auto.take() {
+                        app.busy = true;
+                        app.turn_started = Some(Instant::now());
+                        app.transcript.scroll_from_bottom = 0;
+                        let cancel = CancellationToken::new();
+                        app.cancel = Some(cancel.clone());
+                        if text.starts_with('/') {
+                            app.status = "running command…".into();
+                            let _ = prompt_tx.send(UiMsg::Command(text, cancel));
+                        } else {
+                            app.status = "auto turn — sending…".into();
+                            let _ = prompt_tx.send(UiMsg::Prompt(text, cancel));
+                        }
+                        needs_redraw = true;
+                    }
+                }
                 continue;
             }
             // Only state-changing events trigger a redraw — mouse capture
@@ -2052,6 +2265,19 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 cancel.cancel();
                                 app.status = "cancelling…".into();
                             }
+                        } else if app.goal.is_some() || app.loop_state.is_some() {
+                            // Idle between auto turns: Esc stops the automation
+                            // (during a turn, the cancel above reaches the same
+                            // cleanup via the Done handler).
+                            app.pending_auto = None;
+                            if let Some(g) = app.goal.take() {
+                                app.transcript
+                                    .push_block(Kind::Info, format!("◎ goal cancelled — /goal {} resumes it", g.condition));
+                            }
+                            if app.loop_state.take().is_some() {
+                                app.transcript.push_block(Kind::Info, "↻ loop stopped".into());
+                            }
+                            app.status = "goal/loop stopped".into();
                         } else {
                             app.focused_pane().scroll_from_bottom = 0;
                         }
@@ -2250,6 +2476,106 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                     app.transcript.push_block(
                                         Kind::Warn,
                                         format!("! unknown theme '{arg}' — available: {}", theme::names().join(", ")),
+                                    );
+                                }
+                            } else if trimmed == "/goal" || trimmed.starts_with("/goal ") {
+                                // Completion-condition mode: the turn starts now
+                                // and auto-continues until the model verifies
+                                // the goal (GOAL MET line) or a stop.
+                                let arg = trimmed.strip_prefix("/goal").unwrap_or_default().trim().to_string();
+                                match arg.as_str() {
+                                    "" => {
+                                        app.idle();
+                                        match &app.goal {
+                                            Some(g) => app.transcript.push_block(
+                                                Kind::Info,
+                                                format!(
+                                                    "◎ goal active (turn {}/{GOAL_MAX_RUNS}): {}\nEsc or /goal clear stops it",
+                                                    g.runs, g.condition
+                                                ),
+                                            ),
+                                            None => app.transcript.push_block(
+                                                Kind::Info,
+                                                "no active goal — /goal <condition> keeps the agent working until the model verifies it's met".into(),
+                                            ),
+                                        }
+                                    }
+                                    "clear" | "stop" | "off" => {
+                                        app.idle();
+                                        app.pending_auto = None;
+                                        match app.goal.take() {
+                                            Some(g) => app
+                                                .transcript
+                                                .push_block(Kind::Info, format!("◎ goal cleared: {}", g.condition)),
+                                            None => app.transcript.push_block(Kind::Info, "no active goal".into()),
+                                        }
+                                    }
+                                    _ => {
+                                        app.goal = Some(GoalState { condition: arg.clone(), runs: 1 });
+                                        app.status = format!(
+                                            "◎ goal set — auto-continues up to {GOAL_MAX_RUNS} turns · Esc or /goal clear stops"
+                                        );
+                                        let _ = prompt_tx.send(UiMsg::Prompt(goal_initial(&arg), cancel));
+                                    }
+                                }
+                            } else if trimmed == "/loop" || trimmed.starts_with("/loop ") {
+                                // Recurring prompt: /loop [30s|5m|2h] <prompt or /command>.
+                                // No interval = back-to-back. Fires from the
+                                // idle tick; /loop stop or Esc ends it.
+                                app.idle();
+                                let arg = trimmed.strip_prefix("/loop").unwrap_or_default().trim();
+                                if arg.is_empty() {
+                                    match &app.loop_state {
+                                        Some(l) => app.transcript.push_block(
+                                            Kind::Info,
+                                            format!(
+                                                "↻ loop active ({}, run {}/{LOOP_MAX_RUNS}): {}\nEsc or /loop stop ends it",
+                                                l.every.map(|d| format!("every {}", fmt_interval(d)))
+                                                    .unwrap_or_else(|| "back-to-back".into()),
+                                                l.runs,
+                                                l.body
+                                            ),
+                                        ),
+                                        None => app.transcript.push_block(
+                                            Kind::Info,
+                                            "no active loop — usage: /loop [30s|5m|2h] <prompt or /command>".into(),
+                                        ),
+                                    }
+                                } else if matches!(arg, "stop" | "clear" | "off") {
+                                    app.pending_auto = None;
+                                    match app.loop_state.take() {
+                                        Some(l) => app
+                                            .transcript
+                                            .push_block(Kind::Info, format!("↻ loop stopped after {} run(s)", l.runs)),
+                                        None => app.transcript.push_block(Kind::Info, "no active loop".into()),
+                                    }
+                                } else if parse_interval(arg).is_some() {
+                                    // A bare interval with nothing to run.
+                                    app.transcript.push_block(
+                                        Kind::Warn,
+                                        "! usage: /loop [30s|5m|2h] <prompt or /command>".into(),
+                                    );
+                                } else {
+                                    let (every, body) = match arg.split_once(char::is_whitespace) {
+                                        Some((first, rest)) if parse_interval(first).is_some() => {
+                                            (parse_interval(first), rest.trim().to_string())
+                                        }
+                                        _ => (None, arg.to_string()),
+                                    };
+                                    app.loop_state = Some(LoopState {
+                                        body,
+                                        every,
+                                        next_at: Instant::now(),
+                                        runs: 0,
+                                    });
+                                    app.transcript.push_block(
+                                        Kind::Info,
+                                        format!(
+                                            "↻ loop armed ({}) — first run starts now · Esc or /loop stop ends it",
+                                            every
+                                                .map(|d| format!("every {}", fmt_interval(d)))
+                                                .unwrap_or_else(|| "back-to-back".into())
+                                        ),
                                     );
                                 }
                             } else if trimmed == "/quit" {
