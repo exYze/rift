@@ -7,3 +7,6 @@ __pycache__/
 *.pyc
 # Per-turn JSONL traces from bench runs — local analysis corpus, not history.
 bench/traces/
+# SWE-bench working data: repo clones, worktrees, predictions, eval logs.
+bench/swebench/
+logs/
