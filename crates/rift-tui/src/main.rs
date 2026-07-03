@@ -174,7 +174,10 @@ async fn main() -> Result<()> {
     let max_iterations = cli.max_iterations.or(config.max_iterations).unwrap_or(25);
 
     // A `provider/model` string routes through a configured provider; otherwise
-    // the default Ollama server at `host`. `model` becomes the bare model name.
+    // the default Ollama server at `host`. `model` becomes the bare model name;
+    // the addressable form (prefix intact) is what /model, /restart and the
+    // status line carry.
+    let model_addr = model.clone();
     let (client, model) = build_provider(&model, &host, &config.providers);
 
     // Subcommands bypass the single-model preflight (swarm preflights each
@@ -385,10 +388,10 @@ async fn main() -> Result<()> {
             run_headless(agent, prompt, store, rates).await
         }
         None => {
-            app::run_tui(
+            let restart = app::run_tui(
                 agent,
                 app::TuiOptions {
-                    model,
+                    model: model_addr,
                     store,
                     resumed: resumed_messages,
                     mcp: mcp_status,
@@ -401,8 +404,38 @@ async fn main() -> Result<()> {
                     theme: ui_theme,
                 },
             )
-            .await
+            .await?;
+            match restart {
+                Some(spec) => restart_process(spec),
+                None => Ok(()),
+            }
         }
+    }
+}
+
+/// The tail end of /restart: relaunch the (possibly just-updated) binary
+/// resuming the same session. A true exec on Unix (same PID and terminal);
+/// spawn-and-wait elsewhere so the shell keeps normal job semantics.
+fn restart_process(spec: app::RestartSpec) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    eprintln!("restarting rift — resuming {}", spec.session.display());
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--host")
+        .arg(&spec.host)
+        .arg("--model")
+        .arg(&spec.model)
+        .arg("--resume")
+        .arg(&spec.session);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec only returns on failure.
+        Err(anyhow::anyhow!("restart failed: {}", cmd.exec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd.status()?;
+        std::process::exit(status.code().unwrap_or(0));
     }
 }
 

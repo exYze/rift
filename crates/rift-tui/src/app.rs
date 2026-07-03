@@ -866,6 +866,9 @@ struct App {
     status: String,
     cancel: Option<CancellationToken>,
     quit: bool,
+    /// Set by /restart: after teardown, main relaunches the (possibly
+    /// updated) binary resuming this session.
+    restart: bool,
     /// Selected row in the slash-command palette popup.
     palette_idx: usize,
     /// Popup dismissed with Esc; cleared on the next input change.
@@ -931,6 +934,7 @@ impl App {
             status: "Enter send · /help commands · Ctrl+T select/copy · Ctrl+L log · Esc cancel · /quit exit".into(),
             cancel: None,
             quit: false,
+            restart: false,
             palette_idx: 0,
             palette_off: false,
             mouse_capture: true,
@@ -1181,6 +1185,10 @@ impl App {
             }
             UiEffect::Out(kind, text) => self.transcript.push_block(kind, text),
             UiEffect::Log(kind, text) => self.log.push_block(kind, text),
+            UiEffect::Restart => {
+                self.restart = true;
+                self.quit = true;
+            }
             UiEffect::Diff(text) => {
                 for line in text.lines() {
                     self.transcript.push_line(diff_kind(line), line.to_string());
@@ -1579,7 +1587,15 @@ pub struct TuiOptions {
     pub theme: &'static theme::Theme,
 }
 
-pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
+/// How to relaunch after /restart: the addressable model name (provider
+/// prefix intact), the server, and the exact session file to resume.
+pub struct RestartSpec {
+    pub model: String,
+    pub host: String,
+    pub session: std::path::PathBuf,
+}
+
+pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpec>> {
     let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, providers, pricing, theme } = opts;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
@@ -1600,6 +1616,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
 
     let cwd = std::env::current_dir()?;
     let cwd_ui = cwd.clone();
+    // Captured for /restart before the store/host move into the agent task.
+    let restart_session = store.path().to_path_buf();
+    let restart_host = host.clone();
     // UI-side effect sender: for commands the UI handles itself (/copy log).
     let fx_ui = fx_tx.clone();
     let agent_task = tokio::spawn(async move {
@@ -2092,6 +2111,18 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
                                 }
                             } else if trimmed == "/quit" {
                                 app.quit = true;
+                            } else if trimmed == "/restart" {
+                                // Relaunch the binary and resume this exact
+                                // session — the post-/update path that keeps
+                                // the chat. Sessions save after every turn, so
+                                // nothing is lost. (A truly running turn never
+                                // reaches this chain — submissions are blocked
+                                // while busy — so no guard is needed; busy was
+                                // just set for THIS submission by the shared
+                                // path above.)
+                                app.idle();
+                                app.restart = true;
+                                app.quit = true;
                             } else if trimmed == "/retry" {
                                 if let Some(p) = app.last_prompt.clone() {
                                     app.status = "retrying…".into();
@@ -2303,5 +2334,11 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<()> {
     let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     agent_task.abort();
-    result
+    result.map(|()| {
+        app.restart.then(|| RestartSpec {
+            model: app.model.clone(),
+            host: restart_host,
+            session: restart_session,
+        })
+    })
 }

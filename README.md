@@ -110,6 +110,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/undo` | revert the last turn's write/edit changes |
 | `/diff` | colored git diff of the working tree |
 | `/init` | generate a RIFT.md project guide for agents |
+| `/restart` | relaunch rift and resume this session — pick up a fresh `/update` without losing your chat |
 | `/host [url]` | show or switch the Ollama server |
 | `/think [on\|off\|auto]` | thinking mode (capability-checked) |
 | `/export` | save the transcript as markdown |

@@ -44,6 +44,8 @@ pub enum UiEffect {
     Seed(Vec<Message>),
     /// Model name changed; update the status bar.
     Model(String),
+    /// /restart: tear down the TUI and relaunch resuming this session.
+    Restart,
     /// Replace the pinned plan checklist (e.g. /plan clear).
     Plan(Vec<rift_core::PlanItem>),
     /// Suspend the TUI, open the file in $EDITOR, then hot-reload config.
@@ -106,6 +108,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/quit", "", "exit rift"),
     ("/tools", "", "tools the model can call (builtin + MCP)"),
     ("/undo", "", "revert last turn's write/edit changes"),
+    ("/restart", "", "relaunch rift and resume this session (loads updates)"),
     ("/update", "", "update rift to the latest release"),
 ];
 
@@ -157,6 +160,10 @@ pub async fn run_command(
         "/merge" => cmd_merge(rest, cx, fx).await,
         "/undo" => cmd_undo(agent, fx),
         "/update" => cmd_update(fx, cancel).await,
+        "/restart" => {
+            let _ = fx.send(UiEffect::Restart);
+            Ok("restarting…".into())
+        }
         "/diff" => cmd_diff(cx, fx).await,
         "/host" => cmd_host(rest, agent, cx, fx, cancel).await,
         "/think" => cmd_think(rest, agent, fx).await,
@@ -231,7 +238,9 @@ async fn cmd_model(
     }
     agent.cfg.model = actual.clone();
     agent.set_client(client);
-    let _ = fx.send(UiEffect::Model(actual));
+    // The UI carries the ADDRESSABLE name (provider prefix intact) — it's
+    // what /restart relaunches with and what the status line shows.
+    let _ = fx.send(UiEffect::Model(arg.to_string()));
     let _ = fx.send(UiEffect::Out(Kind::Info, format!("switched to {arg}{note}")));
     Ok(format!("model: {arg}"))
 }
@@ -879,7 +888,11 @@ async fn cmd_update(fx: &UnboundedSender<UiEffect>, cancel: &CancellationToken) 
         _ = cancel.cancelled() => bail!("cancelled"),
         r = crate::update::self_update(env!("CARGO_PKG_VERSION")) => r?,
     };
-    let note = if msg.starts_with("updated") { "\nrestart rift to use the new version" } else { "" };
+    let note = if msg.starts_with("updated") {
+        "\nrun /restart to load the new version — your chat resumes automatically"
+    } else {
+        ""
+    };
     let _ = fx.send(UiEffect::Out(Kind::Info, format!("{msg}{note}")));
     Ok(msg)
 }
