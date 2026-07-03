@@ -3,6 +3,14 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v0.9.3 — 2026-07-03
+
+- Fix: `/restart` before the first turn crashed the relaunch ("EOF while
+  parsing a value") — session files are reserved empty at startup and
+  resume now handles that (and missing/corrupt files, which back up to
+  `.json.corrupt`) gracefully instead of failing startup. Also fixes the
+  latent `rift -c` crash after quitting an unused session
+
 ## v0.9.2 — 2026-07-03
 
 - **`/restart`**: relaunch rift and resume the exact session in place —
