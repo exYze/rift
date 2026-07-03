@@ -3,6 +3,22 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v0.9.0 — 2026-07-02 · v0.8 phase complete: context engine v2
+
+- **Hydrate-on-demand reads**: an unbounded `read` of a 500+ line source
+  file returns its line-numbered outline instead of a 2000-line dump; the
+  model then fetches exact ranges (offset/limit always verbatim). Measured
+  on the hard tier: **−18.4% prompt tokens** suite-wide, −66% on the
+  buried-bug big-module task, pass rate held (docs/BENCHMARKS.md)
+- **Repo-map centrality ranking**: files ranked by import in-degree first,
+  recency as tiebreak — central modules make the map even when untouched;
+  falls back to pure recency when no imports resolve. Imports cached
+  alongside outlines
+- Traces record each tool call's file/pattern target (data for future
+  retrieval tuning)
+- `bench.py --runs N` (per-run pass counts + flaky-task list) and
+  `RIFT_BIN` override for old-vs-new binary A/Bs
+
 ## v0.8.1 — 2026-07-02
 
 - **Persistent outline cache**: repo_map outlines cached per repo root

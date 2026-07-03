@@ -166,6 +166,34 @@ data point, not a leaderboard. `bench/judge_bench.py --dir tasks2` runs
 the same protocol on the hard tier, where discriminative cases should be
 more frequent.
 
+## Hydrate-on-demand A/B (2026-07-02, hard tier, DGX Spark server)
+
+The v0.8 context-engine changes (hydrate-on-demand reads + repo-map
+centrality ranking) measured old-binary-vs-new on the hard-tier suite
+(`bench/tasks2/`, 10 tasks), gemma4:26b, single run each, wire-measured:
+
+| metric (10 hard tasks) | v0.8.1 (pre) | v0.8.2 (hydration) | delta |
+|---|---:|---:|---|
+| tasks solved | 10/10 | 10/10 | held |
+| prompt tokens (wire) | 1,179,613 | 962,372 | **−18.4%** |
+| output tokens | 47,586 | 44,423 | −6.6% |
+| wall time | 16.3 min | 14.4 min | −11.4% |
+
+Where it comes from: an unbounded `read` of a 500+ line source file now
+returns the line-numbered outline instead of a 2000-line dump, and the
+model then fetches exact ranges. On h09_bigmodule — one subtle bug in a
+1,575-line module — that took the task from 265k prompt tokens / 148s to
+89k / 90s (−66% tokens). Small-file tasks are unaffected by design;
+per-task numbers off the main diagonal move within normal run-to-run
+variance (single run per side — treat the suite total, not individual
+tasks, as the signal).
+
+Also notable: gemma4:26b went 10/10 on the hard tier in both runs — a
+model that scored 40/50 on the *standard* suite before the v0.7.2
+chat-only fixes (gemma prompt target + mutating-tool nudge). The hard
+tier currently differentiates efficiency more than pass rate; pass-rate
+headroom needs weaker models or harder tasks to show.
+
 ## Caveats (honest ones)
 
 - Small suite, single run per task, nondeterministic models: treat as directional, not a rigorous eval. Observed run-to-run variance on the same task was ~±30% tokens for opencode (40k–71k on t1).
