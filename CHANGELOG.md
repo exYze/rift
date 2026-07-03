@@ -3,6 +3,16 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v0.9.4 — 2026-07-03
+
+- **Self-extension**: `/skills new <desc>` — the agent writes its own skill
+  file from your description; `/mcp new <desc>` — the agent writes,
+  self-tests, and registers a local stdio MCP server (stdlib-only Python),
+  trust-gated like any project-config server. `/restart` loads either
+  without losing your chat
+- MCP client accepts the common bare-content-array `tools/call` result
+  shape instead of silently reading an empty string
+
 ## v0.9.3 — 2026-07-03
 
 - Fix: `/restart` before the first turn crashed the relaunch ("EOF while
