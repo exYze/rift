@@ -3,6 +3,18 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v0.9.1 — 2026-07-03
+
+- **Markdown rendering in the transcript**: `## headings` render bold in
+  the accent color, bullets become `•`, `inline code` and **bold** get
+  span colors — raw markdown from the model no longer displays as plain
+  text. Fence-tag coverage pinned by test (markdown/md/json/yaml/diff/…)
+- Prompts now ask models to put document/file-content answers in a
+  language-tagged fenced code block, so they render in the highlighted box
+- Explicit content requests ("do not use any tools", "in a code block")
+  no longer trip the apply-nudge, which could make the model discard the
+  requested content on its retry
+
 ## v0.9.0 — 2026-07-02 · v0.8 phase complete: context engine v2
 
 - **Hydrate-on-demand reads**: an unbounded `read` of a 500+ line source
