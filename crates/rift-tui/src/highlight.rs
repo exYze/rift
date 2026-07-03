@@ -75,3 +75,22 @@ impl BlockHighlighter {
 }
 
 pub(crate) use imp::BlockHighlighter;
+
+#[cfg(all(test, feature = "highlight"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn common_fence_tags_resolve_to_syntaxes() {
+        // The tags users actually type — a miss degrades to flat color, but
+        // these staples must highlight (markdown especially: "output this as
+        // markdown in a code block" is a common ask).
+        // (toml is a known gap in syntect's default set — flat color there.)
+        for lang in ["markdown", "md", "python", "rust", "json", "yaml", "diff", "sh", "html", "css", "sql"] {
+            assert!(
+                BlockHighlighter::new(lang, "base16-ocean.dark").is_some(),
+                "no syntax resolved for fence tag '{lang}'"
+            );
+        }
+    }
+}

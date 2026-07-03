@@ -258,7 +258,12 @@ impl Agent {
         let mut nudged_apply = false;
         let mut retried_greedy = false;
         let mut temp_override: Option<f64> = None;
-        let actionable_prompt = self.cfg.always_task || prompt_looks_actionable(user_input);
+        // An explicit content request ("...in a code block", "do not use any
+        // tools") disables the chat-only recovery machinery entirely — even
+        // for headless work items, an answer in chat IS the deliverable.
+        let chat_output = prompt_wants_chat_output(user_input);
+        let actionable_prompt =
+            !chat_output && (self.cfg.always_task || prompt_looks_actionable(user_input));
 
         let tools_overhead =
             compact::estimate_tokens(&serde_json::to_string(&tools).unwrap_or_default());
@@ -393,7 +398,7 @@ impl Agent {
                 // code) — either pure chat, or it explored with read-only
                 // tools and then "fixed" the task in its reply. Nudge once to
                 // apply for real.
-                if !used_mutating && !nudged_apply && (content_has_code || actionable_prompt) {
+                if !used_mutating && !nudged_apply && !chat_output && (content_has_code || actionable_prompt) {
                     nudged_apply = true;
                     stats.failures.apply_nudges += 1;
                     let _ = tx.send(AgentEvent::Warning(
@@ -402,8 +407,8 @@ impl Agent {
                     self.messages.push(Message::user(
                         "[system] You have not changed any project files this turn. \
                          If the request was to fix/implement something, apply it now using the edit/write \
-                         tools and verify the result. If the user only wanted an explanation, restate your \
-                         answer briefly without code.",
+                         tools and verify the result. If the user only wanted content or an explanation, \
+                         reply that your previous answer stands — do not rewrite or shorten it.",
                     ));
                     continue;
                 }
@@ -411,7 +416,7 @@ impl Agent {
                 // the chat-only attempt entirely and retry greedily — at
                 // temperature 0 the model reliably follows the tool-calling
                 // instructions. Headless/swarm only (no human to confuse).
-                if !used_tools && !retried_greedy && self.cfg.always_task {
+                if !used_tools && !retried_greedy && self.cfg.always_task && !chat_output {
                     retried_greedy = true;
                     nudged_apply = false;
                     stats.failures.greedy_retries += 1;
@@ -567,10 +572,33 @@ fn trace_target(args: &serde_json::Map<String, serde_json::Value>) -> Option<Str
     None
 }
 
+/// Did the user explicitly ask for the answer as chat content (a document,
+/// a code block, no tools)? Suppresses the apply-nudge: "Write a markdown
+/// cheatsheet, do not use any tools" must not get nudged into rewriting —
+/// the nudged retry tends to drop the requested content entirely.
+fn prompt_wants_chat_output(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    const OPT_OUT: &[&str] = &[
+        "do not use any tools",
+        "don't use any tools",
+        "do not use tools",
+        "don't use tools",
+        "without using tools",
+        "no tools",
+        "in a code block",
+        "in the chat",
+        "in your reply",
+    ];
+    OPT_OUT.iter().any(|s| p.contains(s))
+}
+
 /// Does the user's prompt ask for changes (vs. a question/explanation)?
 /// Drives the no-tools nudge — imprecise on purpose; a false positive just
 /// costs the model one short clarification round.
 fn prompt_looks_actionable(prompt: &str) -> bool {
+    if prompt_wants_chat_output(prompt) {
+        return false;
+    }
     let p = prompt.to_lowercase();
     const VERBS: &[&str] = &[
         "fix", "implement", "add ", "refactor", "rename", "create", "write ", "update",
@@ -603,6 +631,20 @@ fn preview(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_requests_suppress_the_apply_nudge() {
+        // Explicit chat-output requests must not count as actionable even
+        // when they contain actionable verbs ("write").
+        assert!(prompt_looks_actionable("Fix the bug in stats.py"));
+        assert!(prompt_looks_actionable("write a helper and add tests"));
+        assert!(!prompt_looks_actionable(
+            "Write a markdown cheatsheet. Do not use any tools."
+        ));
+        assert!(!prompt_looks_actionable("Show the config in a code block"));
+        assert!(prompt_wants_chat_output("reply in the chat, no tools"));
+        assert!(!prompt_wants_chat_output("fix the tests"));
+    }
 
     #[test]
     fn strips_leaked_template_tokens() {

@@ -41,6 +41,8 @@ use tokio_util::sync::CancellationToken;
 pub(crate) enum Kind {
     User,
     Assistant,
+    /// A markdown heading inside assistant text (`## …`) — bold accent.
+    Heading,
     Code,
     Thinking,
     Tool,
@@ -65,6 +67,7 @@ pub(crate) fn style_for(kind: Kind, t: &theme::Theme) -> Style {
     match kind {
         Kind::User => Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
         Kind::Assistant => Style::default(),
+        Kind::Heading => Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
         Kind::Code => Style::default().fg(t.code),
         Kind::Thinking => Style::default().fg(t.muted).add_modifier(Modifier::ITALIC),
         Kind::Tool => Style::default().fg(t.tool),
@@ -305,6 +308,31 @@ impl Pane {
                 let kind = block.kind;
                 if raw_line.is_empty() {
                     self.wrapped.push(WrappedLine::plain(kind, String::new()));
+                } else if kind == Kind::Assistant {
+                    // Lightweight markdown for assistant prose: headings get
+                    // the bold accent, bullets get •, `inline code` and
+                    // **bold** get span colors. Anything unmarked is plain.
+                    if let Some(text) = md_heading(raw_line) {
+                        for piece in textwrap::wrap(text, w) {
+                            self.wrapped.push(WrappedLine::plain(Kind::Heading, piece.into_owned()));
+                        }
+                    } else {
+                        let line = md_bullet(raw_line);
+                        if line.contains('`') || line.contains("**") {
+                            let spans = md_inline_spans(&line, t);
+                            for piece in wrap_spans(&spans, w) {
+                                self.wrapped.push(WrappedLine {
+                                    kind,
+                                    text: piece.iter().map(|(_, s)| s.as_str()).collect(),
+                                    spans: Some(piece),
+                                });
+                            }
+                        } else {
+                            for piece in textwrap::wrap(&line, w) {
+                                self.wrapped.push(WrappedLine::plain(kind, piece.into_owned()));
+                            }
+                        }
+                    }
                 } else if kind.hard_cut() {
                     let mut rest = raw_line;
                     loop {
@@ -448,6 +476,128 @@ fn cut_spans(spans: Vec<(Color, String)>, width: usize, indent: &str) -> Vec<Vec
     out
 }
 
+/// `## Heading` → `Heading` (1-6 hashes followed by a space). Anything else
+/// — including `#hashtag` and shebang-looking lines — is not a heading.
+fn md_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
+    if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+        Some(trimmed[hashes + 1..].trim_start())
+    } else {
+        None
+    }
+}
+
+/// `- item` / `* item` → `• item`, preserving leading indent.
+fn md_bullet(line: &str) -> String {
+    let indent_len = line.len() - line.trim_start().len();
+    let rest = &line[indent_len..];
+    for marker in ["- ", "* "] {
+        if let Some(item) = rest.strip_prefix(marker) {
+            return format!("{}• {}", &line[..indent_len], item);
+        }
+    }
+    line.to_string()
+}
+
+/// Split one line into colored spans: `` `code` `` gets the code color,
+/// `**bold**` gets the accent, everything else the default foreground. The
+/// markers themselves are consumed. Unclosed markers render literally.
+fn md_inline_spans(line: &str, t: &theme::Theme) -> Vec<(Color, String)> {
+    let mut out: Vec<(Color, String)> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = line;
+    let flush = |plain: &mut String, out: &mut Vec<(Color, String)>| {
+        if !plain.is_empty() {
+            out.push((Color::Reset, std::mem::take(plain)));
+        }
+    };
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("**") {
+            if let Some(end) = after.find("**") {
+                flush(&mut plain, &mut out);
+                out.push((t.accent, after[..end].to_string()));
+                rest = &after[end + 2..];
+                continue;
+            }
+        }
+        if let Some(after) = rest.strip_prefix('`') {
+            if let Some(end) = after.find('`') {
+                flush(&mut plain, &mut out);
+                out.push((t.code, after[..end].to_string()));
+                rest = &after[end + 1..];
+                continue;
+            }
+        }
+        let ch = rest.chars().next().unwrap();
+        plain.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    flush(&mut plain, &mut out);
+    out
+}
+
+/// Word-wrap colored spans to `w` columns (greedy fill; a single word longer
+/// than the width is hard-cut). Space runs collapse at wrap points only.
+fn wrap_spans(spans: &[(Color, String)], w: usize) -> Vec<Vec<(Color, String)>> {
+    // Tokenize into (color, word) + implicit single-space separators.
+    let mut words: Vec<(Color, String)> = Vec::new();
+    for (color, text) in spans {
+        for word in text.split(' ') {
+            if word.is_empty() {
+                continue;
+            }
+            words.push((*color, word.to_string()));
+        }
+    }
+    let mut lines: Vec<Vec<(Color, String)>> = Vec::new();
+    let mut cur: Vec<(Color, String)> = Vec::new();
+    let mut cur_w = 0usize;
+    for (color, word) in words {
+        let wl = word.chars().count();
+        let sep = usize::from(!cur.is_empty());
+        if cur_w + sep + wl > w && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        if wl > w {
+            // Hard-cut an overlong word across lines.
+            let mut restw = word.as_str();
+            while restw.chars().count() > w {
+                let cut = floor_boundary(restw, w);
+                lines.push(vec![(color, restw[..cut].to_string())]);
+                restw = &restw[cut..];
+            }
+            cur.push((color, restw.to_string()));
+            cur_w = restw.chars().count();
+            continue;
+        }
+        if !cur.is_empty() {
+            // The separator space stays in the PRECEDING span so colored
+            // spans hold exactly their own text (spaces render identically
+            // in any color).
+            if let Some((_, s)) = cur.last_mut() {
+                s.push(' ');
+            }
+            match cur.last_mut() {
+                Some((c, s)) if *c == color => s.push_str(&word),
+                _ => cur.push((color, word)),
+            }
+            cur_w += 1 + wl;
+        } else {
+            cur.push((color, word));
+            cur_w = wl;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(vec![(Color::Reset, String::new())]);
+    }
+    lines
+}
+
 /// Top (`╭─ python ────`) or bottom (`╰──────`) border of a fenced code box,
 /// spanning the full pane width. `label` is the fence's language tag ("" →
 /// "code" on the top border; ignored on the bottom).
@@ -539,6 +689,55 @@ mod tests {
         assert_eq!(sanitize_for_pane("\x1b]0;win title\x07text"), "text");
         assert_eq!(sanitize_for_pane("bell\x07backspace\x08"), "bellbackspace");
         assert_eq!(sanitize_for_pane("plain text"), "plain text");
+    }
+
+    #[test]
+    fn markdown_headings_bullets_and_inline_styles_render() {
+        let mut p = Pane::new();
+        p.set_syntax(None);
+        p.push_block(
+            Kind::Assistant,
+            "## Results\n- fix applied in `stats.py`\nThis is **important** to know\n#not-a-heading".into(),
+        );
+        p.rebuild(60, &theme::DARK);
+        let lines = &p.wrapped;
+
+        // Heading: hashes stripped, Kind::Heading (bold accent via style_for).
+        assert_eq!(lines[0].kind, Kind::Heading);
+        assert_eq!(lines[0].text, "Results");
+
+        // Bullet marker becomes •, inline code gets a code-colored span.
+        assert!(lines[1].text.starts_with("• fix applied in "), "{}", lines[1].text);
+        let spans = lines[1].spans.as_ref().expect("inline code produces spans");
+        assert!(spans.iter().any(|(c, s)| s.trim() == "stats.py" && *c == theme::DARK.code));
+        assert!(!lines[1].text.contains('`'), "backticks must be consumed");
+
+        // Bold: markers consumed, accent-colored span.
+        let spans = lines[2].spans.as_ref().expect("bold produces spans");
+        assert!(spans.iter().any(|(c, s)| s.trim() == "important" && *c == theme::DARK.accent));
+        assert!(!lines[2].text.contains("**"));
+
+        // A #hashtag without a following space is NOT a heading.
+        assert_eq!(lines[3].kind, Kind::Assistant);
+        assert_eq!(lines[3].text, "#not-a-heading");
+    }
+
+    #[test]
+    fn markdown_inline_spans_wrap_by_words() {
+        let spans = vec![
+            (Color::Reset, "alpha beta".to_string()),
+            (Color::Red, "gamma".to_string()),
+        ];
+        let wrapped = wrap_spans(&spans, 11);
+        // "alpha beta" fits line 1 (10 cols); "gamma" wraps to line 2.
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].iter().map(|(_, s)| s.as_str()).collect::<String>(), "alpha beta");
+        assert_eq!(wrapped[1][0], (Color::Red, "gamma".to_string()));
+
+        // Unclosed markers render literally, nothing is eaten.
+        let spans = md_inline_spans("a `dangling and **half", &theme::DARK);
+        let text: String = spans.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(text, "a `dangling and **half");
     }
 
     #[test]
