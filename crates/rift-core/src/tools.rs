@@ -1361,7 +1361,6 @@ mod tests {
     // Unix-only: encodes POSIX shell behavior (`;` sequencing + `sleep`). The
     // bash tool runs through cmd.exe on Windows, where this command would echo
     // a literal string and exit instead of timing out.
-    #[cfg(unix)]
     #[tokio::test]
     async fn repo_map_ranks_imported_modules_first() {
         let dir = std::env::temp_dir().join(format!("rift-rmap-{}", std::process::id()));
@@ -1421,6 +1420,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_timeout_returns_partial_output() {
         let ctx = ToolCtx::new(std::env::temp_dir());
