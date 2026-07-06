@@ -8,7 +8,9 @@ pub mod paths;
 pub mod prompts;
 pub mod session;
 pub mod skills;
+pub mod subagent;
 pub mod swarm;
+pub mod tasks;
 pub mod tools;
 pub mod trace;
 
@@ -19,6 +21,8 @@ pub use config::{
 pub use mcp::{McpClient, McpTool};
 pub use session::{SavedSession, SessionStore};
 pub use skills::{load_skills, skills_prompt_section, Skill, SkillTool};
+pub use subagent::{AgentTool, SubAgentHandle};
+pub use tasks::{BgTasks, TaskKind, TaskStatus, TaskView};
 pub use swarm::{
     judge_swarm, run_swarm, Candidate, CandidateOutcome, JudgeVerdict, ProviderFactory, Swarm,
 };

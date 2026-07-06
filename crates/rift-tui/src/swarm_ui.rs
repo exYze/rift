@@ -86,6 +86,15 @@ impl SwarmApp {
                 c.log.push_line(Kind::Info, format!("· plan updated ({done}/{} done)", items.len()));
             }
             AgentEvent::Warning(w) => c.log.push_line(Kind::Warn, format!("! {w}")),
+            AgentEvent::TaskStarted { id, label } => {
+                c.log.push_line(Kind::Info, format!("· bg #{id} started: {label}"));
+            }
+            AgentEvent::TaskFinished { id, label, ok, .. } => {
+                c.log.push_line(
+                    Kind::Info,
+                    format!("· bg #{id} {}: {label}", if ok { "finished" } else { "failed" }),
+                );
+            }
             AgentEvent::Done(stats) => {
                 c.status = Status::Done;
                 c.stats = Some(stats);

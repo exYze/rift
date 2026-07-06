@@ -77,6 +77,13 @@ pub struct ToolCtx {
     /// Atomic so /approve and /config reload can flip it mid-session.
     approve: std::sync::Arc<std::sync::atomic::AtomicBool>,
     approved_kinds: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Session-wide background task registry (bash run_in_background and
+    /// background sub-agents). Shared into sub-agent ctxs so all tasks land
+    /// in one table the frontend and the task tool both see.
+    bg: crate::tasks::BgTasks,
+    /// Provider handle for the `agent` tool. Installed by the frontend on the
+    /// ROOT ctx only; sub-agent ctxs get None, which is what stops recursion.
+    subagent: std::sync::Arc<std::sync::RwLock<Option<crate::subagent::SubAgentHandle>>>,
 }
 
 fn build_deny_set(extra: &[String]) -> globset::GlobSet {
@@ -105,6 +112,54 @@ impl ToolCtx {
             plan: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
             approve: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             approved_kinds: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            bg: crate::tasks::BgTasks::default(),
+            subagent: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    /// The session's background task registry.
+    pub fn bg(&self) -> &crate::tasks::BgTasks {
+        &self.bg
+    }
+
+    /// Install the sub-agent handle (frontends call this once on the root
+    /// ctx; it's what makes the `agent` tool usable).
+    pub fn set_subagent(&self, handle: crate::subagent::SubAgentHandle) {
+        if let Ok(mut h) = self.subagent.write() {
+            *h = Some(handle);
+        }
+    }
+
+    /// Update the handle ONLY where one is installed — run_turn calls this
+    /// so /model & /host switches propagate without enabling delegation in
+    /// ctxs that never had it (sub-agents, swarm candidates).
+    pub fn refresh_subagent(&self, handle: crate::subagent::SubAgentHandle) {
+        if let Ok(mut h) = self.subagent.write() {
+            if h.is_some() {
+                *h = Some(handle);
+            }
+        }
+    }
+
+    pub fn subagent_handle(&self) -> Option<crate::subagent::SubAgentHandle> {
+        self.subagent.read().ok()?.clone()
+    }
+
+    /// The ctx a sub-agent works in: same cwd, permission policy (deny list,
+    /// approval mode + one shared "always allow" set), ask channel, and task
+    /// registry — but its own plan, undo journal, and NO sub-agent handle.
+    pub fn subagent_ctx(&self) -> ToolCtx {
+        ToolCtx {
+            cwd: self.cwd.clone(),
+            deny: self.deny.clone(),
+            journal: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            ask: self.ask.clone(),
+            plan: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            approve: self.approve.clone(),
+            approved_kinds: self.approved_kinds.clone(),
+            bg: self.bg.clone(),
+            subagent: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -282,6 +337,7 @@ impl ToolRegistry {
                 Box::new(OutlineTool),
                 Box::new(RepoMapTool),
                 Box::new(PlanTool),
+                Box::new(TaskTool),
             ],
         }
     }
@@ -321,6 +377,8 @@ impl ToolRegistry {
             "find_files" | "file_glob" | "file_search" => "glob",
             "skeleton" | "file_outline" | "symbols" | "get_outline" => "outline",
             "repo_overview" | "project_map" | "codebase_map" => "repo_map",
+            "tasks" | "bg" | "task_status" | "check_task" | "background_task" | "task_output" => "task",
+            "Task" | "subagent" | "sub_agent" | "spawn_agent" | "delegate" | "dispatch_agent" => "agent",
             other => other,
         }
     }
@@ -730,8 +788,11 @@ impl Tool for BashTool {
     }
     fn description(&self) -> &str {
         "Run a shell command in the working directory and return its output and exit code. \
-         Long-running servers/watchers (npm run dev, vite, …) are auto-killed after a short probe \
-         and their startup output returned — prefer build/test commands for verification."
+         Set run_in_background=true for long jobs (big builds, full test suites, dev servers): \
+         the command keeps running while you continue working, you get a task id back \
+         immediately, a [task notification] arrives when it finishes, and the task tool shows \
+         its output any time. Foreground servers/watchers (npm run dev, vite, …) are auto-killed \
+         after a short probe — run those in the background instead."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -739,7 +800,8 @@ impl Tool for BashTool {
             "required": ["command"],
             "properties": {
                 "command": {"type": "string", "description": "Shell command to run"},
-                "timeout_secs": {"type": "integer", "description": "Timeout in seconds (default 60, max 300)"}
+                "timeout_secs": {"type": "integer", "description": "Timeout in seconds (default 60, max 300); ignored with run_in_background"},
+                "run_in_background": {"type": "boolean", "description": "true = don't wait: run concurrently as a background task and return its id immediately"}
             }
         })
     }
@@ -750,6 +812,9 @@ impl Tool for BashTool {
         }
         let preview: String = command.chars().take(120).collect();
         ctx.check_approval("bash", &preview).await?;
+        if args.get("run_in_background").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return bash_background(command, ctx);
+        }
         let explicit_timeout = opt_u64(args, "timeout_secs");
         let server_like = looks_like_server_command(command);
         let mut timeout = explicit_timeout.unwrap_or(BASH_DEFAULT_TIMEOUT_SECS).min(BASH_MAX_TIMEOUT_SECS);
@@ -863,6 +928,130 @@ impl Tool for BashTool {
             Some(_) => {}
         }
         Ok(text)
+    }
+}
+
+/// The bash tool's background mode: spawn the command as a session-wide
+/// background task and return immediately. Output accumulates in the task
+/// registry; completion notifies the frontend (which turns it into a
+/// [task notification] for the model). Tasks die with the rift process —
+/// no orphans survive an exit.
+fn bash_background(command: &str, ctx: &ToolCtx) -> Result<String> {
+    let mut cmd = shell_command(command);
+    cmd.current_dir(&ctx.cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = cmd.spawn().context("spawning shell")?;
+    let pid = child.id();
+    let (id, cancel) = ctx.bg().register(crate::tasks::TaskKind::Shell, command, pid)?;
+
+    let reg = ctx.bg().clone();
+    let out_task = tokio::spawn(pump(child.stdout.take(), reg.clone(), id));
+    let err_task = tokio::spawn(pump(child.stderr.take(), reg.clone(), id));
+    tokio::spawn(async move {
+        let status = tokio::select! {
+            biased;
+            // Killed via the task tool: the registry already tree-killed the
+            // pid, so the pipes close and the readers drain what's left.
+            _ = cancel.cancelled() => None,
+            s = child.wait() => s.ok(),
+        };
+        let _ = out_task.await;
+        let _ = err_task.await;
+        reg.finish(id, status.and_then(|s| s.code()).or(Some(-1)));
+    });
+
+    Ok(format!(
+        "started background task #{id}{}: {command}\n\
+         It keeps running while you continue — do other work or end your turn; a [task \
+         notification] arrives when it completes. Poll status/output any time with the task \
+         tool (id={id}).",
+        pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+    ))
+}
+
+/// Stream one pipe of a background command into its task output buffer.
+async fn pump<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>, reg: crate::tasks::BgTasks, id: u64) {
+    use tokio::io::AsyncReadExt;
+    let Some(mut p) = pipe else { return };
+    let mut buf = [0u8; 8192];
+    loop {
+        match p.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => reg.append_output(id, &String::from_utf8_lossy(&buf[..n])),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- task
+
+/// Model-facing view of the background task table: list, inspect, kill.
+struct TaskTool;
+
+#[async_trait]
+impl Tool for TaskTool {
+    fn name(&self) -> &str {
+        "task"
+    }
+    fn description(&self) -> &str {
+        "Manage background tasks (bash run_in_background commands and background sub-agents). \
+         No arguments: list all tasks with ids and statuses. With id: that task's status and \
+         accumulated output. With id and kill=true: terminate it."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer", "description": "Task id (from the bash/agent tool result or the list)"},
+                "kill": {"type": "boolean", "description": "true = terminate the task instead of reading it"}
+            }
+        })
+    }
+    async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
+        let Some(id) = opt_u64(args, "id") else {
+            let tasks = ctx.bg().list();
+            if tasks.is_empty() {
+                return Ok("(no background tasks this session — start one with bash \
+                           run_in_background=true or agent background=true)"
+                    .into());
+            }
+            let mut out = String::from("background tasks:\n");
+            for t in tasks {
+                out.push_str(&format!(
+                    "#{} [{}] {} ({}, {}s, {} bytes of output)\n",
+                    t.id,
+                    t.status.describe(),
+                    t.label,
+                    t.kind.label(),
+                    t.elapsed_secs,
+                    t.output_bytes
+                ));
+            }
+            return Ok(out.trim_end().to_string());
+        };
+        if args.get("kill").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let view = ctx.bg().kill(id)?;
+            return Ok(format!("killed task #{id} ({}) after {}s", view.label, view.elapsed_secs));
+        }
+        let (view, output) = ctx
+            .bg()
+            .output_of(id)
+            .ok_or_else(|| anyhow!("no background task #{id} — call task with no arguments to list them"))?;
+        let body = strip_ansi(&output);
+        let body = if body.trim().is_empty() { "(no output yet)".to_string() } else { truncate_middle(body.trim(), 20_000) };
+        Ok(format!(
+            "task #{id} [{}] {} ({}, {}s elapsed)\n--- output ---\n{}",
+            view.status.describe(),
+            view.label,
+            view.kind.label(),
+            view.elapsed_secs,
+            body
+        ))
     }
 }
 
@@ -1318,6 +1507,47 @@ impl Tool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bash_background_runs_and_notifies() {
+        let dir = std::env::temp_dir();
+        let ctx = ToolCtx::new(&dir);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.bg().set_notify(tx);
+
+        let mut args = Map::new();
+        args.insert("command".into(), Value::String("echo bg-hello".into()));
+        args.insert("run_in_background".into(), Value::Bool(true));
+        let out = BashTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("background task #1"), "unexpected: {out}");
+
+        // Started event fires immediately; Finished arrives when the process
+        // exits (bounded wait so a hang fails the test instead of wedging it).
+        match rx.recv().await.unwrap() {
+            crate::agent::AgentEvent::TaskStarted { id, .. } => assert_eq!(id, 1),
+            other => panic!("expected TaskStarted, got {other:?}"),
+        }
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+            .await
+            .expect("background task never finished")
+            .unwrap();
+        match ev {
+            crate::agent::AgentEvent::TaskFinished { id, ok, preview, .. } => {
+                assert_eq!(id, 1);
+                assert!(ok);
+                assert!(preview.contains("bg-hello"), "output not captured: {preview}");
+            }
+            other => panic!("expected TaskFinished, got {other:?}"),
+        }
+
+        // The task tool sees the same registry.
+        let mut targs = Map::new();
+        targs.insert("id".into(), Value::from(1u64));
+        let report = TaskTool.execute(&targs, &ctx).await.unwrap();
+        assert!(report.contains("bg-hello"));
+        let list = TaskTool.execute(&Map::new(), &ctx).await.unwrap();
+        assert!(list.contains("#1"));
+    }
 
     #[test]
     fn bash_deny_builtin_and_extra() {

@@ -87,6 +87,13 @@ pub enum AgentEvent {
     Warning(String),
     /// The model updated its task checklist (the `plan` tool).
     Plan(Vec<crate::tools::PlanItem>),
+    /// A background task (bash run_in_background / background sub-agent)
+    /// started. Flows through the session-wide notify channel, so it can
+    /// arrive outside any turn.
+    TaskStarted { id: u64, label: String },
+    /// A background task finished on its own (kills are silent). `preview`
+    /// is the output tail (shell) or final report (agent), capped ~1KB.
+    TaskFinished { id: u64, label: String, ok: bool, preview: String },
     /// Turn finished (success or abort); always the final event of a turn.
     Done(TurnStats),
 }
@@ -241,6 +248,14 @@ impl Agent {
     ) -> Result<TurnStats> {
         self.messages.push(Message::user(user_input));
         self.ctx.begin_turn();
+        // Keep the sub-agent handle tracking the live provider/config, so
+        // /model and /host switches carry over to delegated agents. Only
+        // refreshes where a frontend installed one — child agents and swarm
+        // candidates stay without (no nested delegation).
+        self.ctx.refresh_subagent(crate::subagent::SubAgentHandle {
+            client: self.client.clone(),
+            cfg: self.cfg.clone(),
+        });
 
         let tools = self.registry.tool_defs();
         let known = self.registry.names();
@@ -520,8 +535,9 @@ impl Agent {
 
                 // bash counts as mutating: a command can apply changes and we
                 // can't tell a read-only one apart; erring this way only
-                // suppresses a nudge, never fires a spurious one.
-                if ok && matches!(canonical.as_str(), "write" | "edit" | "bash") {
+                // suppresses a nudge, never fires a spurious one. Same logic
+                // for agent: delegated sub-agents apply changes themselves.
+                if ok && matches!(canonical.as_str(), "write" | "edit" | "bash" | "agent") {
                     used_mutating = true;
                 }
 

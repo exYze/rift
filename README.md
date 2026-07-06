@@ -106,6 +106,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/skills new [--global] <desc>` · `/mcp new [--global] <desc>` | the agent builds its own extensions: writes a skill file, or writes + self-tests a local MCP server and registers it (trust-gated). Default is project-scoped (`.rift/`, this repo only); `--global` installs user-wide (`~/.config/rift/`, every project) — `/restart` loads them |
 | `/goal <condition>` | keep working until the model verifies the goal is met — turns auto-continue (up to 25) until a verified `GOAL MET`; `/goal clear` or Esc stops, bare `/goal` shows status |
 | `/loop [30s\|5m\|2h] <prompt or /command>` | re-run a prompt on an interval (or back-to-back without one); `/loop stop` or Esc ends it |
+| `/tasks [kill <id>]` | background tasks (shells + sub-agents): the model starts them with `bash run_in_background=true` or `agent background=true`; they keep running while you chat, the status bar shows the count, and a `[task notification]` turn reports each result back to the model |
 | `/plan [clear]` | the agent's task checklist (also pinned live in the activity pane) |
 | `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, deny list + approval state |
 | `/swarm <task> [--models a,b] [--judge m] [--explore]` | WarpDrive race without leaving the chat — models may span providers; the optional judge scores the diffs and recommends a winner |
@@ -177,12 +178,16 @@ MCP server tools are exposed to the model as `<server>_<tool>`. A built-in deny 
 
 In interactive sessions the model gets an `ask_user` tool: when a task is ambiguous it pauses and asks you a clarifying question instead of guessing — multiple-choice questions open the same ↑↓/Enter picker, free-text questions turn the input box into an answer field (Esc skips, and the model proceeds on its own judgment). Headless and swarm runs stay fully autonomous.
 
+## Sub-agents & background tasks
+
+The model can delegate with its `agent` tool: 1–4 self-contained tasks run as **concurrent sub-agents**, each with its own context window and full tool set (results come back as the tool result; nesting is blocked, and `/model`/`/host` switches carry over). Long commands don't block the conversation either: `bash run_in_background=true` (and `agent background=true`) start **background tasks** that keep running while you keep chatting — the status bar shows the live count, `/tasks` lists them (`/tasks kill <id>` stops one), the model polls them with its `task` tool, and when one finishes on its own a `[task notification]` turn hands the result back to the model so it can react. Background tasks end with the rift process — nothing is orphaned.
+
 ## Workspace layout
 
 - `crates/rift-provider` — the `Provider` trait plus the neutral wire types (messages, tool calls, stream deltas) every backend maps to.
 - `crates/rift-ollama` — native Ollama client: NDJSON streaming, tool calls, thinking, capability detection, truncation detection.
 - `crates/rift-openai` — OpenAI-compatible client: SSE streaming, tool-call correlation by id, string-encoded arguments (vLLM, LM Studio, llama.cpp, OpenRouter, LiteLLM, Ollama `/v1`).
-- `crates/rift-core` — agent engine: tool registry (read/write/edit/bash/ls/grep/glob), agent loop, local-model hardening.
+- `crates/rift-core` — agent engine: tool registry (read/write/edit/bash/ls/grep/glob/task/agent), agent loop, sub-agents, background tasks, local-model hardening.
 - `crates/rift-tui` — `rift` binary: ratatui frontend + headless mode.
 
 See `docs/PROJECT.md` for status and roadmap, `docs/RESEARCH.md` for the protocol/architecture research this is built on.

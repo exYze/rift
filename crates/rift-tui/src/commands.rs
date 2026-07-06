@@ -98,6 +98,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/save", "<name>", "name this session (keeps autosaving to it)"),
     ("/skills", "[new [--global] <desc>]", "list skills, or generate one (project or user-wide)"),
     ("/swarm", "<task> [--models a,b] [--judge m]", "WarpDrive race in isolated worktrees"),
+    ("/tasks", "[kill <id>]", "background tasks (shells + agents): list, or kill one"),
     ("/worktrees", "", "list swarm worktrees + patches"),
     ("/think", "[on|off|auto]", "thinking mode (capability-checked)"),
     ("/tokens", "", "context budget, usage estimate, calibration"),
@@ -174,6 +175,7 @@ pub async fn run_command(
         "/temp" => cmd_temp(rest, agent, fx),
         "/ctx" => cmd_ctx(rest, agent, fx),
         "/save" => cmd_save(rest, agent, cx, fx),
+        "/tasks" => cmd_tasks(rest, agent, fx),
         "/worktrees" => cmd_worktrees(cx, fx).await,
         // Handled in the chat input (they drive the UI's turn scheduling);
         // reachable here only via odd nesting like a /loop body.
@@ -188,6 +190,49 @@ pub async fn run_command(
         }
     };
     let _ = fx.send(UiEffect::Done(status));
+}
+
+/// /tasks — the user-facing view of the background task table (the model
+/// uses the `task` tool for the same registry).
+fn cmd_tasks(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if let Some(rest) = arg.strip_prefix("kill") {
+        let id: u64 = rest
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("usage: /tasks kill <id> (bare /tasks lists ids)"))?;
+        let view = agent.ctx().bg().kill(id)?;
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("⚙ killed task #{id} ({})", view.label)));
+        return Ok(format!("task #{id} killed"));
+    }
+    if !arg.is_empty() {
+        bail!("usage: /tasks — list · /tasks kill <id> — terminate one");
+    }
+    let tasks = agent.ctx().bg().list();
+    if tasks.is_empty() {
+        let _ = fx.send(UiEffect::Out(
+            Kind::Info,
+            "no background tasks this session — the model starts them with bash \
+             run_in_background=true or agent background=true"
+                .into(),
+        ));
+        return Ok("no background tasks".into());
+    }
+    let running = tasks.iter().filter(|t| t.status == rift_core::TaskStatus::Running).count();
+    let mut out = String::from("background tasks:\n");
+    for t in &tasks {
+        out.push_str(&format!(
+            "  #{} [{}] {} ({}, {}s, {} bytes of output)\n",
+            t.id,
+            t.status.describe(),
+            t.label,
+            t.kind.label(),
+            t.elapsed_secs,
+            t.output_bytes
+        ));
+    }
+    out.push_str("kill one with /tasks kill <id>");
+    let _ = fx.send(UiEffect::Out(Kind::Info, out));
+    Ok(format!("{running} running / {} total", tasks.len()))
 }
 
 async fn cmd_model(

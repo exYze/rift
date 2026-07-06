@@ -956,6 +956,12 @@ struct App {
     last_prompt: Option<String>,
     /// Cumulative per-session counters surfaced by /stats.
     session_stats: SessionStats,
+    /// Background tasks currently running (id, label) — drives the status
+    /// bar count; maintained from TaskStarted/TaskFinished events.
+    bg_running: Vec<(u64, String)>,
+    /// Completed-task reports waiting to be fed back to the model as a
+    /// [task notification] turn (fires on the next idle tick).
+    task_notes: Vec<String>,
 }
 
 /// Running per-session counters surfaced by the `/stats` command.
@@ -1014,6 +1020,8 @@ impl App {
             skills,
             last_prompt: None,
             session_stats: SessionStats::default(),
+            bg_running: vec![],
+            task_notes: vec![],
         }
     }
 
@@ -1223,6 +1231,29 @@ impl App {
                 self.log.push_block(Kind::Info, format!("· {i}"));
             }
             AgentEvent::Plan(items) => self.plan = items,
+            AgentEvent::TaskStarted { id, label } => {
+                self.bg_running.push((id, label.clone()));
+                self.transcript.push_block(Kind::Info, format!("⚙ background task #{id} started: {label}"));
+                self.log.push_block(Kind::Info, format!("⚙ bg #{id} started: {label}"));
+            }
+            AgentEvent::TaskFinished { id, label, ok, preview } => {
+                self.bg_running.retain(|(tid, _)| *tid != id);
+                let mark = if ok { '✓' } else { '✗' };
+                self.transcript.push_block(
+                    if ok { Kind::Info } else { Kind::Warn },
+                    format!("⚙ background task #{id} {mark} finished: {label}"),
+                );
+                self.log.push_block(Kind::Info, format!("⚙ bg #{id} {mark} finished: {label}"));
+                // Queue the model-facing notification; the idle tick turns
+                // pending notes into one auto turn (never mid-turn).
+                let outcome = if ok { "completed successfully" } else { "FAILED" };
+                let tail = if preview.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("\noutput tail:\n{}", preview.trim())
+                };
+                self.task_notes.push(format!("Task #{id} ({label}) {outcome}.{tail}"));
+            }
             AgentEvent::Warning(w) => {
                 self.log.push_block(Kind::Warn, format!("! {w}"));
                 self.transcript.push_block(Kind::Warn, format!("! {w}"));
@@ -1258,6 +1289,9 @@ impl App {
         if cancelled {
             // Esc is the escape hatch from auto-continuation — always honor it.
             self.pending_auto = None;
+            // Don't fire a surprise notification turn right after a cancel;
+            // the completions already showed in the transcript.
+            self.task_notes.clear();
             if let Some(g) = self.goal.take() {
                 self.transcript
                     .push_block(Kind::Info, format!("◎ goal cancelled — /goal {} resumes it", g.condition));
@@ -1496,10 +1530,16 @@ fn draw(frame: &mut Frame, app: &mut App) {
         (true, Some(e)) => format!(" · {}s", e.as_secs()),
         _ => String::new(),
     };
+    let bg_note = match app.bg_running.len() {
+        0 => String::new(),
+        1 => " · 1 bg task running".into(),
+        n => format!(" · {n} bg tasks running"),
+    };
     let status = Line::from(vec![
         Span::styled(format!(" {} ", app.model), Style::default().fg(t.sel_fg).bg(t.accent)),
         Span::styled(busy_marker, Style::default().fg(if app.busy { t.warn } else { t.ok })),
         Span::styled(format!("{}{elapsed_note}", app.status), Style::default().fg(t.muted)),
+        Span::styled(bg_note, Style::default().fg(t.warn)),
         Span::styled(scroll_note, Style::default().fg(t.warn)),
     ]);
     frame.render_widget(Paragraph::new(status), status_area);
@@ -1889,6 +1929,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     let restart_host = host.clone();
     // UI-side effect sender: for commands the UI handles itself (/copy log).
     let fx_ui = fx_tx.clone();
+    // Background-task events must reach the UI outside any turn — give the
+    // registry its own clone of the event channel before the agent moves.
+    agent.ctx().bg().set_notify(ev_tx.clone());
     let agent_task = tokio::spawn(async move {
         let mut agent = agent;
         let mut cx = CmdCx { store, cwd: cwd.clone(), mcp, config_path, host, providers };
@@ -2051,6 +2094,19 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     needs_redraw = true;
                 }
                 if !app.busy && app.picker.is_none() && app.answering.is_none() {
+                    // Background tasks finished while the agent was busy (or
+                    // idle): feed their reports back as ONE notification turn
+                    // so the model can react — the Claude Code-style flow.
+                    if app.pending_auto.is_none() && !app.task_notes.is_empty() {
+                        let notes = app.task_notes.drain(..).collect::<Vec<_>>().join("\n\n");
+                        app.transcript.push_block(Kind::Info, "⚙ reporting finished background work to the model".into());
+                        app.pending_auto = Some(format!(
+                            "[task notification] Background work you started has finished:\n\n{notes}\n\n\
+                             If this completes or affects the ongoing work, act on it now; otherwise give \
+                             the user a one-line status."
+                        ));
+                        needs_redraw = true;
+                    }
                     // Fire a due /loop round (queued like any auto turn).
                     if app.pending_auto.is_none() {
                         if let Some(ls) = app.loop_state.as_mut() {

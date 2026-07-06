@@ -331,6 +331,13 @@ async fn main() -> Result<()> {
         eprintln!("skills: {}", skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
     }
 
+    // Sub-agents: the agent tool needs a provider handle to build child
+    // agents. Installed on the root ctx only — children get a bare ctx, so
+    // delegation stays one level deep. run_turn refreshes the handle, so
+    // later /model and /host switches carry over automatically.
+    ctx.set_subagent(rift_core::SubAgentHandle { client: client.clone(), cfg: cfg.clone() });
+    registry.register(Box::new(rift_core::AgentTool));
+
     let mut agent = Agent::new(client, cfg, registry, ctx, prompt_text);
 
     // Opt-in turn traces (--trace / RIFT_TRACE). A bad path is a warning,
@@ -632,6 +639,13 @@ async fn run_headless(
                     }
                 }
                 AgentEvent::Warning(w) => eprintln!("\n\x1b[33m! {w}\x1b[0m"),
+                AgentEvent::TaskStarted { id, label } => {
+                    eprintln!("\x1b[2m⚙ background task #{id} started: {label}\x1b[0m");
+                }
+                AgentEvent::TaskFinished { id, label, ok, .. } => {
+                    let mark = if ok { "✓" } else { "✗" };
+                    eprintln!("\x1b[2m⚙ background task #{id} {mark} finished: {label}\x1b[0m");
+                }
                 AgentEvent::Done(stats) => {
                     if in_thinking {
                         eprintln!("\x1b[0m");
@@ -666,10 +680,21 @@ async fn run_headless(
         }
     });
 
+    // Background-task events (start/finish) surface through the same
+    // printer channel, even between/after turns.
+    agent.ctx().bg().set_notify(tx.clone());
+
     let cancel = CancellationToken::new();
     agent.run_turn(&prompt, &tx, &cancel).await?;
     let cwd = std::env::current_dir()?.display().to_string();
     store.save(&agent.cfg.model, &cwd, &agent.messages)?;
+    let still_running = agent.ctx().bg().running_count();
+    if still_running > 0 {
+        eprintln!(
+            "\x1b[33m! {still_running} background task(s) still running are terminated at exit \
+             (headless runs end with the turn; use the TUI for work that outlives one)\x1b[0m"
+        );
+    }
     drop(tx);
     let _ = printer.await;
     Ok(())
