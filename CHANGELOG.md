@@ -3,6 +3,23 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.0.1 — 2026-07-06
+
+Verified against DeepSeek V4 Flash on vLLM; fixes for OpenAI-compatible
+providers generally:
+
+- **Context-length discovery**: `show()` now reads the model's context
+  window from `/v1/models` (vLLM `max_model_len`, OpenRouter
+  `context_length`, LM Studio `max_context_length`, llama.cpp
+  `meta.n_ctx_train`). When the user hasn't set `--num-ctx`, provider-routed
+  models adopt the reported context as rift's working budget (capped at
+  128k so huge hosted contexts don't bloat every request); `/model`
+  switches retune the budget the same way. Ollama keeps its conservative
+  default — there num_ctx sizes the server's KV cache
+- **Real throughput stats**: the OpenAI-compatible path now measures
+  stream timing (prefill = to first chunk, decode = rest), so tok/s shows
+  real numbers instead of 0.0 in the status line and `/stats`
+
 ## v1.0.0 — 2026-07-06
 
 - **Concurrent sub-agents**: the model gets an `agent` tool — 1–4

@@ -372,11 +372,30 @@ impl Provider for OpenAiClient {
         Ok(models.data.into_iter().map(|m| ModelEntry { name: m.id, capabilities: vec![] }).collect())
     }
 
-    async fn show(&self, _model: &str) -> Result<ModelCapabilities> {
+    async fn show(&self, model: &str) -> Result<ModelCapabilities> {
         // No /show in the OpenAI protocol. Assume tool support (nearly universal
-        // for chat models) and leave context length unknown (no front-truncation
-        // to detect). `/model` can still switch freely.
-        Ok(ModelCapabilities { capabilities: vec!["tools".into()], context_length: None })
+        // for chat models), and recover the context length from the /models
+        // listing where servers expose it — vLLM (`max_model_len`), OpenRouter
+        // (`context_length`), LM Studio (`max_context_length`), llama.cpp
+        // (`meta.n_ctx_train`). Absent or unreachable just means unknown.
+        let context_length = async {
+            let resp = send_with_retry(self.req(reqwest::Method::GET, "/models")).await.ok()?;
+            let body: Value = resp.json().await.ok()?;
+            let entry = body
+                .get("data")?
+                .as_array()?
+                .iter()
+                .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(model))?;
+            for key in ["max_model_len", "context_length", "max_context_length", "context_window"] {
+                if let Some(n) = entry.get(key).and_then(|v| v.as_u64()) {
+                    return Some(n);
+                }
+            }
+            entry.get("meta")?.get("n_ctx_train")?.as_u64()
+        }
+        .await
+        .filter(|n| *n > 0);
+        Ok(ModelCapabilities { capabilities: vec!["tools".into()], context_length })
     }
 
     async fn chat_stream(
@@ -403,6 +422,11 @@ impl Provider for OpenAiClient {
         }
 
         let mut acc = StreamAcc::default();
+        // The OpenAI protocol carries no timing, so measure it: prefill ends
+        // when the first data chunk arrives, decoding runs from there to the
+        // end of the stream. Feeds the tok/s display instead of a flat 0.0.
+        let started = std::time::Instant::now();
+        let mut first_chunk: Option<std::time::Instant> = None;
 
         // Server-Sent Events: `data: {json}` lines, terminated by `data: [DONE]`.
         for_each_line(resp.bytes_stream(), |line| {
@@ -414,6 +438,7 @@ impl Provider for OpenAiClient {
             if payload.is_empty() {
                 return Ok(LineFlow::Continue);
             }
+            first_chunk.get_or_insert_with(std::time::Instant::now);
             let value: Value = serde_json::from_str(payload)
                 .with_context(|| format!("malformed stream event: {}", preview(payload, 200)))?;
             // Mid-stream failures (rate limits, upstream errors on OpenRouter/
@@ -471,8 +496,8 @@ impl Provider for OpenAiClient {
         let stats = ChatStats {
             prompt_eval_count: acc.prompt_tokens,
             eval_count: acc.completion_tokens,
-            total_duration: 0,
-            eval_duration: 0,
+            total_duration: started.elapsed().as_nanos() as u64,
+            eval_duration: first_chunk.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0),
         };
         Ok(ChatOutcome { message, done_reason: acc.done_reason, stats, truncation_suspected: false })
     }

@@ -281,9 +281,20 @@ async fn cmd_model(
     agent.cfg.think = if show.supports("thinking") { None } else { Some(false) };
     let mut note = String::new();
     if let Some(max) = show.context_length() {
+        // Mirrors startup: provider-routed models don't send num_ctx to the
+        // server, so a bigger reported context is adopted as the working
+        // budget (capped — huge hosted contexts would bloat every request).
+        const ADOPT_CTX_MAX: u64 = 131_072;
+        let provider_routed = actual != arg;
         if agent.cfg.num_ctx > max {
             note = format!(" (num_ctx clamped {} → {max})", agent.cfg.num_ctx);
             agent.cfg.num_ctx = agent.cfg.num_ctx.min(max);
+        } else if provider_routed && max > agent.cfg.num_ctx {
+            let adopted = max.min(ADOPT_CTX_MAX);
+            if adopted > agent.cfg.num_ctx {
+                note = format!(" (context budget {} → {adopted}; /ctx overrides)", agent.cfg.num_ctx);
+                agent.cfg.num_ctx = adopted;
+            }
         }
     }
     agent.cfg.model = actual.clone();

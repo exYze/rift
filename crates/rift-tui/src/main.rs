@@ -169,7 +169,8 @@ async fn main() -> Result<()> {
         .clone()
         .or_else(|| config.model.clone())
         .unwrap_or_else(|| "gemma4:26b".to_string());
-    let num_ctx = cli.num_ctx.or(config.num_ctx).unwrap_or(32_768);
+    let explicit_ctx = cli.num_ctx.or(config.num_ctx);
+    let num_ctx = explicit_ctx.unwrap_or(32_768);
     let temp = cli.temp.or(config.temperature).unwrap_or(0.2);
     let max_iterations = cli.max_iterations.or(config.max_iterations).unwrap_or(25);
 
@@ -179,6 +180,11 @@ async fn main() -> Result<()> {
     // status line carry.
     let model_addr = model.clone();
     let (client, model) = build_provider(&model, &host, &config.providers);
+    // Routed through a non-Ollama provider: num_ctx is rift's internal budget
+    // only (never sent to the server), so adopting a larger server-reported
+    // context is free. On Ollama, num_ctx sizes the server's KV cache — there
+    // the conservative default stands unless the user raises it.
+    let provider_routed = model != model_addr;
 
     // Subcommands bypass the single-model preflight (swarm preflights each
     // candidate itself; merge is git-only).
@@ -241,12 +247,26 @@ async fn main() -> Result<()> {
         Some(s) => (!s.supports("thinking")).then_some(false),
         None => None,
     };
+    /// Auto-adopted context budget ceiling for provider-routed models. Big
+    /// hosted contexts (DeepSeek 500k, Gemini 1M) would let history grow so
+    /// large that every request re-sends hundreds of KB — 128k is generous
+    /// without that; an explicit --num-ctx/config value overrides freely.
+    const ADOPT_CTX_MAX: u64 = 131_072;
     let num_ctx = match show.as_ref().and_then(|s| s.context_length()) {
         Some(max_ctx) => {
             if num_ctx > max_ctx {
                 eprintln!("warning: num_ctx {num_ctx} exceeds model max {max_ctx}; using {max_ctx}");
             }
-            num_ctx.min(max_ctx)
+            if provider_routed && explicit_ctx.is_none() && max_ctx > num_ctx {
+                let adopted = max_ctx.min(ADOPT_CTX_MAX);
+                eprintln!(
+                    "context: model reports {max_ctx} tokens — using {adopted} as the working budget \
+                     (--num-ctx overrides)"
+                );
+                adopted
+            } else {
+                num_ctx.min(max_ctx)
+            }
         }
         None => num_ctx,
     };
