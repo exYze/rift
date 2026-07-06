@@ -3,6 +3,26 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.0.0 — 2026-07-06
+
+- **Concurrent sub-agents**: the model gets an `agent` tool — 1–4
+  self-contained tasks run as concurrent child agents, each with its own
+  context window, tool set, plan, and undo journal (permission policy and
+  the ask channel are shared; nesting is blocked). Foreground calls wait
+  and return every child's final report; `background=true` launches them
+  as background tasks that keep working across turns. `/model` and
+  `/host` switches carry over to children automatically
+- **Background tasks**: `bash run_in_background=true` starts a command as
+  a session-wide background task and returns its id immediately — it
+  keeps running while the conversation continues. Output accumulates in
+  a capped buffer; the new `task` tool lists/inspects/kills tasks; the
+  status bar shows a live "N bg tasks running" count; and when a task
+  finishes on its own, a `[task notification]` auto-turn hands the result
+  back to the model (kills are silent, Esc suppresses pending
+  notifications, at most 8 tasks run at once). `/tasks [kill <id>]` is
+  the user-facing view of the same registry. Background tasks terminate
+  with the rift process — no orphans
+
 ## v0.9.5 — 2026-07-03
 
 - **`/goal <condition>`**: keep working until the model verifies the goal —

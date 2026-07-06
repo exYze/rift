@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "rift-anthropic"
-version = "0.9.5"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "rift-core"
-version = "0.9.5"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "rift-ollama"
-version = "0.9.5"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "rift-openai"
-version = "0.9.5"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "rift-provider"
-version = "0.9.5"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "rift-tui"
-version = "0.9.5"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
