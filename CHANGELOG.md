@@ -3,7 +3,7 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
-## Unreleased
+## v1.4.0 — 2026-07-06
 
 - **Remote MCP servers (streamable HTTP)**: config entries and
   `/mcp add <name> <url>` now take a `url` instead of a command — one
