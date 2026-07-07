@@ -68,6 +68,15 @@ rift update        # or /update inside the TUI
 
 rift checks for new releases on startup (at most once per 24h, cached, silent when offline) and shows a one-line notice when one exists. Set `RIFT_NO_UPDATE_CHECK=1` to disable the check entirely — no other network calls are ever made except to your own Ollama server.
 
+## VS Code extension
+
+[`vscode/`](vscode/) packages rift for VS Code: the full TUI in the
+integrated terminal (every feature works — approval, sessions, skills, MCP,
+swarm), plus editor glue — launch keybindings, a status-bar button, and
+right-click "Add File/Selection to Prompt" that types `@file` mentions into
+rift's input. See [vscode/README.md](vscode/README.md) for install and
+settings.
+
 ## Usage
 
 ```sh

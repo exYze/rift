@@ -3,6 +3,16 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.5.3 — 2026-07-07
+
+- **VS Code extension** (`vscode/`): rift in VS Code's integrated terminal
+  with the complete feature set (it runs the real binary), plus editor
+  glue — launch/continue commands with keybindings, a status-bar button,
+  and right-click "Add File/Selection to Prompt" that types `@file`
+  mentions into rift's input. Configurable binary path, host, model, and
+  extra args; empty settings defer to `.rift.json`. Releases now attach
+  `rift-vscode.vsix` — install with `code --install-extension`
+
 ## v1.5.2 — 2026-07-07
 
 - **Responsive startup banner**: the RIFT logo is now drawn to fit the

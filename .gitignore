@@ -10,3 +10,5 @@ bench/traces/
 # SWE-bench working data: repo clones, worktrees, predictions, eval logs.
 bench/swebench/
 logs/
+# Packaged VS Code extension — built from vscode/ with vsce, not committed.
+*.vsix

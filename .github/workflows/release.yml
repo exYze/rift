@@ -68,8 +68,26 @@ jobs:
             rift-${{ matrix.target }}
           if-no-files-found: error
 
+  # The VS Code extension ships alongside the binaries: install with
+  # `code --install-extension rift-vscode.vsix`.
+  vsix:
+    name: package vscode extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: package
+        run: cd vscode && npx --yes @vscode/vsce package --out ../rift-vscode.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rift-vscode
+          path: rift-vscode.vsix
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, vsix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

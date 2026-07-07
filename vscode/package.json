@@ -1,0 +1,113 @@
+{
+  "name": "rift-vscode",
+  "displayName": "Rift",
+  "description": "Rift — a fast terminal coding agent for local Ollama models, integrated into VS Code",
+  "version": "1.5.3",
+  "publisher": "exYze",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/exYze/rift.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "ollama",
+    "local",
+    "llm",
+    "coding-assistant"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rift.open",
+        "title": "Rift: Open"
+      },
+      {
+        "command": "rift.newSession",
+        "title": "Rift: New Session"
+      },
+      {
+        "command": "rift.continueSession",
+        "title": "Rift: Continue Last Session"
+      },
+      {
+        "command": "rift.addFileToPrompt",
+        "title": "Rift: Add File to Prompt"
+      },
+      {
+        "command": "rift.addSelectionToPrompt",
+        "title": "Rift: Add Selection to Prompt"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "rift.open",
+        "key": "ctrl+alt+r",
+        "mac": "ctrl+cmd+r"
+      },
+      {
+        "command": "rift.addSelectionToPrompt",
+        "key": "ctrl+alt+k",
+        "mac": "ctrl+cmd+k",
+        "when": "editorTextFocus"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "rift.addSelectionToPrompt",
+          "when": "editorHasSelection",
+          "group": "rift@1"
+        },
+        {
+          "command": "rift.addFileToPrompt",
+          "group": "rift@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "rift.addFileToPrompt",
+          "group": "rift@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rift",
+      "properties": {
+        "rift.executablePath": {
+          "type": "string",
+          "default": "rift",
+          "description": "Path to the rift binary (default assumes it is on PATH)."
+        },
+        "rift.host": {
+          "type": "string",
+          "default": "",
+          "description": "Ollama server URL passed as --host (empty = rift's own default/config)."
+        },
+        "rift.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model passed as --model (empty = rift's own default/config)."
+        },
+        "rift.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra command-line arguments appended to every rift launch (e.g. [\"--effort\", \"high\"])."
+        }
+      }
+    }
+  }
+}
