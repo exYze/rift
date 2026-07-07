@@ -105,6 +105,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/sessions [n]` | interactive session picker, or resume the nth directly |
 | `/skills` · `/skill:<name> [task]` | list packaged skills, or run one |
 | `/skills new [--global] <desc>` · `/mcp new [--global] <desc>` | the agent builds its own extensions: writes a skill file, or writes + self-tests a local MCP server and registers it (trust-gated). Default is project-scoped (`.rift/`, this repo only); `--global` installs user-wide (`~/.config/rift/`, every project) — `/restart` loads them |
+| `/mcp add [--global] <name> <command> [args…]` | connect an existing stdio MCP server (e.g. `/mcp add fetch uvx mcp-server-fetch`) — verified, registered live (no restart), and persisted to the project `.rift.json` or user config. Same as adding it to the config `mcp` map by hand, minus the hand |
 | `/goal <condition>` | keep working until the model verifies the goal is met — turns auto-continue (up to 25) until a verified `GOAL MET`; `/goal clear` or Esc stops, bare `/goal` shows status |
 | `/loop [30s\|5m\|2h] <prompt or /command>` | re-run a prompt on an interval (or back-to-back without one); `/loop stop` or Esc ends it |
 | `/tasks [kill <id>]` | background tasks (shells + sub-agents): the model starts them with `bash run_in_background=true` or `agent background=true`; they keep running while you chat, the status bar shows the count, and a `[task notification]` turn reports each result back to the model |
@@ -184,6 +185,10 @@ description: checklist to verify the project is ready for release
 Skills are listed to the model by name + description only (progressive disclosure — bodies stay out of context); the model loads one with its `skill` tool when relevant, or you invoke one directly with `/skill:<name> [task]` (they autocomplete in the `/` palette). `/skills` lists what's available.
 
 MCP server tools are exposed to the model as `<server>_<tool>`. A built-in deny list (sudo, `rm -rf /`, mkfs, …) always applies to shell commands.
+
+## Attachments
+
+Mention a file with `@path` in any prompt (Tab completes against the project file index). Text/code files attach as a token-stingy outline — the model sees the structure and can `read` exact ranges itself. **Images** (`@screenshot.png`, jpg/gif/webp/bmp, up to 10 MB) attach as base64 for vision-capable models: paste a UI screenshot and ask what's wrong, attach a diagram and ask the model to implement it. Ollama reports vision capability per model (`gemma4`, llava, …); OpenAI-compatible servers reject images on text-only models with a clear error. Headless runs attach with `--attach <path>` (repeatable; text files append their content, images ride as base64).
 
 ## Elicitation
 

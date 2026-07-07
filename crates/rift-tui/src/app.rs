@@ -422,10 +422,11 @@ pub(crate) fn diff_kind(line: &str) -> Kind {
     }
 }
 
-/// What the TUI sends to the agent task: a normal prompt for the model, or a
-/// slash command handled locally.
+/// What the TUI sends to the agent task: a normal prompt for the model
+/// (with any image attachments from @-mentions), or a slash command
+/// handled locally.
 enum UiMsg {
-    Prompt(String, CancellationToken),
+    Prompt(String, Vec<String>, CancellationToken),
     Command(String, CancellationToken),
 }
 
@@ -728,6 +729,7 @@ mod tests {
                     tool_name: None,
                     tool_call_id: None,
                     provider_data: None,
+                    images: vec![],
                 },
             ],
         };
@@ -743,6 +745,21 @@ mod tests {
             }
             _ => panic!("expected Btw effect"),
         }
+    }
+
+    #[test]
+    fn seed_user_preview_collapses_walls_and_strips_notes() {
+        // Short messages pass through untouched.
+        assert_eq!(seed_user_preview("hi there"), "hi there");
+        // Long expanded prompts collapse to a head + count.
+        let wall = (1..=30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let seeded = seed_user_preview(&wall);
+        assert!(seeded.starts_with("line 1\n"));
+        assert!(seeded.ends_with("… [22 more lines]"), "got: {seeded}");
+        // The Esc-interrupt note is bookkeeping, not something to re-show.
+        let noted = "[note: the user pressed Esc to CANCEL your previous, incomplete turn. Treat that \
+                     interrupted task as abandoned — do NOT resume it unless this message asks you to.]\n\nwhat is 2+2?";
+        assert_eq!(seed_user_preview(noted), "what is 2+2?");
     }
 
     #[test]
@@ -937,15 +954,36 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lib.rs"), "pub fn hello() -> u32 { 41 + 1 }\n").unwrap();
 
-        let (expanded, notes) = expand_mentions("check @lib.rs and @nope.rs please", &dir);
+        let (expanded, notes, images) = expand_mentions("check @lib.rs and @nope.rs please", &dir);
         assert!(expanded.starts_with("check @lib.rs and @nope.rs please"));
         assert!(expanded.contains("pub fn hello() -> u32"), "outline missing: {expanded}");
         assert!(!expanded.contains("41 + 1"), "body should be elided: {expanded}");
         assert!(notes.iter().any(|n| n.contains("nope.rs not found")));
+        assert!(images.is_empty());
         // No mentions → prompt passes through untouched.
-        let (same, notes2) = expand_mentions("no mentions here", &dir);
+        let (same, notes2, _) = expand_mentions("no mentions here", &dir);
         assert_eq!(same, "no mentions here");
         assert!(notes2.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn image_mentions_attach_as_data_urls() {
+        let dir = std::env::temp_dir().join(format!("rift-img-mention-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A tiny valid PNG header + junk is fine — attachment doesn't decode.
+        std::fs::write(dir.join("shot.png"), [0x89, b'P', b'N', b'G', 1, 2, 3, 4]).unwrap();
+
+        let (expanded, notes, images) = expand_mentions("what's wrong in @shot.png here", &dir);
+        assert_eq!(images.len(), 1);
+        assert!(images[0].starts_with("data:image/png;base64,"), "got: {}", &images[0][..40]);
+        assert!(expanded.contains("[attached image shot.png"));
+        assert!(!expanded.contains("base64"), "raw data must not enter the prompt text");
+        assert!(notes.iter().any(|n| n.contains("vision-capable")));
+        // And the data URL round-trips through the provider-side parser.
+        let (mime, data) = rift_ollama::parse_data_url(&images[0]).unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(!data.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1162,7 +1200,7 @@ impl App {
                 Role::System => {}
                 Role::User => {
                     if !msg.content.starts_with("[system]") {
-                        self.transcript.push_block(Kind::User, msg.content.clone());
+                        self.transcript.push_block(Kind::User, seed_user_preview(&msg.content));
                     }
                 }
                 Role::Assistant => {
@@ -1835,9 +1873,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
 /// capped head for unsupported types) to the prompt. Token-stingy on purpose
 /// — the model can still `read` for exact lines. Returns the expanded prompt
 /// and activity-log notes about what was attached.
-fn expand_mentions(input: &str, cwd: &std::path::Path) -> (String, Vec<String>) {
+fn expand_mentions(input: &str, cwd: &std::path::Path) -> (String, Vec<String>, Vec<String>) {
     let mut expanded = input.to_string();
     let mut notes = Vec::new();
+    let mut images = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for token in input.split_whitespace() {
         let Some(rel) = token.strip_prefix('@') else { continue };
@@ -1852,6 +1891,19 @@ fn expand_mentions(input: &str, cwd: &std::path::Path) -> (String, Vec<String>) 
         };
         if !path.is_file() {
             notes.push(format!("@{rel} not found — sent as plain text"));
+            continue;
+        }
+        // Images attach as base64 for vision models; text keeps the
+        // token-stingy outline treatment.
+        if let Some(mime) = image_media_type(&path) {
+            match read_image_data_url(&path, mime) {
+                Ok((url, kb)) => {
+                    images.push(url);
+                    expanded.push_str(&format!("\n\n[attached image {rel} — mentioned as @{rel}]"));
+                    notes.push(format!("attached image {rel} ({kb} KB — needs a vision-capable model)"));
+                }
+                Err(e) => notes.push(format!("@{rel}: {e} — sent as plain text")),
+            }
             continue;
         }
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -1870,7 +1922,53 @@ fn expand_mentions(input: &str, cwd: &std::path::Path) -> (String, Vec<String>) 
         expanded.push_str(&format!("\n\n[attached {label} of {rel} — mentioned as @{rel}]\n{attach}"));
         notes.push(format!("attached {label} of {rel} ({} chars)", attach.chars().count()));
     }
-    (expanded, notes)
+    (expanded, notes, images)
+}
+
+/// Image media type by extension; None = not an image we attach.
+pub(crate) fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+/// Read an image file into a data URL, capped so a stray screenshot dump
+/// can't blow up the request. Returns (data URL, size in KB).
+pub(crate) fn read_image_data_url(path: &std::path::Path, mime: &str) -> anyhow::Result<(String, u64)> {
+    use base64::Engine;
+    const IMAGE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > IMAGE_MAX_BYTES {
+        anyhow::bail!("image is {} MB (max 10 MB)", meta.len() / (1024 * 1024));
+    }
+    let bytes = std::fs::read(path)?;
+    let kb = (bytes.len() as u64) / 1024;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok((format!("data:{mime};base64,{encoded}"), kb))
+}
+
+/// Compact display form of a seeded (resumed) user message. Expanded command
+/// prompts (/mcp new, /init, goal continuations…) run pages long and would
+/// wall off the resumed transcript — the user never saw the expansion live
+/// either, only the line they typed. Bookkeeping prefixes (the Esc-interrupt
+/// note) are display noise and get stripped.
+fn seed_user_preview(content: &str) -> String {
+    let content = match content.strip_prefix("[note: the user pressed Esc") {
+        Some(rest) => rest.split_once("]\n\n").map(|(_, real)| real).unwrap_or(content),
+        None => content,
+    };
+    const KEEP_LINES: usize = 8;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= KEEP_LINES {
+        content.to_string()
+    } else {
+        format!("{}\n… [{} more lines]", lines[..KEEP_LINES].join("\n"), lines.len() - KEEP_LINES)
+    }
 }
 
 /// First lines of a file, for @-mentions of types the outliner doesn't know.
@@ -1977,6 +2075,7 @@ fn spawn_btw(
                 tool_name: None,
                 tool_call_id: None,
                 provider_data: None,
+                images: vec![],
             });
         }
         messages.push(Message::user(format!(
@@ -2182,7 +2281,10 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
         let cwd_str = cwd.display().to_string();
         while let Some(msg) = prompt_rx.recv().await {
             match msg {
-                UiMsg::Prompt(prompt, cancel) => {
+                UiMsg::Prompt(prompt, images, cancel) => {
+                    if !images.is_empty() {
+                        agent.attach_images(images);
+                    }
                     if let Err(e) = agent.run_turn(&prompt, &ev_tx, &cancel).await {
                         let _ = ev_tx.send(AgentEvent::Warning(format!("error: {e:#}")));
                         let _ = ev_tx.send(AgentEvent::Done(TurnStats::default()));
@@ -2389,7 +2491,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                             let _ = prompt_tx.send(UiMsg::Command(text, cancel));
                         } else {
                             app.status = "auto turn — sending…".into();
-                            let _ = prompt_tx.send(UiMsg::Prompt(text, cancel));
+                            let _ = prompt_tx.send(UiMsg::Prompt(text, vec![], cancel));
                         }
                         needs_redraw = true;
                     }
@@ -2686,7 +2788,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                             if trimmed == "/init" {
                                 // Syntactic sugar: a canned prompt through the normal agent loop.
                                 app.status = "generating RIFT.md…".into();
-                                let _ = prompt_tx.send(UiMsg::Prompt(INIT_PROMPT.to_string(), cancel));
+                                let _ = prompt_tx.send(UiMsg::Prompt(INIT_PROMPT.to_string(), vec![], cancel));
                             } else if trimmed.strip_prefix("/copy").is_some_and(|r| r.trim() == "log") {
                                 // Handled UI-side: the activity pane lives here,
                                 // not in the agent's message history.
@@ -2729,7 +2831,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                             s.name, s.body
                                         );
                                         app.status = format!("running skill {name}…");
-                                        let _ = prompt_tx.send(UiMsg::Prompt(prompt, cancel));
+                                        let _ = prompt_tx.send(UiMsg::Prompt(prompt, vec![], cancel));
                                     }
                                     None => {
                                         app.idle();
@@ -2759,7 +2861,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                         .replace("{dir}", &dir)
                                         .replace("{scope}", scope)
                                         .replace("{desc}", &desc);
-                                    let _ = prompt_tx.send(UiMsg::Prompt(prompt, cancel));
+                                    let _ = prompt_tx.send(UiMsg::Prompt(prompt, vec![], cancel));
                                 }
                             } else if let Some(rest) = trimmed.strip_prefix("/mcp new") {
                                 // Self-extension: the agent writes AND tests a
@@ -2784,7 +2886,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                         .replace("{args_path}", &p.args_path)
                                         .replace("{trust_note}", p.trust_note)
                                         .replace("{desc}", &desc);
-                                    let _ = prompt_tx.send(UiMsg::Prompt(prompt, cancel));
+                                    let _ = prompt_tx.send(UiMsg::Prompt(prompt, vec![], cancel));
                                 }
                             } else if trimmed == "/skills" {
                                 app.idle();
@@ -2868,7 +2970,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                         app.status = format!(
                                             "◎ goal set — auto-continues up to {GOAL_MAX_RUNS} turns · Esc or /goal clear stops"
                                         );
-                                        let _ = prompt_tx.send(UiMsg::Prompt(goal_initial(&arg), cancel));
+                                        let _ = prompt_tx.send(UiMsg::Prompt(goal_initial(&arg), vec![], cancel));
                                     }
                                 }
                             } else if trimmed == "/loop" || trimmed.starts_with("/loop ") {
@@ -2952,7 +3054,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                         Kind::Info,
                                         format!("↻ {}", p.chars().take(80).collect::<String>()),
                                     );
-                                    let _ = prompt_tx.send(UiMsg::Prompt(p, cancel));
+                                    let _ = prompt_tx.send(UiMsg::Prompt(p, vec![], cancel));
                                 } else {
                                     app.idle();
                                     app.transcript.push_block(Kind::Warn, "! nothing to retry yet".into());
@@ -3009,15 +3111,16 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 let _ = prompt_tx.send(UiMsg::Command(trimmed, cancel));
                             } else {
                                 app.status = "sending…".into();
-                                // Expand @-mentions into attached outlines so
-                                // the model sees structure without the tokens
-                                // of a full file read.
-                                let (expanded, notes) = expand_mentions(&raw, &app.cwd);
+                                // Expand @-mentions: text files attach as
+                                // outlines (structure without full-read
+                                // tokens); images attach as base64 for
+                                // vision-capable models.
+                                let (expanded, notes, images) = expand_mentions(&raw, &app.cwd);
                                 for n in notes {
                                     app.log.push_block(Kind::Info, format!("· {n}"));
                                 }
                                 app.last_prompt = Some(expanded.clone());
-                                let _ = prompt_tx.send(UiMsg::Prompt(expanded, cancel));
+                                let _ = prompt_tx.send(UiMsg::Prompt(expanded, images, cancel));
                             }
                         }
                     }

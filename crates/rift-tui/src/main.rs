@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use rift_core::{
     run_swarm, Agent, AgentConfig, AgentEvent, AskRequest, AskUserTool, Candidate, Config,
@@ -116,6 +116,10 @@ struct Cli {
     /// Run a single prompt headless (no TUI) and print the transcript
     #[arg(long, short)]
     prompt: Option<String>,
+    /// Attach a file to the headless prompt (repeatable). Images go to
+    /// vision-capable models as base64; text files append their content
+    #[arg(long)]
+    attach: Vec<std::path::PathBuf>,
     /// Max agent-loop iterations per turn [default: 25, or `max_iterations` in config]
     #[arg(long)]
     max_iterations: Option<usize>,
@@ -487,7 +491,29 @@ async fn main() -> Result<()> {
     };
 
     match cli.prompt {
-        Some(prompt) => {
+        Some(mut prompt) => {
+            // --attach: images ride as base64 to vision-capable models;
+            // text files append their (capped) content to the prompt.
+            let mut images = Vec::new();
+            for path in &cli.attach {
+                let name = path.display();
+                if let Some(mime) = app::image_media_type(path) {
+                    let (url, kb) = app::read_image_data_url(path, mime)
+                        .with_context(|| format!("attaching {name}"))?;
+                    eprintln!("attached image {name} ({kb} KB — needs a vision-capable model)");
+                    images.push(url);
+                } else {
+                    let content = std::fs::read_to_string(path)
+                        .with_context(|| format!("attaching {name} (binary non-image files aren't supported)"))?;
+                    let capped: String = content.chars().take(24_000).collect();
+                    let note = if capped.len() < content.len() { " (truncated)" } else { "" };
+                    eprintln!("attached file {name} ({} chars{note})", capped.chars().count());
+                    prompt.push_str(&format!("\n\n[attached file {name}{note}]\n{capped}"));
+                }
+            }
+            if !images.is_empty() {
+                agent.attach_images(images);
+            }
             let rates = pricing::lookup(&model, &config.pricing);
             run_headless(agent, prompt, store, rates).await
         }

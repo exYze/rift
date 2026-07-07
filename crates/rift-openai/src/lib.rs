@@ -92,8 +92,10 @@ struct StreamOptions {
 #[derive(Serialize)]
 struct OaiMessage {
     role: &'static str,
+    /// A plain string normally; an array of content parts (text +
+    /// image_url) for user messages carrying vision attachments.
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<OaiToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,11 +167,18 @@ fn to_oai_message(m: &Message) -> OaiMessage {
             },
         })
         .collect();
-    // Assistant messages that are pure tool calls send content: null.
-    let content = if m.content.is_empty() && !tool_calls.is_empty() {
+    // Assistant messages that are pure tool calls send content: null; user
+    // messages with vision attachments become text + image_url parts.
+    let content = if m.role == Role::User && !m.images.is_empty() {
+        let mut parts = vec![json!({"type": "text", "text": m.content})];
+        for url in &m.images {
+            parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+        }
+        Some(Value::Array(parts))
+    } else if m.content.is_empty() && !tool_calls.is_empty() {
         None
     } else {
-        Some(m.content.clone())
+        Some(Value::String(m.content.clone()))
     };
     OaiMessage {
         role: role_str(m.role),
@@ -558,6 +567,7 @@ impl Provider for OpenAiClient {
             tool_name: None,
             tool_call_id: None,
             provider_data: None,
+            images: vec![],
         };
         let stats = ChatStats {
             prompt_eval_count: acc.prompt_tokens,
@@ -585,6 +595,7 @@ mod tests {
             tool_name: None,
             tool_call_id: None,
             provider_data: None,
+            images: vec![],
         };
         assistant.tool_calls.push(ToolCall {
             id: Some("call_9".into()),
@@ -606,7 +617,7 @@ mod tests {
         let oai = to_oai_message(&result);
         assert_eq!(oai.role, "tool");
         assert_eq!(oai.tool_call_id.as_deref(), Some("call_9"));
-        assert_eq!(oai.content.as_deref(), Some("contents"));
+        assert_eq!(oai.content, Some(Value::String("contents".into())));
     }
 
     #[test]

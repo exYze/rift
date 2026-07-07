@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::mcp::McpServerConfig;
@@ -240,6 +240,43 @@ impl Config {
     }
 }
 
+/// Persist an MCP server entry (`/mcp add`) into the user config or the
+/// project `.rift.json`, merge-preserving. Fails if the name is already
+/// configured — edits go through `/config edit`.
+pub fn append_mcp_entry(
+    global: bool,
+    cwd: &Path,
+    name: &str,
+    entry: &crate::mcp::McpServerConfig,
+) -> Result<std::path::PathBuf> {
+    let path =
+        if global { dirs_config().join("rift/config.json") } else { cwd.join(".rift.json") };
+    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
+        Err(_) => serde_json::json!({}),
+    };
+    let obj = root.as_object_mut().context("config is not a JSON object")?;
+    let mcp = obj
+        .entry("mcp")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("config 'mcp' is not a JSON object")?;
+    if mcp.contains_key(name) {
+        bail!("MCP server '{name}' is already configured in {} — edit it with /config edit", path.display());
+    }
+    let mut val = serde_json::json!({"command": entry.command, "args": entry.args});
+    if !entry.env.is_empty() {
+        val["env"] = serde_json::json!(entry.env);
+    }
+    mcp.insert(name.to_string(), val);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&root)? + "\n")
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 /// Persist an "always allow" bash pattern to the USER config
 /// (`~/.config/rift/config.json`) — the only file allow patterns load from.
 /// Merge-preserving: every other key in the file is left untouched.
@@ -369,6 +406,34 @@ mod tests {
         assert!(cfg.permissions.approve.is_none() && cfg.permissions.approve_effective());
         let cfg: Config = serde_json::from_str(r#"{"permissions": {"approve": false}}"#).unwrap();
         assert!(!cfg.permissions.approve_effective());
+    }
+
+    #[test]
+    fn append_mcp_entry_merges_into_project_config() {
+        let dir = std::env::temp_dir().join(format!("rift-mcp-add-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".rift.json"),
+            r#"{"model": "keep-me", "mcp": {"existing": {"command": "x"}}}"#,
+        )
+        .unwrap();
+        let entry = crate::mcp::McpServerConfig {
+            command: "uvx".into(),
+            args: vec!["mcp-server-fetch".into()],
+            env: Default::default(),
+        };
+        let path = append_mcp_entry(false, &dir, "fetch", &entry).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Everything already in the file survives; the new entry lands.
+        assert_eq!(root["model"], "keep-me");
+        assert_eq!(root["mcp"]["existing"]["command"], "x");
+        assert_eq!(root["mcp"]["fetch"]["command"], "uvx");
+        assert_eq!(root["mcp"]["fetch"]["args"][0], "mcp-server-fetch");
+        assert!(root["mcp"]["fetch"].get("env").is_none()); // empty env omitted
+        // Duplicate names are refused, pointing at /config edit.
+        assert!(append_mcp_entry(false, &dir, "fetch", &entry).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

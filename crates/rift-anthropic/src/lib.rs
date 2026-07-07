@@ -106,7 +106,29 @@ fn build_request(req: &ChatRequest) -> AnthropicRequest {
     for (i, m) in req.messages.iter().enumerate() {
         match m.role {
             Role::System => {}
-            Role::User => messages.push(json!({"role": "user", "content": m.content})),
+            Role::User => {
+                if m.images.is_empty() {
+                    messages.push(json!({"role": "user", "content": m.content}));
+                } else {
+                    // Vision attachments: image source blocks first, then the
+                    // text block (the order Anthropic's docs use).
+                    let mut blocks: Vec<Value> = m
+                        .images
+                        .iter()
+                        .filter_map(|url| {
+                            let (media_type, data) = rift_provider::parse_data_url(url)?;
+                            Some(json!({
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": media_type, "data": data},
+                            }))
+                        })
+                        .collect();
+                    if !m.content.is_empty() {
+                        blocks.push(json!({"type": "text", "text": m.content}));
+                    }
+                    messages.push(json!({"role": "user", "content": blocks}));
+                }
+            }
             Role::Assistant => {
                 let content = match (&m.provider_data, i > last_user) {
                     (Some(raw), true) if raw.get("content").is_some() => {
@@ -494,6 +516,7 @@ impl Provider for AnthropicClient {
             tool_name: None,
             tool_call_id: None,
             provider_data: (!raw_blocks.is_empty()).then(|| json!({"content": raw_blocks})),
+            images: vec![],
         };
         let stats = ChatStats {
             prompt_eval_count: acc.input_tokens,

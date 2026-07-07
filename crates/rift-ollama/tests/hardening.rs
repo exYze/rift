@@ -150,3 +150,22 @@ async fn effort_becomes_string_think() {
     assert!(raw.contains("\"think\":\"high\""), "think must carry the level string: {raw}");
     assert!(!raw.contains("\"effort\""), "the neutral effort field must not leak to the wire: {raw}");
 }
+
+// Vision attachments: the neutral data-URL form becomes Ollama's bare-base64
+// `images` array on the wire.
+#[tokio::test]
+async fn image_attachments_become_bare_base64() {
+    let server = MockServer::start(vec![MockResponse::stream(&[
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"a cat\"},\"done\":true,\"done_reason\":\"stop\"}\n",
+    ])])
+    .await;
+    let mut req = chat_req(None);
+    let mut msg = Message::user("what is in this picture?");
+    msg.images = vec!["data:image/png;base64,AAAABBBB".into()];
+    req.messages = vec![msg];
+    let r = run(&server, &req).await;
+    r.outcome.expect("stream should succeed");
+    let raw = &server.requests().await[0];
+    assert!(raw.contains("\"images\":[\"AAAABBBB\"]"), "bare base64 missing: {raw}");
+    assert!(!raw.contains("data:image"), "data-URL prefix must not reach Ollama: {raw}");
+}

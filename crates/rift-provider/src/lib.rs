@@ -41,6 +41,20 @@ pub struct Message {
     /// neutral fields, so cross-provider switches keep working.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_data: Option<Value>,
+    /// Image attachments on user messages (vision models), as data URLs
+    /// ("data:image/png;base64,…") so the media type travels with the data.
+    /// Each provider translates to its wire shape — Ollama: bare-base64
+    /// `images` array; OpenAI: `image_url` content parts; Anthropic: image
+    /// source blocks. Persists in sessions as-is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
+/// Split a `data:<media_type>;base64,<data>` URL into (media_type, data).
+pub fn parse_data_url(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("data:")?;
+    let (mime, data) = rest.split_once(";base64,")?;
+    (!mime.is_empty()).then_some((mime, data))
 }
 
 impl Message {
@@ -53,6 +67,7 @@ impl Message {
             tool_name: None,
             tool_call_id: None,
             provider_data: None,
+            images: vec![],
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
@@ -64,6 +79,7 @@ impl Message {
             tool_name: None,
             tool_call_id: None,
             provider_data: None,
+            images: vec![],
         }
     }
     pub fn tool_result(tool_name: impl Into<String>, content: impl Into<String>) -> Self {
@@ -75,6 +91,7 @@ impl Message {
             tool_name: Some(tool_name.into()),
             tool_call_id: None,
             provider_data: None,
+            images: vec![],
         }
     }
 }

@@ -133,6 +133,19 @@ impl Provider for OllamaClient {
         if let Some(effort) = &req.effort {
             body["think"] = serde_json::Value::String(effort.clone());
         }
+        // Vision attachments: the neutral form is data URLs; Ollama's native
+        // `images` array wants bare base64.
+        if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            for m in msgs {
+                if let Some(imgs) = m.get_mut("images").and_then(|v| v.as_array_mut()) {
+                    for img in imgs {
+                        if let Some((_, data)) = img.as_str().and_then(parse_data_url) {
+                            *img = Value::String(data.to_string());
+                        }
+                    }
+                }
+            }
+        }
         let resp = send_with_retry(self.http.post(format!("{}/api/chat", self.base_url)).json(&body)).await?;
         let resp = Self::check(resp).await?;
 
@@ -144,6 +157,7 @@ impl Provider for OllamaClient {
             tool_name: None,
             tool_call_id: None,
             provider_data: None,
+            images: vec![],
         };
         let mut stats = ChatStats::default();
         let mut done_reason = None;

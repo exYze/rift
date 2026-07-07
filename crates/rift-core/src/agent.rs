@@ -118,11 +118,37 @@ pub struct Agent {
     calibration: f64,
     /// Opt-in JSONL turn traces (`--trace`); None = no tracing.
     trace: Option<TraceWriter>,
+    /// The previous turn was cancelled (Esc) mid-flight. The next turn's
+    /// input gets a note saying so — otherwise the interrupted task is the
+    /// last standing instruction in history and the model resumes it even
+    /// when the user has moved on to something unrelated.
+    interrupted: bool,
+    /// Image attachments (data URLs) queued for the NEXT turn's user
+    /// message — @-mentioned images and --attach files land here.
+    pending_images: Vec<String>,
 }
 
 impl Agent {
     pub fn new(client: Arc<dyn Provider>, cfg: AgentConfig, registry: ToolRegistry, ctx: ToolCtx, system_prompt: String) -> Self {
-        Self { client, cfg, registry, ctx, messages: vec![Message::system(system_prompt)], calibration: 1.0, trace: None }
+        Self {
+            client,
+            cfg,
+            registry,
+            ctx,
+            messages: vec![Message::system(system_prompt)],
+            calibration: 1.0,
+            trace: None,
+            interrupted: false,
+            pending_images: vec![],
+        }
+    }
+
+    /// Queue image attachments (data URLs) for the next turn's user message.
+    /// The turn consumes them whether or not the model has vision — a
+    /// text-only model simply never sees them (Ollama ignores the field;
+    /// OpenAI-style servers reject with a clear error the user can act on).
+    pub fn attach_images(&mut self, images: Vec<String>) {
+        self.pending_images.extend(images);
     }
 
     pub fn set_trace(&mut self, trace: Option<TraceWriter>) {
@@ -255,7 +281,20 @@ impl Agent {
         tx: &UnboundedSender<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<TurnStats> {
-        self.messages.push(Message::user(user_input));
+        // After an Esc-cancelled turn, tell the model the interruption was
+        // deliberate — the abandoned task must not be resumed on its own.
+        let user_input: String = if std::mem::take(&mut self.interrupted) {
+            format!(
+                "[note: the user pressed Esc to CANCEL your previous, incomplete turn. Treat that \
+                 interrupted task as abandoned — do NOT resume it unless this message asks you to.]\n\n{user_input}"
+            )
+        } else {
+            user_input.to_string()
+        };
+        let user_input = user_input.as_str();
+        let mut user_msg = Message::user(user_input);
+        user_msg.images = std::mem::take(&mut self.pending_images);
+        self.messages.push(user_msg);
         self.ctx.begin_turn();
         // Keep the sub-agent handle tracking the live provider/config, so
         // /model and /host switches carry over to delegated agents. Only
@@ -342,6 +381,7 @@ impl Agent {
             let outcome = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
+                    self.interrupted = true;
                     let _ = tx.send(AgentEvent::Warning("turn cancelled".into()));
                     stats.duration_ms = start.elapsed().as_millis();
                     self.write_trace(user_input, "cancelled", &stats, &tool_records, tx);
@@ -565,6 +605,7 @@ impl Agent {
             }
 
             if cancel.is_cancelled() {
+                self.interrupted = true;
                 let _ = tx.send(AgentEvent::Warning("turn cancelled".into()));
                 stats.duration_ms = start.elapsed().as_millis();
                 self.write_trace(user_input, "cancelled", &stats, &tool_records, tx);

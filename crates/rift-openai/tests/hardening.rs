@@ -232,6 +232,7 @@ async fn effort_and_reasoning_content_reach_the_wire() {
         tool_name: None,
         tool_call_id: None,
         provider_data: None,
+        images: vec![],
     };
     prior.thinking = Some("earlier reasoning".into());
     req.messages.push(prior);
@@ -266,4 +267,26 @@ async fn reasoning_params_stripped_and_retried_on_400() {
     assert_eq!(reqs.len(), 2);
     assert!(reqs[0].contains("reasoning_effort"));
     assert!(!reqs[1].contains("reasoning_effort"), "retry must strip the rejected param: {}", reqs[1]);
+}
+
+// Vision attachments: user messages with images become content-part arrays
+// (text + image_url with the data URL intact).
+#[tokio::test]
+async fn image_attachments_become_content_parts() {
+    let server = MockServer::start(vec![MockResponse::stream(&[
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a cat\"}}]}\n\ndata: [DONE]\n\n",
+    ])])
+    .await;
+    let mut req = chat_req();
+    let mut msg = Message::user("what is in this picture?");
+    msg.images = vec!["data:image/png;base64,AAAABBBB".into()];
+    req.messages = vec![msg];
+    let r = run(&server, &req).await;
+    r.outcome.expect("stream should succeed");
+    let raw = &server.requests().await[0];
+    assert!(raw.contains("\"type\":\"text\""), "text part missing: {raw}");
+    assert!(
+        raw.contains("\"image_url\":{\"url\":\"data:image/png;base64,AAAABBBB\"}"),
+        "image_url part missing: {raw}"
+    );
 }

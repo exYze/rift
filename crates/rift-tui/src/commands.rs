@@ -97,7 +97,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/host", "[url]", "show or switch the model server — Ollama or OpenAI-compatible, auto-detected"),
     ("/init", "", "generate a RIFT.md project guide"),
     ("/loop", "[30s|5m|2h] <prompt>|stop", "re-run a prompt or /command on an interval (or back-to-back)"),
-    ("/mcp", "[new [--global] <desc>|trust <name>]", "list MCP servers, generate one (project or user-wide), manage trust"),
+    ("/mcp", "[add [--global] <name> <cmd> [args…]|new [--global] <desc>|trust <name>]", "list MCP servers, connect an existing one, generate one, manage trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
     ("/permissions", "", "active shell deny patterns"),
@@ -133,7 +133,8 @@ fn help_text() -> String {
     out.push_str(
         "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+D live diff · Ctrl+T toggle \
          mouse capture (off = select/copy text natively) · Esc cancel · /quit exit\n\
-         @path in a prompt attaches a file outline (Tab completes)",
+         @path in a prompt attaches a file outline; @photo.png attaches the image itself \
+         (vision models) — Tab completes either",
     );
     out
 }
@@ -657,7 +658,68 @@ async fn cmd_mcp(
             let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
             Ok(msg)
         }
-        (other, _) => bail!("usage: /mcp [trust|untrust <name>] — got '{other}'"),
+        // Connect a preconfigured/off-the-shelf stdio MCP server and persist
+        // it: /mcp add [--global] <name> <command> [args…]. Registered live
+        // (no restart) and written to the project .rift.json (default) or
+        // the user config (--global).
+        ("add", rest) => {
+            let (global, rest) = match rest.strip_prefix("--global").or_else(|| rest.strip_prefix("-g")) {
+                Some(r) if r.is_empty() || r.starts_with(char::is_whitespace) => (true, r.trim()),
+                _ => (false, rest),
+            };
+            let mut words = rest.split_whitespace();
+            let (Some(name), Some(command)) = (words.next(), words.next()) else {
+                bail!("usage: /mcp add [--global] <name> <command> [args…] — e.g. /mcp add fetch uvx mcp-server-fetch");
+            };
+            if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                bail!("server name '{name}' must be alphanumeric/dash/underscore (tools register as {name}_<tool>)");
+            }
+            if cx.mcp.iter().any(|(an, _)| an == name)
+                || config.mcp.contains_key(name)
+                || config.project_mcp.contains_key(name)
+            {
+                bail!("MCP server '{name}' already exists — /mcp lists servers, /config edit changes them");
+            }
+            let entry = rift_core::mcp::McpServerConfig {
+                command: command.to_string(),
+                args: words.map(str::to_string).collect(),
+                env: Default::default(),
+            };
+            // Prove it works BEFORE persisting anything: spawn, handshake,
+            // and list tools, bounded so a wedged command can't hang the TUI.
+            let connect = async {
+                let mcp = McpClient::spawn(name, &entry).await?;
+                let tools = mcp.list_tools().await?;
+                anyhow::Ok((mcp, tools))
+            };
+            let (mcp, tools) = tokio::time::timeout(std::time::Duration::from_secs(30), connect)
+                .await
+                .map_err(|_| anyhow!("MCP server '{name}' did not answer within 30s — is `{command}` right?"))??;
+            if tools.is_empty() {
+                bail!("MCP server '{name}' started but exposes no tools — not saving it");
+            }
+            let count = tools.len();
+            let names: Vec<String> = tools.iter().map(|t| format!("{name}_{}", t.name)).collect();
+            for info in tools {
+                agent.register_tool(Box::new(McpTool::new(mcp.clone(), info)));
+            }
+            cx.mcp.push((name.to_string(), count));
+            let path = rift_core::config::append_mcp_entry(global, &cx.cwd, name, &entry)?;
+            if !global {
+                // The user typed this entry themselves — that IS the consent
+                // the project-config trust gate exists to collect.
+                rift_core::trust_mcp_entry(name, &entry)?;
+            }
+            let msg = format!(
+                "mcp '{name}' connected: {count} tool(s) — {}\nsaved to {} ({})",
+                names.join(", "),
+                path.display(),
+                if global { "user-wide" } else { "this project, pre-trusted" }
+            );
+            let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+            Ok(format!("mcp '{name}': {count} tool(s) registered"))
+        }
+        (other, _) => bail!("usage: /mcp [add [--global] <name> <cmd> [args…] | trust|untrust <name>] — got '{other}'"),
     }
 }
 

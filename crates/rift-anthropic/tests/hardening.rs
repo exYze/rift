@@ -208,3 +208,26 @@ async fn effort_maps_to_output_config_and_enables_thinking() {
     assert!(raw.contains("\"thinking\":{"), "effort must imply thinking on: {raw}");
     assert!(!raw.contains("\"temperature\""), "sampling params must drop with thinking: {raw}");
 }
+
+// Vision attachments: user messages with images become image source blocks
+// (media type split out of the data URL) followed by the text block.
+#[tokio::test]
+async fn image_attachments_become_source_blocks() {
+    let server = MockServer::start(vec![MockResponse::stream(&[
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a cat\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+    ])])
+    .await;
+    let mut req = chat_req(None);
+    let mut msg = Message::user("what is in this picture?");
+    msg.images = vec!["data:image/jpeg;base64,AAAABBBB".into()];
+    req.messages = vec![Message::system("be brief"), msg];
+    let r = run(&server, &req).await;
+    r.outcome.expect("stream should succeed");
+    let raw = &server.requests().await[0];
+    // serde_json sorts object keys alphabetically on the wire.
+    assert!(
+        raw.contains("\"source\":{\"data\":\"AAAABBBB\",\"media_type\":\"image/jpeg\",\"type\":\"base64\"}"),
+        "image source block missing: {raw}"
+    );
+    assert!(raw.contains("\"type\":\"text\""), "text block missing: {raw}");
+}
