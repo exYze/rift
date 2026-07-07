@@ -3,6 +3,40 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.5.0 — 2026-07-07
+
+- **`web_search` tool + `/search`**: web search through a self-hosted
+  SearXNG instance (`search_url` in config, or `/search <url>` — probed
+  via the JSON API before adoption and persisted to the user config;
+  `/search off` disables). Local-first: queries go to YOUR metasearch
+  box, not a third-party API. Sub-agents inherit it
+- **`/deep-research <question>`**: a research workflow through the normal
+  agent loop — decompose into search angles, `web_search` each, delegate
+  source-reading to concurrent sub-agents (fetch + verbatim quotes +
+  dates), cross-check claims across sources (corroborated vs
+  single-sourced), and synthesize a cited markdown report with a
+  numbered source list. Verified live end-to-end
+- **Project memory**: `.rift/memory.md` loads into the system prompt every
+  session — durable facts that compound over time. Grown by `/remember
+  <fact>` and by the model's new `remember` tool (short entries enforced,
+  exact duplicates refused, 16KB cap with a prune hint, prompt budget
+  capped separately from the guides)
+- **`/fork`**: duplicate the conversation into a NEW session file and open
+  a second rift window resuming the copy — parallel exploration with full
+  context, original untouched. New console on Windows, Terminal via
+  osascript on macOS, $TERMINAL/x-terminal-emulator/gnome-terminal/
+  konsole/xterm on Linux
+- **`fetch` tool**: built-in web fetch — GET a URL, strip HTML to
+  readable text (script/style/comment-aware), 20KB cap, 20s timeout.
+  Docs pages and READMEs without an MCP server; search still belongs to
+  MCP (`/mcp add`)
+- **Sandbox wrapper**: `permissions.bash_wrapper` routes every bash
+  command (foreground, background, sub-agents) through a containment
+  tool — `"wsl -e sh -c '{cmd}'"`, Docker, firejail, bwrap. Real
+  isolation from tools built for it, not a homemade half-sandbox; the
+  deny list and approval still inspect the raw command. User config
+  only; shown in /permissions
+
 ## v1.4.0 — 2026-07-06
 
 - **Remote MCP servers (streamable HTTP)**: config entries and
