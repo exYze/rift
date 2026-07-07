@@ -3,6 +3,31 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.3.0 — 2026-07-06
+
+- **Hooks — automatic post-edit verification**: `"hooks": {"post_edit":
+  ["cargo check --quiet"]}` runs after every successful write/edit; a
+  failing hook's output (capped, ANSI-stripped, with exit code) is
+  appended to the tool result so the model fixes broken builds/tests in
+  the same turn. Successes log a `hook ✓` line. Project-config hooks
+  need one-time trust at startup (they auto-execute; a cloned repo must
+  not get that for free); sub-agents run the same hooks
+- **Checkpoints — `/rewind [n]`**: restore the write/edit changes AND
+  the conversation of the last n turns together (session file rewritten,
+  transcript reseeded, up to 20 turns back). The undo journal now keeps
+  20 turns instead of 3. Like Claude Code checkpoints, bash-made changes
+  are outside the journal; compaction clears rewind marks
+- **Agent personas**: `.rift/agents/<name>.md` (project) or
+  `~/.config/rift/agents/` (user-wide) define custom sub-agent types —
+  frontmatter `name`/`description`/`model` (role or full name)/`tools`
+  (whitelist) plus a prompt body layered onto the base system prompt.
+  Tasks select one with `agent: "<name>"`; configured personas are
+  advertised to the model. Verified live end-to-end
+- **Diff preview in approvals**: write/edit approval prompts now render
+  a diff-colored preview of the pending change (trimmed to the changed
+  region, capped at 40 lines) above the allow/deny question — you review
+  what you're approving, not a byte count
+
 ## v1.2.0 — 2026-07-06
 
 - **Image attachments for vision models**: `@photo.png` in a prompt (or
