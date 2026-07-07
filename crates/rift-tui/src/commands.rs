@@ -110,7 +110,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/stats", "", "session totals: turns, tokens, tools, compactions"),
     ("/system", "[text]", "show or override the system prompt"),
     ("/temp", "<0.0-2.0>", "set sampling temperature"),
-    ("/theme", "[name]", "switch color theme (dark, light, mono)"),
+    ("/theme", "[name]", "browse/switch color themes (13 built-in: dark, light, mono, dracula, nord, gruvbox, …)"),
     ("/ctx", "<n>", "set context window (num_ctx)"),
     ("/retry", "", "re-run the last prompt"),
     ("/quit", "", "exit rift"),

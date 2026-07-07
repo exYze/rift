@@ -120,6 +120,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/host [url]` | show or switch the Ollama server |
 | `/think [on\|off\|auto]` | thinking mode (capability-checked) |
 | `/export` | save the transcript as markdown |
+| `/theme [name]` | browse (interactive picker) or switch the color theme. 13 built-in: `dark`, `light`, `mono` (terminal-native) plus 10 truecolor palettes with their own text/background/border colors — `dracula`, `nord`, `gruvbox`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin`, `rose-pine`, `matrix`, `synthwave`. Persist with `"theme": "<name>"` in config |
 
 ## Config (`.rift.json` in the project, or `~/.config/rift/config.json`)
 

@@ -1494,6 +1494,22 @@ fn input_height(input: &str) -> u16 {
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
+    // Themes with their own background/text paint the whole frame first;
+    // widgets then draw over it (unstyled cells keep this fg/bg, styled
+    // spans override fg only). Terminal-native themes skip this entirely.
+    {
+        let t = app.theme;
+        if t.bg.is_some() || t.fg.is_some() {
+            let mut style = Style::default();
+            if let Some(bg) = t.bg {
+                style = style.bg(bg);
+            }
+            if let Some(fg) = t.fg {
+                style = style.fg(fg);
+            }
+            frame.render_widget(Block::new().style(style), frame.area());
+        }
+    }
     let [main_area, status_area, input_area] = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(1),
@@ -1510,7 +1526,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
     let t = app.theme;
     let focused_style = Style::default().fg(t.accent);
-    let unfocused_style = Style::default().fg(t.muted);
+    let unfocused_style = Style::default().fg(t.border);
 
     // Transcript pane.
     {
@@ -2735,14 +2751,29 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 app.idle();
                                 let arg = trimmed.strip_prefix("/theme").unwrap_or_default().trim();
                                 if arg.is_empty() {
-                                    app.transcript.push_block(
-                                        Kind::Info,
-                                        format!(
-                                            "themes: {} (current: {})\nswitch with /theme <name>; persist with \"theme\": \"<name>\" in config",
-                                            theme::names().join(", "),
-                                            app.theme.name
-                                        ),
-                                    );
+                                    // Browse with the picker (like /model);
+                                    // Enter re-enters as "/theme <name>".
+                                    app.picker = Some(PickerState {
+                                        title: format!("select theme — current: {}", app.theme.name),
+                                        items: theme::THEMES
+                                            .iter()
+                                            .map(|th| PickerItem {
+                                                value: th.name.to_string(),
+                                                label: th.name.to_string(),
+                                                detail: if th.name == app.theme.name {
+                                                    "current".into()
+                                                } else if th.bg.is_some() {
+                                                    "truecolor".into()
+                                                } else {
+                                                    "terminal-native".into()
+                                                },
+                                            })
+                                            .collect(),
+                                        selected: 0,
+                                        kind: PickerKind::Command { template: "/theme {}".into() },
+                                    });
+                                    app.status =
+                                        "themes — ↑↓ select, Enter switch, Esc cancel · persist with \"theme\" in config".into();
                                 } else if let Some(th) = theme::find(arg) {
                                     app.theme = th;
                                     // Cached code spans hold the old syntect colors.
