@@ -3,6 +3,35 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.2.0 — 2026-07-06
+
+- **Image attachments for vision models**: `@photo.png` in a prompt (or
+  `--attach <path>` headless) attaches the image as base64 — ask about
+  screenshots, diagrams, error dialogs. One neutral form (data URLs on
+  the message), translated per provider: Ollama's bare-base64 `images`
+  array, OpenAI `image_url` content parts, Anthropic image source
+  blocks; wire shapes pinned by tests and verified live against a
+  vision-capable Ollama model. Text mentions keep the outline treatment;
+  images cap at 10 MB; attachments persist in the session. Headless
+  `--attach` also appends text files to the prompt
+- **`/mcp add [--global] <name> <command> [args…]`**: connect an existing
+  (off-the-shelf) stdio MCP server from inside the TUI — e.g.
+  `/mcp add fetch uvx mcp-server-fetch`. The server is spawned and its
+  tools verified BEFORE anything persists, registered live (no restart),
+  and saved to the project `.rift.json` (pre-trusted — typing the entry
+  is the consent the trust gate collects) or the user config with
+  `--global`. Complements config-file entries and `/mcp new`
+- Fix: after Esc-cancelling a turn, the model resumed the interrupted
+  task on the next (even unrelated) message — the abandoned instruction
+  was still the last word in history. Cancelled turns now mark the agent
+  interrupted, and the next input carries a note that the task was
+  deliberately abandoned and must not be resumed unasked
+- Fix: resumed sessions rendered expanded command prompts (/mcp new,
+  /init, …) as page-long user-colored walls, flattening the transcript —
+  live sessions only ever showed the line the user typed. Seeded user
+  messages now collapse to their first 8 lines + a count, and the
+  Esc-interrupt note is stripped from display
+
 ## v1.1.1 — 2026-07-06
 
 - **`/host` autodetects the server type**: probes the model list on both
