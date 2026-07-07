@@ -2044,6 +2044,22 @@ fn head_of(content: &str) -> String {
     out
 }
 
+/// The /deep-research command body: a canned orchestration prompt through
+/// the normal agent loop — fan out searches, delegate source-reading to
+/// concurrent sub-agents, cross-check, synthesize a cited report.
+const DEEP_RESEARCH_PROMPT: &str = "Run a deep-research workflow on this question:
+
+{q}
+
+Work in phases:
+1. PLAN: decompose the question into 3-6 distinct search angles (definitions, comparisons, recent developments, criticisms, data). Use the plan tool to track them.
+2. SEARCH: run web_search for each angle (vary phrasing; prefer specific queries over broad ones). Collect the most promising 6-12 source URLs across all angles.
+3. READ (delegate!): use the agent tool with up to 4 concurrent tasks per call, as many calls as needed, to read sources in parallel. Each task's prompt must name 2-3 URLs and instruct: 'fetch each URL, extract the claims relevant to <question>, quote key passages verbatim with their URL, note publication dates and obvious bias'. Sub-agents have fetch and web_search tools.
+4. CROSS-CHECK: compare the sub-agents' findings — flag claims sources disagree on, note which are corroborated by 2+ independent sources, and mark anything single-sourced as such.
+5. REPORT: write the final answer in markdown — a 2-3 sentence executive summary, the findings organized by theme with inline [n] citation markers, a disagreements/caveats section when sources conflict, and a numbered Sources list mapping [n] to URLs. Cite honestly: every non-obvious claim gets a citation; say clearly when evidence is thin.
+
+If web_search reports it is not configured, stop and tell the user to run /search <searxng-url>.";
+
 /// The `/init` command body — a normal agent turn with a canned prompt.
 const INIT_PROMPT: &str = "Explore this repository (use repo_map and outline to stay cheap; read key files only as needed) and write a RIFT.md file at the project root: a concise guide for AI coding agents working here. Cover: what the project does, how the code is laid out, how to build/test/run it, and any conventions or gotchas you noticed. Keep it under 60 lines.";
 
@@ -2338,9 +2354,12 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     // UI-side ToolCtx handle: /btw side questions read the current provider
     // and model from it (kept fresh by run_turn) without touching the agent.
     let ui_ctx = agent.ctx().clone();
+    // The addressable model name rides into the command context for /fork.
+    let model_addr = model.clone();
     let agent_task = tokio::spawn(async move {
         let mut agent = agent;
-        let mut cx = CmdCx { store, cwd: cwd.clone(), mcp, config_path, host, providers };
+        let mut cx =
+            CmdCx { store, cwd: cwd.clone(), mcp, config_path, host, providers, model_addr };
         let cwd_str = cwd.display().to_string();
         while let Some(msg) = prompt_rx.recv().await {
             match msg {
@@ -2868,7 +2887,25 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                             let cancel = CancellationToken::new();
                             app.cancel = Some(cancel.clone());
                             let trimmed = raw.trim().to_string();
-                            if trimmed == "/init" {
+                            if let Some(q) = trimmed.strip_prefix("/deep-research") {
+                                // Canned research orchestration through the
+                                // normal agent loop (the /init pattern).
+                                let q = q.trim();
+                                if q.is_empty() {
+                                    app.idle();
+                                    app.transcript.push_block(
+                                        Kind::Warn,
+                                        "! usage: /deep-research <question>".into(),
+                                    );
+                                } else {
+                                    app.status = "deep research underway…".into();
+                                    let _ = prompt_tx.send(UiMsg::Prompt(
+                                        DEEP_RESEARCH_PROMPT.replace("{q}", q),
+                                        vec![],
+                                        cancel,
+                                    ));
+                                }
+                            } else if trimmed == "/init" {
                                 // Syntactic sugar: a canned prompt through the normal agent loop.
                                 app.status = "generating RIFT.md…".into();
                                 let _ = prompt_tx.send(UiMsg::Prompt(INIT_PROMPT.to_string(), vec![], cancel));

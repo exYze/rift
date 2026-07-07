@@ -50,6 +50,11 @@ pub struct Config {
     /// another. Unset = single-model behavior, exactly as before.
     #[serde(default)]
     pub models: HashMap<String, String>,
+    /// SearXNG endpoint for the model's web_search tool (and /deep-research),
+    /// e.g. "http://192.168.1.153:8888". Requires the instance to allow
+    /// format=json. Settable at runtime with /search <url>.
+    #[serde(default)]
+    pub search_url: Option<String>,
     /// Automation hooks. `post_edit` commands run after every successful
     /// write/edit; a failing hook's output is appended to the tool result,
     /// so the model sees broken builds/tests immediately and fixes them in
@@ -158,6 +163,14 @@ pub struct Permissions {
     /// model); `"approve": false` in the user config or /yolo turns it off.
     #[serde(default)]
     pub approve: Option<bool>,
+    /// Sandbox wrapper: a command template every bash invocation runs
+    /// through, with `{cmd}` replaced by the command — e.g.
+    /// "wsl -e sh -c {cmd}" or "docker run --rm -v {cwd}:/w -w /w alpine
+    /// sh -c {cmd}". Containment comes from the wrapped tool (WSL, Docker,
+    /// firejail, bwrap), which is honest about what it can guarantee.
+    /// USER config only.
+    #[serde(default)]
+    pub bash_wrapper: Option<String>,
 }
 
 impl Permissions {
@@ -206,6 +219,9 @@ impl Config {
         if p.effort.is_some() {
             self.effort = p.effort;
         }
+        if p.search_url.is_some() {
+            self.search_url = p.search_url;
+        }
         // Roles are plain model names resolved through the (redefinition-
         // guarded) provider table, so a project adding/overriding them is
         // no more powerful than it setting `model`.
@@ -252,6 +268,12 @@ impl Config {
         if p.permissions.approve == Some(true) {
             self.permissions.approve = Some(true);
         }
+        if p.permissions.bash_wrapper.is_some() {
+            warnings.push(
+                "project .rift.json 'bash_wrapper' ignored — the sandbox wrapper can only come from the                  user config (a cloned repo must not be able to re-route shell commands)"
+                    .into(),
+            );
+        }
         if !p.permissions.bash_allow.is_empty() {
             warnings.push(
                 "project .rift.json 'bash_allow' ignored — allow patterns load from the user config only \
@@ -294,6 +316,32 @@ pub fn trust_hook(command: &str) -> Result<()> {
     }
     std::fs::write(&path, serde_json::to_string_pretty(&list)? + "\n")
         .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Persist (or clear) the search endpoint in the USER config,
+/// merge-preserving — the /search command's storage.
+pub fn set_user_search_url(url: Option<&str>) -> Result<std::path::PathBuf> {
+    let path = dirs_config().join("rift/config.json");
+    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
+        Err(_) => serde_json::json!({}),
+    };
+    let obj = root.as_object_mut().context("user config is not a JSON object")?;
+    match url {
+        Some(u) => {
+            obj.insert("search_url".into(), serde_json::Value::String(u.to_string()));
+        }
+        None => {
+            obj.remove("search_url");
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&root)? + "
+")
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
 }
 
 /// Persist an MCP server entry (`/mcp add`) into the user config or the

@@ -82,6 +82,9 @@ pub struct CmdCx {
     /// Default Ollama host + configured providers, for provider-aware `/model`.
     pub host: String,
     pub providers: std::collections::HashMap<String, rift_core::ProviderConfig>,
+    /// The ADDRESSABLE model name (provider prefix intact) — what /fork
+    /// relaunches with; updated on /model switches.
+    pub model_addr: String,
 }
 
 /// (name, argument hint, one-line description) — the single source of truth
@@ -108,6 +111,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/plan", "[clear]", "show or clear the agent's task checklist"),
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
     ("/save", "<name>", "name this session (keeps autosaving to it)"),
+    ("/search", "[url|off]", "show or set the SearXNG endpoint powering web_search and /deep-research"),
+    ("/deep-research", "<question>", "fan out web searches, fetch and cross-check sources, synthesize a cited report"),
     ("/skills", "[new [--global] <desc>]", "list skills, or generate one (project or user-wide)"),
     ("/swarm", "<task> [--models a,b] [--judge m]", "WarpDrive race in isolated worktrees"),
     ("/tasks", "[send <id> <text>|kill <id>]", "background tasks: list, write to one's stdin, or kill one"),
@@ -120,7 +125,9 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/temp", "<0.0-2.0>", "set sampling temperature"),
     ("/theme", "[name]", "browse/switch color themes (13 built-in: dark, light, mono, dracula, nord, gruvbox, …)"),
     ("/ctx", "<n>", "set context window (num_ctx)"),
+    ("/remember", "[fact]", "save a durable fact to project memory (.rift/memory.md); bare = show memory"),
     ("/retry", "", "re-run the last prompt"),
+    ("/fork", "", "open a second rift window continuing a COPY of this conversation"),
     ("/rewind", "[n]", "rewind n turns (default 1): restore write/edit changes AND the conversation"),
     ("/quit", "", "exit rift"),
     ("/tools", "", "tools the model can call (builtin + MCP)"),
@@ -192,11 +199,16 @@ pub async fn run_command(
         "/ctx" => cmd_ctx(rest, agent, fx),
         "/save" => cmd_save(rest, agent, cx, fx),
         "/tasks" => cmd_tasks(rest, agent, fx),
+        "/search" => cmd_search(rest, agent, fx).await,
         "/rewind" => cmd_rewind(rest, agent, cx, fx),
+        "/remember" => cmd_remember(rest, cx, fx),
+        "/fork" => cmd_fork(agent, cx, fx),
         "/worktrees" => cmd_worktrees(cx, fx).await,
         // Handled in the chat input (they drive UI state directly);
         // reachable here only via odd nesting like a /loop body.
-        "/goal" | "/loop" | "/btw" | "/theme" => Err(anyhow!("{cmd} runs from the chat input directly")),
+        "/goal" | "/loop" | "/btw" | "/theme" | "/deep-research" => {
+            Err(anyhow!("{cmd} runs from the chat input directly"))
+        }
         other => Err(anyhow!("unknown command '{other}' — /help lists available commands")),
     };
     let status = match result {
@@ -274,7 +286,7 @@ fn cmd_tasks(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result
 async fn cmd_model(
     arg: &str,
     agent: &mut Agent,
-    cx: &CmdCx,
+    cx: &mut CmdCx,
     fx: &UnboundedSender<UiEffect>,
 ) -> Result<String> {
     if arg.is_empty() {
@@ -349,6 +361,8 @@ async fn cmd_model(
     }
     agent.cfg.model = actual.clone();
     agent.set_client(client);
+    // Keep the addressable name current so /fork relaunches with it.
+    cx.model_addr = arg.to_string();
     // The UI carries the ADDRESSABLE name (provider prefix intact) — it's
     // what /restart relaunches with and what the status line shows.
     let _ = fx.send(UiEffect::Model(arg.to_string()));
@@ -777,6 +791,12 @@ fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) ->
             "off (YOLO) — write/edit/bash run without asking (/yolo off restores prompts)"
         },
     );
+    match agent.ctx().bash_wrapper() {
+        Some(w) => out.push_str(&format!("sandbox wrapper (permissions.bash_wrapper): {w}\n\n")),
+        None => out.push_str(
+            "sandbox wrapper: none — bash runs directly (set permissions.bash_wrapper to route through WSL/Docker/firejail)\n\n",
+        ),
+    }
     out.push_str("allowed (run without an approval prompt; permissions.bash_allow, grown by 'always allow'):\n");
     if allow.is_empty() {
         out.push_str("  none yet — choose \"always allow '<pattern>'\" on an approval prompt to add one\n");
@@ -976,6 +996,189 @@ fn cmd_rewind(arg: &str, agent: &mut Agent, cx: &mut CmdCx, fx: &UnboundedSender
     Ok(format!("rewound {n} turn(s), {} file(s) restored", restored.len()))
 }
 
+/// /remember — append a fact to project memory; bare shows the memory file.
+fn cmd_remember(arg: &str, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    if arg.trim().is_empty() {
+        match rift_core::memory::load_memory(&cx.cwd) {
+            Some(mem) => {
+                let _ = fx.send(UiEffect::Out(Kind::Info, mem));
+                Ok("memory shown".into())
+            }
+            None => {
+                let _ = fx.send(UiEffect::Out(
+                    Kind::Info,
+                    "no project memory yet — /remember <fact> starts one (.rift/memory.md, loaded every session; \
+                     the model saves its own learnings with its remember tool)"
+                        .into(),
+                ));
+                Ok("no memory yet".into())
+            }
+        }
+    } else {
+        let path = rift_core::memory::append_memory(&cx.cwd, arg)?;
+        let msg = format!("🧠 remembered → {} (loads into the system prompt next session)", path.display());
+        let _ = fx.send(UiEffect::Out(Kind::Info, msg));
+        Ok("remembered".into())
+    }
+}
+
+/// /fork — duplicate this conversation into a NEW session file and open a
+/// second rift window resuming the copy. Both windows then autosave to
+/// their own files; the original is untouched.
+fn cmd_fork(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let fork_store = SessionStore::create()?;
+    let cwd_str = cx.cwd.display().to_string();
+    fork_store.save(&agent.cfg.model, &cwd_str, &agent.messages)?;
+    let exe = std::env::current_exe().context("cannot locate the rift binary")?;
+    let session = fork_store.path().to_path_buf();
+    spawn_fork_window(&exe, &cx.model_addr, &cx.host, &session, &cx.cwd)?;
+    let msg = format!(
+        "🍴 forked — a new window is opening with a copy of this conversation\n  session copy: {}\n\
+         Each window keeps its own history from here.",
+        session.display()
+    );
+    let _ = fx.send(UiEffect::Out(Kind::Info, msg));
+    Ok("forked".into())
+}
+
+/// Open a new terminal window running `exe --resume <session>`, best-effort
+/// per platform. rift is a TUI — it needs a real terminal, so a plain spawn
+/// isn't enough.
+fn spawn_fork_window(
+    exe: &std::path::Path,
+    model: &str,
+    host: &str,
+    session: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<()> {
+    #[cfg(windows)]
+    {
+        // `start` opens a fresh console window; the empty string is its
+        // window-title slot.
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(exe)
+            .arg("--model")
+            .arg(model)
+            .arg("--host")
+            .arg(host)
+            .arg("--resume")
+            .arg(session)
+            .current_dir(cwd)
+            .spawn()
+            .context("opening a new console window")?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell application \"Terminal\" to do script \"cd '{}' && '{}' --model '{}' --host '{}' --resume '{}'\"",
+            cwd.display(),
+            exe.display(),
+            model,
+            host,
+            session.display()
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .context("opening a Terminal window via osascript")?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let inner = format!(
+            "cd '{}' && '{}' --model '{}' --host '{}' --resume '{}'",
+            cwd.display(),
+            exe.display(),
+            model,
+            host,
+            session.display()
+        );
+        let candidates: Vec<(String, Vec<String>)> = std::env::var("TERMINAL")
+            .ok()
+            .into_iter()
+            .map(|t| (t, vec!["-e".into(), "sh".into(), "-c".into(), inner.clone()]))
+            .chain(
+                [
+                    ("x-terminal-emulator", vec!["-e", "sh", "-c"]),
+                    ("gnome-terminal", vec!["--", "sh", "-c"]),
+                    ("konsole", vec!["-e", "sh", "-c"]),
+                    ("xterm", vec!["-e", "sh", "-c"]),
+                ]
+                .into_iter()
+                .map(|(t, args)| {
+                    let mut a: Vec<String> = args.into_iter().map(String::from).collect();
+                    a.push(inner.clone());
+                    (t.to_string(), a)
+                }),
+            )
+            .collect();
+        for (term, args) in candidates {
+            if std::process::Command::new(&term).args(&args).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("no terminal emulator found (set $TERMINAL) — resume the copy manually: rift --resume <session>")
+    }
+}
+
+/// /search — show, set (probed + persisted to the user config), or clear
+/// the SearXNG endpoint behind web_search and /deep-research.
+async fn cmd_search(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    match arg.trim() {
+        "" => {
+            let msg = match agent.ctx().search_url() {
+                Some(u) => format!("search endpoint: {u}
+change with /search <url>, disable with /search off"),
+                None => "web search is not configured — /search <searxng-url> enables it (e.g. /search http://192.168.1.153:8888)".into(),
+            };
+            let _ = fx.send(UiEffect::Out(Kind::Info, msg));
+            Ok("search shown".into())
+        }
+        "off" => {
+            agent.ctx().set_search_url(None);
+            let path = rift_core::config::set_user_search_url(None)?;
+            let _ = fx.send(UiEffect::Out(Kind::Info, format!("web search disabled (removed from {})", path.display())));
+            Ok("search off".into())
+        }
+        url => {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                bail!("that doesn't look like a URL — /search <searxng-url>");
+            }
+            // Probe before adopting: a real query through the JSON API.
+            let base = url.trim_end_matches('/');
+            let client = reqwest::Client::new();
+            let resp = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                client.get(format!("{base}/search")).query(&[("q", "test"), ("format", "json")]).send(),
+            )
+            .await
+            .map_err(|_| anyhow!("{base} did not answer within 15s"))?
+            .map_err(|e| anyhow!("cannot reach {base}: {e}"))?;
+            if !resp.status().is_success() {
+                bail!(
+                    "{base} answered {} — a SearXNG instance with format=json enabled is required                      (settings.yml: search.formats include json)",
+                    resp.status()
+                );
+            }
+            let count = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("results").and_then(|r| r.as_array()).map(|a| a.len()))
+                .unwrap_or(0);
+            agent.ctx().set_search_url(Some(base.to_string()));
+            let path = rift_core::config::set_user_search_url(Some(base))?;
+            let _ = fx.send(UiEffect::Out(
+                Kind::Info,
+                format!("🔎 search endpoint set: {base} (probe returned {count} results) — saved to {}", path.display()),
+            ));
+            Ok(format!("search: {base}"))
+        }
+    }
+}
+
 fn cmd_approve(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     match arg {
         "on" => agent.ctx().set_approval(true),
@@ -1068,6 +1271,8 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
             let config = loaded.config;
             agent.ctx().set_deny(&config.permissions.bash_deny);
             agent.ctx().set_allow(&config.permissions.bash_allow);
+            agent.ctx().set_bash_wrapper(config.permissions.bash_wrapper.clone());
+            agent.ctx().set_search_url(config.search_url.clone());
             agent.ctx().set_approval(config.permissions.approve_effective());
             // Hooks: only already-trusted project entries reload here (the
             // trust prompt is a startup interaction); new ones need /restart.

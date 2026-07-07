@@ -2,6 +2,7 @@ pub mod agent;
 pub mod compact;
 pub mod config;
 pub mod mcp;
+pub mod memory;
 pub mod outline;
 pub mod outline_cache;
 pub mod paths;
@@ -84,6 +85,15 @@ pub fn system_prompt_with_guide(model: &str, cwd: &std::path::Path) -> (String, 
             "\n\nProject guide (from {file} — instructions for agents working in this repo):\n{shown}"
         ));
         loaded.push(file.to_string());
+    }
+    // Project memory: durable facts from previous sessions. Loaded after the
+    // guides, with its own budget — memories must not crowd out RIFT.md.
+    if let Some(mem) = memory::load_memory(cwd) {
+        prompt.push_str(&format!(
+            "\n\nProject memory (facts saved in previous sessions — trust but verify anything \
+             time-sensitive; add new durable learnings with your remember tool):\n{mem}"
+        ));
+        loaded.push(".rift/memory.md".to_string());
     }
     (prompt, loaded)
 }

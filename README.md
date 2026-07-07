@@ -117,6 +117,10 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/merge <name> [--cleanup]` | apply a swarm candidate's patch |
 | `/undo` | revert the last turn's write/edit changes |
 | `/rewind [n]` | checkpoint restore: rewind n turns (default 1) — write/edit changes AND the conversation roll back together (up to 20 turns; bash-made changes are outside the journal) |
+| `/remember [fact]` | save a durable fact to project memory (`.rift/memory.md`, loaded into the system prompt every session); bare shows the memory. The model saves its own learnings with its `remember` tool |
+| `/search [url\|off]` | show or set the SearXNG endpoint powering the model's `web_search` tool (probed before adoption, persisted to the user config; also `"search_url"` in JSON) |
+| `/deep-research <question>` | research workflow: fan out `web_search` queries across angles, delegate source-reading to concurrent sub-agents (`fetch` + verbatim quotes), cross-check claims across sources, and synthesize a cited markdown report with a numbered source list |
+| `/fork` | open a second rift window continuing a COPY of this conversation — both windows keep their own history from there |
 | `/diff` | colored git diff of the working tree |
 | `/init` | generate a RIFT.md project guide for agents |
 | `/restart` | relaunch rift and resume this session — pick up a fresh `/update` without losing your chat |
@@ -151,6 +155,10 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 The optional `models` map names **model roles** for multi-model workflows: the agent tool accepts `model: "<role>"` (or any full model string) per delegated task, so one session can research/spec/review on a strong model and implement on a cheap one — e.g. ask the session model to plan, then have it delegate implementation tasks with `model: "fast"` and review the reports itself. The system prompt advertises configured roles to the model automatically, `/model`'s picker lists them first, and with no `models` map everything behaves exactly as a single-model setup.
 
 Permissions work like Claude Code's: interactive sessions **ask before `write`/`edit`/`bash` by default**, and each bash prompt offers *allow once* / *always allow `<pattern>`* (persisted to `permissions.bash_allow` in your user config — those commands never prompt again) / *allow all bash this session* / *deny*. Write/edit approval prompts show a **diff-colored preview of the pending change**, so you review what you're allowing. The deny list (built-ins + `bash_deny`) is always enforced, even in YOLO mode. `"approve": false` in the user config or `/yolo` turns prompting off; a project `.rift.json` can only tighten (add denies, force approval on — its `bash_allow` is ignored).
+
+### Sandbox wrapper
+
+`"permissions": {"bash_wrapper": "wsl -e sh -c '{cmd}'"}` routes **every** bash command through a containment tool — WSL, Docker (`docker run --rm -v {cwd}:/w -w /w alpine sh -c '{cmd}'`), firejail, bwrap. rift stays honest about what it is: the deny list and approval prompts are *policy*; real isolation comes from the wrapped tool, which is built for it. `{cmd}` is single-quote-escaped for `sh -c '{cmd}'` forms, `{cwd}` substitutes the project path. User config only (a cloned repo can't re-route your shell), shown in `/permissions`, applies to background tasks and sub-agents too.
 
 ### Hooks
 

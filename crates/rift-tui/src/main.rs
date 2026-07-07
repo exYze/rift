@@ -383,6 +383,14 @@ async fn main() -> Result<()> {
     let approve = cli.approve || config.permissions.approve_effective();
     let mut ctx = ToolCtx::with_extra_deny(&cwd, &config.permissions.bash_deny).with_approval(approve);
     ctx.set_allow(&config.permissions.bash_allow);
+    if let Some(w) = &config.permissions.bash_wrapper {
+        eprintln!("sandbox wrapper: every bash command routes through `{w}`");
+    }
+    ctx.set_bash_wrapper(config.permissions.bash_wrapper.clone());
+    if let Some(u) = &config.search_url {
+        eprintln!("web search: {u}");
+    }
+    ctx.set_search_url(config.search_url.clone());
     let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
     if interactive {
         ctx = ctx.with_interaction(ask_tx);

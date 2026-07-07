@@ -130,6 +130,11 @@ pub struct ToolCtx {
     /// post_edit hook commands (config `hooks`, project ones trust-gated);
     /// run after every successful write/edit, failures fed to the model.
     hooks: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Sandbox wrapper template ({cmd}/{cwd} placeholders) every bash
+    /// invocation routes through; None = run directly.
+    bash_wrapper: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// SearXNG endpoint for the web_search tool; None = search unavailable.
+    search_url: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 fn build_deny_set(extra: &[String]) -> globset::GlobSet {
@@ -184,6 +189,40 @@ impl ToolCtx {
             bg: crate::tasks::BgTasks::default(),
             subagent: std::sync::Arc::new(std::sync::RwLock::new(None)),
             hooks: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            bash_wrapper: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            search_url: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Set/clear the SearXNG endpoint (startup, /search, /config reload).
+    pub fn set_search_url(&self, url: Option<String>) {
+        if let Ok(mut u) = self.search_url.lock() {
+            *u = url.map(|u| u.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
+        }
+    }
+
+    pub fn search_url(&self) -> Option<String> {
+        self.search_url.lock().ok().and_then(|u| u.clone())
+    }
+
+    /// Set/clear the sandbox wrapper (startup, /config reload).
+    pub fn set_bash_wrapper(&self, wrapper: Option<String>) {
+        if let Ok(mut w) = self.bash_wrapper.lock() {
+            *w = wrapper.filter(|t| t.contains("{cmd}"));
+        }
+    }
+
+    pub fn bash_wrapper(&self) -> Option<String> {
+        self.bash_wrapper.lock().ok().and_then(|w| w.clone())
+    }
+
+    /// The command bash actually executes: the raw command (what the deny
+    /// list and approval saw) routed through the sandbox wrapper when one
+    /// is configured.
+    pub(crate) fn effective_command(&self, command: &str) -> String {
+        match self.bash_wrapper() {
+            Some(tpl) => wrap_sandbox(&tpl, command, &self.cwd),
+            None => command.to_string(),
         }
     }
 
@@ -250,6 +289,9 @@ impl ToolCtx {
             subagent: std::sync::Arc::new(std::sync::RwLock::new(None)),
             // Sub-agents edit files too — the same verification applies.
             hooks: self.hooks.clone(),
+            bash_wrapper: self.bash_wrapper.clone(),
+            // Research sub-agents search too.
+            search_url: self.search_url.clone(),
         }
     }
 
@@ -627,6 +669,9 @@ impl ToolRegistry {
                 Box::new(RepoMapTool),
                 Box::new(PlanTool),
                 Box::new(TaskTool),
+                Box::new(RememberTool),
+                Box::new(FetchTool),
+                Box::new(WebSearchTool),
             ],
         }
     }
@@ -672,6 +717,8 @@ impl ToolRegistry {
             "find_files" | "file_glob" | "file_search" => "glob",
             "skeleton" | "file_outline" | "symbols" | "get_outline" => "outline",
             "repo_overview" | "project_map" | "codebase_map" => "repo_map",
+            "internet_search" | "google" | "web" | "duckduckgo" | "search_web" => "web_search",
+            "web_fetch" | "http_get" | "get_url" | "fetch_url" | "curl" | "wget" => "fetch",
             "tasks" | "bg" | "task_status" | "check_task" | "background_task" | "task_output" => "task",
             "Task" | "subagent" | "sub_agent" | "spawn_agent" | "delegate" | "dispatch_agent" => "agent",
             other => other,
@@ -1072,6 +1119,14 @@ impl Tool for EditTool {
 
 // ---------------------------------------------------------------- bash
 
+/// Substitute a command into the sandbox wrapper template: `{cmd}` gets the
+/// command (single-quote-escaped so `sh -c '{cmd}'` forms survive quotes in
+/// the command), `{cwd}` the working directory.
+fn wrap_sandbox(template: &str, command: &str, cwd: &Path) -> String {
+    let escaped = command.replace('\'', "'\\''");
+    template.replace("{cmd}", &escaped).replace("{cwd}", &cwd.display().to_string())
+}
+
 /// Build a shell invocation for the host platform. On Windows commands run
 /// through `cmd.exe /C` (honoring %COMSPEC%); everywhere else through `sh -c`.
 /// This is what lets the bash tool behave the same on macOS, Linux and Windows
@@ -1134,7 +1189,10 @@ impl Tool for BashTool {
             timeout = timeout.min(SERVER_PROBE_SECS);
         }
 
-        let mut cmd = shell_command(command);
+        // Deny list and approval saw the RAW command; execution routes
+        // through the sandbox wrapper when one is configured.
+        let effective = ctx.effective_command(command);
+        let mut cmd = shell_command(&effective);
         cmd.current_dir(&ctx.cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -1249,7 +1307,7 @@ impl Tool for BashTool {
 /// [task notification] for the model). Tasks die with the rift process —
 /// no orphans survive an exit.
 fn bash_background(command: &str, ctx: &ToolCtx) -> Result<String> {
-    let mut cmd = shell_command(command);
+    let mut cmd = shell_command(&ctx.effective_command(command));
     cmd.current_dir(&ctx.cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1312,6 +1370,239 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>, reg: crate::task
             Ok(0) | Err(_) => break,
             Ok(n) => reg.append_output(id, &String::from_utf8_lossy(&buf[..n])),
         }
+    }
+}
+
+// ---------------------------------------------------------------- fetch
+
+/// Minimal web fetch: GET a URL, strip HTML down to readable text, cap the
+/// size. Enough for docs pages, READMEs, and API references; anything
+/// fancier (search, auth, JS rendering) belongs to an MCP server.
+struct FetchTool;
+
+const FETCH_MAX_OUTPUT: usize = 20_000;
+const FETCH_TIMEOUT_SECS: u64 = 20;
+
+/// Strip HTML to readable text: drops tags, script/style bodies, comments;
+/// decodes a handful of common entities; collapses blank runs.
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 4);
+    let lower = html.to_lowercase();
+    let mut skip_until: Option<usize> = None;
+    for (i, c) in html.char_indices() {
+        if let Some(end) = skip_until {
+            if i < end {
+                continue;
+            }
+            skip_until = None;
+        }
+        if c == '<' {
+            // script/style/comment bodies vanish entirely.
+            for (open, close) in [("<script", "</script>"), ("<style", "</style>"), ("<!--", "-->")] {
+                if lower[i..].starts_with(open) {
+                    if let Some(rel) = lower[i..].find(close) {
+                        skip_until = Some(i + rel + close.len());
+                    } else {
+                        skip_until = Some(html.len());
+                    }
+                    break;
+                }
+            }
+            if skip_until.is_some() {
+                continue;
+            }
+            // Block-level closers become newlines so structure survives.
+            for tag in ["</p>", "</div>", "</li>", "</h1>", "</h2>", "</h3>", "</h4>", "</tr>", "<br"] {
+                if lower[i..].starts_with(tag) {
+                    out.push('\n');
+                    break;
+                }
+            }
+            // Skip to the tag's end.
+            let mut end = html.len();
+            for (j, cc) in html[i..].char_indices() {
+                if cc == '>' {
+                    end = i + j + 1;
+                    break;
+                }
+            }
+            skip_until = Some(end);
+            continue;
+        }
+        out.push(c);
+    }
+    let decoded = out
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
+    // Collapse whitespace runs while keeping paragraph breaks.
+    let mut lines: Vec<String> = Vec::new();
+    for line in decoded.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !line.is_empty() {
+            lines.push(line);
+        } else if !lines.last().map(|l| l.is_empty()).unwrap_or(true) {
+            lines.push(String::new());
+        }
+    }
+    lines.join("
+")
+}
+
+#[async_trait]
+impl Tool for FetchTool {
+    fn name(&self) -> &str {
+        "fetch"
+    }
+    fn description(&self) -> &str {
+        "Fetch a URL (GET) and return its content as readable text: HTML is stripped to text,          JSON and plain text pass through. For docs, READMEs, changelogs, API references.          Output is capped; no auth, no JS rendering."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+                "url": {"type": "string", "description": "http(s) URL to fetch"}
+            }
+        })
+    }
+    async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
+        let _ = ctx;
+        let url = req_str(args, "url")?;
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            bail!("only http(s) URLs are supported");
+        }
+        let client = rift_provider::http_client();
+        let resp = tokio::time::timeout(
+            Duration::from_secs(FETCH_TIMEOUT_SECS),
+            client.get(url).header("user-agent", concat!("rift/", env!("CARGO_PKG_VERSION"))).send(),
+        )
+        .await
+        .map_err(|_| anyhow!("fetch timed out after {FETCH_TIMEOUT_SECS}s"))?
+        .with_context(|| format!("fetching {url}"))?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = tokio::time::timeout(Duration::from_secs(FETCH_TIMEOUT_SECS), resp.text())
+            .await
+            .map_err(|_| anyhow!("fetch timed out reading the body"))??;
+        let text = if content_type.contains("html") { html_to_text(&body) } else { body };
+        let mut out = format!("[{status} {content_type}] {url}
+
+");
+        out.push_str(&truncate_middle(text.trim(), FETCH_MAX_OUTPUT));
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------- web_search
+
+/// Web search through a SearXNG instance (config `search_url`, /search).
+/// SearXNG aggregates engines locally, which keeps queries off third-party
+/// APIs — the local-first way to give models the internet.
+struct WebSearchTool;
+
+const SEARCH_MAX_RESULTS: usize = 8;
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+    fn description(&self) -> &str {
+        "Search the web (via the configured SearXNG instance). Returns titles, URLs, and          snippets; follow up with the fetch tool to read a result in full."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Search query"}
+            }
+        })
+    }
+    async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
+        let query = req_str(args, "query")?;
+        let Some(base) = ctx.search_url() else {
+            bail!(
+                "web search is not configured — the user can set it with /search <searxng-url> or                  search_url in the config. Proceed without web results or ask them to configure it."
+            );
+        };
+        let client = rift_provider::http_client();
+        let url = format!("{base}/search");
+        let resp = tokio::time::timeout(
+            Duration::from_secs(FETCH_TIMEOUT_SECS),
+            client
+                .get(&url)
+                .query(&[("q", query), ("format", "json")])
+                .header("user-agent", concat!("rift/", env!("CARGO_PKG_VERSION")))
+                .send(),
+        )
+        .await
+        .map_err(|_| anyhow!("search timed out after {FETCH_TIMEOUT_SECS}s"))?
+        .with_context(|| format!("searching via {base}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!(
+                "search endpoint {base} returned {status} — if this is 403, the SearXNG instance                  must allow format=json (settings.yml: search.formats)"
+            );
+        }
+        let body: Value = resp.json().await.with_context(|| format!("invalid JSON from {base}"))?;
+        let results = body.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        if results.is_empty() {
+            return Ok(format!("no results for: {query}"));
+        }
+        let mut out = format!("results for: {query}
+");
+        for r in results.iter().take(SEARCH_MAX_RESULTS) {
+            let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)");
+            let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let content = r.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let snippet: String = content.chars().take(240).collect();
+            out.push_str(&format!("
+- {title}
+  {url}
+  {snippet}
+"));
+        }
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------- remember
+
+/// The model's write access to project memory (.rift/memory.md): durable
+/// facts loaded into the system prompt of every future session.
+struct RememberTool;
+
+#[async_trait]
+impl Tool for RememberTool {
+    fn name(&self) -> &str {
+        "remember"
+    }
+    fn description(&self) -> &str {
+        "Save a short durable fact to project memory (.rift/memory.md), loaded in every future          session. Use for non-obvious, lasting discoveries: build quirks, hidden conventions,          decisions and their reasons. Not for session-scoped state or anything obvious from the code."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["fact"],
+            "properties": {
+                "fact": {"type": "string", "description": "The fact to save - one to a few lines, self-contained"}
+            }
+        })
+    }
+    async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
+        let fact = req_str(args, "fact")?;
+        let path = crate::memory::append_memory(&ctx.cwd, fact)?;
+        Ok(format!("Remembered (saved to {}). It loads into the system prompt next session.", path.display()))
     }
 }
 
@@ -1847,6 +2138,84 @@ impl Tool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn web_search_parses_searxng_results() {
+        // Unconfigured -> a clear, actionable error for the model.
+        let bare = ToolCtx::new("/tmp");
+        let mut args = Map::new();
+        args.insert("query".into(), Value::String("rust".into()));
+        let err = WebSearchTool.execute(&args, &bare).await.unwrap_err();
+        assert!(err.to_string().contains("/search"), "got: {err}");
+
+        // Configured -> titles, urls, snippets from the JSON API.
+        let server = rift_provider::test_support::MockServer::start(vec![
+            rift_provider::test_support::MockResponse::json(
+                200,
+                "{\"results\":[{\"title\":\"Rust Language\",\"url\":\"https://rust-lang.org\",\"content\":\"A systems language.\"},{\"title\":\"Rust Book\",\"url\":\"https://doc.rust-lang.org/book\",\"content\":\"Learn Rust.\"}]}",
+            ),
+        ])
+        .await;
+        let ctx = ToolCtx::new("/tmp");
+        ctx.set_search_url(Some(server.base_url.clone()));
+        let out = WebSearchTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("Rust Language"), "got: {out}");
+        assert!(out.contains("https://rust-lang.org"));
+        assert!(out.contains("A systems language."));
+        let req = &server.requests().await[0];
+        assert!(req.contains("format=json"), "must use the JSON API: {req}");
+    }
+
+    #[test]
+    fn sandbox_wrapper_substitutes_and_escapes() {
+        let cwd = Path::new("/work");
+        // {cmd} and {cwd} substitute; single quotes in the command survive
+        // an sh -c '{cmd}' wrapper form.
+        assert_eq!(
+            wrap_sandbox("wsl -e sh -c '{cmd}'", "echo hi", cwd),
+            "wsl -e sh -c 'echo hi'"
+        );
+        assert_eq!(
+            wrap_sandbox("docker run -v {cwd}:/w alpine sh -c '{cmd}'", "echo 'a b'", cwd),
+            "docker run -v /work:/w alpine sh -c 'echo '\\''a b'\\'''"
+        );
+        // No wrapper configured → commands run untouched.
+        let ctx = ToolCtx::new("/tmp");
+        assert_eq!(ctx.effective_command("ls"), "ls");
+        // Templates without {cmd} are refused (they'd swallow the command).
+        ctx.set_bash_wrapper(Some("firejail".into()));
+        assert_eq!(ctx.effective_command("ls"), "ls");
+        ctx.set_bash_wrapper(Some("echo SBX&& {cmd}".into()));
+        assert_eq!(ctx.effective_command("ls"), "echo SBX&& ls");
+    }
+
+    #[tokio::test]
+    async fn sandbox_wrapper_routes_bash_end_to_end() {
+        let dir = std::env::temp_dir();
+        let ctx = ToolCtx::new(&dir);
+        // A prefix wrapper proves the wrapped form is what actually ran.
+        ctx.set_bash_wrapper(Some("echo SANDBOXED&& {cmd}".into()));
+        let mut args = Map::new();
+        args.insert("command".into(), Value::String("echo inner".into()));
+        let out = BashTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("SANDBOXED"), "wrapper did not run: {out}");
+        assert!(out.contains("inner"), "command did not run: {out}");
+    }
+
+    #[test]
+    fn html_to_text_strips_markup() {
+        let html = "<html><head><style>body{color:red}</style><script>var x=1;</script></head>\
+                    <body><h1>Title</h1><p>Hello &amp; welcome</p><!-- hidden -->\
+                    <div>Second   line</div></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Title"));
+        assert!(text.contains("Hello & welcome"));
+        assert!(text.contains("Second line"));
+        assert!(!text.contains("color:red"), "style leaked: {text}");
+        assert!(!text.contains("var x"), "script leaked: {text}");
+        assert!(!text.contains("hidden"), "comment leaked: {text}");
+        assert!(!text.contains('<'), "tags leaked: {text}");
+    }
 
     #[test]
     fn preview_diff_trims_context_and_caps() {
