@@ -3,6 +3,20 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.1.1 — 2026-07-06
+
+- **`/host` autodetects the server type**: probes the model list on both
+  protocols (URL shape picks the order — `…/v1` tries OpenAI-compatible
+  first) and adopts whichever answers, so `/host http://box:8000/v1`
+  switches straight to a vLLM/LM Studio/llama.cpp server. The default
+  host is protocol-aware everywhere now: bare `/model` switches, startup
+  (`host` in config may be a `/v1` URL), `/restart`, and the context
+  budget adoption all follow the detected kind. Ad-hoc hosts run keyless
+  — keyed endpoints still belong in `providers`
+- Fix: `/restart` relaunched against the STARTUP host — a `/host` switch
+  never reached the restart spec (only the model survived). The UI now
+  tracks host switches, so restart resumes on the current server
+
 ## v1.1.0 — 2026-07-06
 
 - **Model roles — optional multi-model workflows**: a config `models` map
