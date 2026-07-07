@@ -3,6 +3,19 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.1.0 — 2026-07-06
+
+- **Model roles — optional multi-model workflows**: a config `models` map
+  names roles ({"smart": "vllm/…", "fast": "gemma4:26b"}), and each
+  agent-tool task can set `model` to a role name or full model string —
+  so one session plans/reviews on a strong model and delegates
+  implementation to a cheap one (cross-provider: an Ollama child under a
+  vLLM session works). Children on a different model get fresh
+  think/effort defaults (capability checks don't transfer); routing
+  failures surface as tool errors before anything runs. The system
+  prompt advertises configured roles, and `/model`'s picker lists them
+  first. No `models` map = exactly the old single-model behavior
+
 ## v1.0.5 — 2026-07-06
 
 - Fix: picking a theme from the `/theme` picker failed with "unknown
