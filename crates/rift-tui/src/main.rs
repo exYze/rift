@@ -723,6 +723,10 @@ async fn run_headless(
              (headless runs end with the turn; use the TUI for work that outlives one)\x1b[0m"
         );
     }
+    // The registry holds a clone of tx — release it BEFORE waiting for the
+    // printer, or the channel never closes and the process hangs forever
+    // after printing its final line (the v1.0.0–v1.0.3 headless zombie bug).
+    agent.ctx().bg().clear_notify();
     drop(tx);
     let _ = printer.await;
     Ok(())

@@ -98,6 +98,16 @@ impl BgTasks {
         }
     }
 
+    /// Detach the frontend channel. Frontends that WAIT for the event
+    /// channel to close (headless: `printer.await`) must call this before
+    /// dropping their own sender — the registry holds a clone, and a held
+    /// clone keeps the channel open and the process alive forever.
+    pub fn clear_notify(&self) {
+        if let Ok(mut n) = self.notify.write() {
+            *n = None;
+        }
+    }
+
     /// Send an event to the attached frontend (silently dropped when none).
     pub fn emit(&self, ev: AgentEvent) {
         if let Ok(n) = self.notify.read() {
@@ -317,6 +327,23 @@ mod tests {
         assert_eq!(reg.output_of(id).unwrap().0.status, TaskStatus::Killed);
         // Killing again fails cleanly.
         assert!(reg.kill(id).is_err());
+    }
+
+    #[tokio::test]
+    async fn clear_notify_releases_the_channel() {
+        // The registry keeps a clone of the frontend's sender; a frontend
+        // that awaits channel-close after dropping its own sender deadlocks
+        // unless clear_notify releases the registry's copy first.
+        let reg = BgTasks::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        reg.set_notify(tx.clone());
+        drop(tx);
+        reg.clear_notify();
+        // With every sender gone, recv resolves None instead of hanging.
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+        assert!(matches!(closed, Ok(None)), "channel did not close after clear_notify");
+        // Emitting after detach is a silent no-op, not a panic.
+        reg.emit(AgentEvent::Info("dropped".into()));
     }
 
     #[test]
