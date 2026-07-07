@@ -3,6 +3,14 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.5.2 — 2026-07-07
+
+- **Responsive startup banner**: the RIFT logo is now drawn to fit the
+  pane on every re-wrap — a larger pixel-block render at 2× on wide
+  terminals (84+ cols) or 1× (42+), the compact box-drawing version
+  below that, and plain text on slivers. Centered, resizes live, and
+  never garbles on narrow terminals
+
 ## v1.5.1 — 2026-07-07
 
 - **Startup banner**: a RIFT ascii-art logo (accent-colored, never

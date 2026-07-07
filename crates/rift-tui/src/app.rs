@@ -49,7 +49,8 @@ pub(crate) enum Kind {
     ToolErr,
     Warn,
     Info,
-    /// Startup ASCII banner — accent-colored, never re-wrapped.
+    /// Startup ASCII banner — regenerated to fit the pane width on every
+    /// re-wrap (see the Kind::Logo branch in Pane::rebuild), accent-colored.
     Logo,
     DiffAdd,
     DiffDel,
@@ -61,10 +62,7 @@ impl Kind {
     /// Kinds whose lines must be hard-cut (never re-wrapped) so indentation
     /// and alignment stay exact.
     fn hard_cut(self) -> bool {
-        matches!(
-            self,
-            Kind::Code | Kind::Logo | Kind::DiffAdd | Kind::DiffDel | Kind::DiffHunk | Kind::DiffMeta
-        )
+        matches!(self, Kind::Code | Kind::DiffAdd | Kind::DiffDel | Kind::DiffHunk | Kind::DiffMeta)
     }
 }
 
@@ -92,6 +90,56 @@ struct BlockEntry {
     text: String,
     /// Whether a blank separator line follows this block when rendered.
     gap: bool,
+}
+
+/// RIFT rendered on a 5-row pixel grid ('#' = on). Each pixel draws as a
+/// 2·s × s block of █, so letters keep their shape at every scale and the
+/// banner grows with the terminal instead of arriving at one fixed size.
+const LOGO_GRID: [&str; 5] = [
+    "####  ### ##### #####",
+    "#   #  #  #       #  ",
+    "####   #  ####    #  ",
+    "#  #   #  #       #  ",
+    "#   # ### #       #  ",
+];
+
+/// Fallback for panes too narrow for even a scale-1 pixel render.
+const LOGO_SMALL: [&str; 6] = [
+    "██████╗ ██╗███████╗████████╗",
+    "██╔══██╗██║██╔════╝╚══██╔══╝",
+    "██████╔╝██║█████╗     ██║",
+    "██╔══██╗██║██╔══╝     ██║",
+    "██║  ██║██║██║        ██║",
+    "╚═╝  ╚═╝╚═╝╚═╝        ╚═╝",
+];
+
+/// Largest logo variant that fits in `w` columns: scaled pixel grid (capped
+/// at 2× so it stays a banner, not a wall), then the compact box-drawing
+/// version, then plain text when the pane can't fit any art at all.
+fn logo_art(w: usize) -> Vec<String> {
+    let grid_w = LOGO_GRID[0].len(); // 21 pixels
+    let scale = (w / (grid_w * 2)).min(2);
+    if scale >= 1 {
+        let mut out = Vec::with_capacity(LOGO_GRID.len() * scale);
+        for row in LOGO_GRID {
+            let mut line = String::new();
+            for px in row.chars() {
+                let cell = if px == '#' { '█' } else { ' ' };
+                for _ in 0..(2 * scale) {
+                    line.push(cell);
+                }
+            }
+            let line = line.trim_end().to_string();
+            for _ in 0..scale {
+                out.push(line.clone());
+            }
+        }
+        out
+    } else if w >= LOGO_SMALL[0].chars().count() {
+        LOGO_SMALL.iter().map(|s| s.to_string()).collect()
+    } else {
+        vec!["r i f t".into()]
+    }
 }
 
 /// One pre-wrapped visual line. `spans` (fenced code only) carries syntect
@@ -248,6 +296,29 @@ impl Pane {
         self.wrapped.truncate(keep);
         for block in &self.blocks[self.first_dirty..] {
             let lines_before = self.wrapped.len();
+            // The startup banner is generated here, not stored: every re-wrap
+            // picks the largest variant that fits the current width and
+            // centers it, so a resize re-renders the logo instead of
+            // hard-cutting a fixed-size one into garbage. The block text is
+            // the version tagline, centered beneath the art.
+            if block.kind == Kind::Logo {
+                let art = logo_art(w);
+                let art_w = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+                let pad = " ".repeat(w.saturating_sub(art_w) / 2);
+                for line in art {
+                    self.wrapped.push(WrappedLine::plain(Kind::Logo, format!("{pad}{line}")));
+                }
+                if !block.text.is_empty() {
+                    self.wrapped.push(WrappedLine::plain(Kind::Logo, String::new()));
+                    let tag_pad = " ".repeat(w.saturating_sub(block.text.chars().count()) / 2);
+                    self.wrapped.push(WrappedLine::plain(Kind::Info, format!("{tag_pad}{}", block.text)));
+                }
+                if block.gap {
+                    self.wrapped.push(WrappedLine::plain(Kind::Info, String::new()));
+                }
+                self.line_counts.push(self.wrapped.len() - lines_before);
+                continue;
+            }
             let prefixed = match block.kind {
                 Kind::User => format!("❯ {}", block.text),
                 _ => block.text.clone(),
@@ -687,6 +758,28 @@ fn line_end(s: &str, i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logo_scales_to_width_and_always_fits() {
+        // Every variant must fit the width it was asked for; the pixel grid
+        // rows must agree on width or the letters shear.
+        for row in LOGO_GRID {
+            assert_eq!(row.len(), LOGO_GRID[0].len());
+        }
+        for w in [10, 20, 27, 28, 41, 42, 80, 84, 120, 300] {
+            for line in logo_art(w) {
+                assert!(line.chars().count() <= w, "logo line wider than pane at w={w}");
+            }
+        }
+        // Tier selection: 2x pixel art on wide panes, 1x when it fits,
+        // box-drawing fallback, then plain text.
+        assert_eq!(logo_art(84).len(), LOGO_GRID.len() * 2);
+        assert_eq!(logo_art(42).len(), LOGO_GRID.len());
+        assert_eq!(logo_art(28).len(), LOGO_SMALL.len());
+        assert_eq!(logo_art(10), vec!["r i f t".to_string()]);
+        // The cap keeps huge terminals at 2x rather than a screen-filling 7x.
+        assert_eq!(logo_art(300).len(), LOGO_GRID.len() * 2);
+    }
 
     #[tokio::test]
     async fn btw_without_provider_reports_cleanly() {
@@ -1212,20 +1305,11 @@ impl App {
         }
     }
 
-    /// RIFT banner at the top of the transcript, shown once at startup.
+    /// RIFT banner at the top of the transcript, shown once at startup. The
+    /// block is a placeholder — Pane::rebuild draws it sized to the pane, so
+    /// the text here is just the tagline rendered under the art.
     fn push_logo(&mut self) {
-        const LOGO: &str = "\
-██████╗ ██╗███████╗████████╗
-██╔══██╗██║██╔════╝╚══██╔══╝
-██████╔╝██║█████╗     ██║
-██╔══██╗██║██╔══╝     ██║
-██║  ██║██║██║        ██║
-╚═╝  ╚═╝╚═╝╚═╝        ╚═╝";
-        for line in LOGO.lines() {
-            self.transcript.push_line(Kind::Logo, line.to_string());
-        }
-        self.transcript.push_line(Kind::Logo, String::new());
-        self.transcript.push_block(Kind::Info, format!("v{} · {}", env!("CARGO_PKG_VERSION"), self.model));
+        self.transcript.push_block(Kind::Logo, format!("v{} · {}", env!("CARGO_PKG_VERSION"), self.model));
     }
 
     /// Rebuild the transcript from a resumed session's message history.
