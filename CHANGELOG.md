@@ -3,6 +3,16 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.0.3 — 2026-07-06
+
+- **10 new color themes**: `dracula`, `nord`, `gruvbox`, `solarized-dark`,
+  `solarized-light`, `tokyo-night`, `catppuccin`, `rose-pine`, `matrix`,
+  `synthwave` — truecolor palettes that paint their own text, background,
+  and border colors (the classic `dark`/`light`/`mono` stay
+  terminal-native). The `Theme` struct gained `fg`/`bg`/`border`; bare
+  `/theme` now opens an interactive picker, and each theme's syntect
+  mapping is pinned by test
+
 ## v1.0.2 — 2026-07-06
 
 - **Claude Code-style permissions**: interactive sessions now **ask before
