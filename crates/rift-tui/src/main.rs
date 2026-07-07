@@ -53,7 +53,38 @@ pub(crate) fn build_provider(
             _ => {}
         }
     }
+    // An OpenAI-style default host (…/v1 — vLLM, LM Studio, llama.cpp
+    // server, set via config `host` or /host autodetection) serves bare
+    // model names through the OpenAI-compat client; anything else is a
+    // native Ollama server.
+    if host.trim_end_matches('/').ends_with("/v1") {
+        return (Arc::new(OpenAiClient::new(host, None)), model.to_string());
+    }
     (Arc::new(OllamaClient::new(host)), model.to_string())
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+
+    #[test]
+    fn bare_models_follow_the_host_kind() {
+        let providers = HashMap::new();
+        // Ollama host: bare names go native (no /v1 on the base URL).
+        let (client, name) = build_provider("gemma4:26b", "http://box:11434", &providers);
+        assert!(!client.base_url().ends_with("/v1"), "got {}", client.base_url());
+        assert_eq!(name, "gemma4:26b");
+        // OpenAI-style host: bare names ride the OpenAI-compat client.
+        let (client, name) = build_provider("some-model", "http://box:8000/v1", &providers);
+        assert!(client.base_url().ends_with("/v1"), "got {}", client.base_url());
+        assert_eq!(name, "some-model");
+        // Trailing slash doesn't confuse the detection.
+        let (client, _) = build_provider("m", "http://box:8000/v1/", &providers);
+        assert!(client.base_url().ends_with("/v1"), "got {}", client.base_url());
+        // Provider prefixes still win over the host kind.
+        let (_, name) = build_provider("openai/gpt-5", "http://box:8000/v1", &providers);
+        assert_eq!(name, "gpt-5");
+    }
 }
 
 /// A [`rift_core::ProviderFactory`] over `build_provider`: lets the swarm
@@ -190,11 +221,12 @@ async fn main() -> Result<()> {
     // status line carry.
     let model_addr = model.clone();
     let (client, model) = build_provider(&model, &host, &config.providers);
-    // Routed through a non-Ollama provider: num_ctx is rift's internal budget
-    // only (never sent to the server), so adopting a larger server-reported
-    // context is free. On Ollama, num_ctx sizes the server's KV cache — there
-    // the conservative default stands unless the user raises it.
-    let provider_routed = model != model_addr;
+    // Routed through a non-Ollama provider (prefix or an OpenAI-style /v1
+    // host): num_ctx is rift's internal budget only (never sent to the
+    // server), so adopting a larger server-reported context is free. On
+    // Ollama, num_ctx sizes the server's KV cache — there the conservative
+    // default stands unless the user raises it.
+    let provider_routed = model != model_addr || host.trim_end_matches('/').ends_with("/v1");
 
     // Subcommands bypass the single-model preflight (swarm preflights each
     // candidate itself; merge is git-only).

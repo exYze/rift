@@ -14,6 +14,7 @@ use rift_core::{
     SessionStore, Swarm,
 };
 use rift_ollama::{Message, OllamaClient, Provider, Role};
+use rift_openai::OpenAiClient;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +45,9 @@ pub enum UiEffect {
     Seed(Vec<Message>),
     /// Model name changed; update the status bar.
     Model(String),
+    /// Default host changed (/host); tracked so /restart relaunches
+    /// against the CURRENT server, not the startup one.
+    Host(String),
     /// /restart: tear down the TUI and relaunch resuming this session.
     Restart,
     /// Replace the pinned plan checklist (e.g. /plan clear).
@@ -90,7 +94,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/export", "", "save the transcript as markdown"),
     ("/goal", "<condition>|clear", "work until the model verifies the goal is met (auto-continues turns)"),
     ("/help", "", "list commands and keys"),
-    ("/host", "[url]", "show or switch the Ollama server"),
+    ("/host", "[url]", "show or switch the model server — Ollama or OpenAI-compatible, auto-detected"),
     ("/init", "", "generate a RIFT.md project guide"),
     ("/loop", "[30s|5m|2h] <prompt>|stop", "re-run a prompt or /command on an interval (or back-to-back)"),
     ("/mcp", "[new [--global] <desc>|trust <name>]", "list MCP servers, generate one (project or user-wide), manage trust"),
@@ -1075,28 +1079,67 @@ async fn cmd_host(
     if arg.is_empty() {
         let _ = fx.send(UiEffect::Out(
             Kind::Info,
-            format!("Ollama server: {}\nswitch with /host <url>", agent.client().base_url()),
+            format!(
+                "server: {}\nswitch with /host <url> — Ollama and OpenAI-compatible (vLLM, LM Studio, \
+                 llama.cpp, …) servers are auto-detected",
+                agent.client().base_url()
+            ),
         ));
         return Ok("host shown".into());
     }
-    let candidate: Arc<dyn Provider> = Arc::new(OllamaClient::new(arg));
-    let models = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => bail!("cancelled"),
-        r = candidate.tags() => r.map_err(|e| anyhow!("cannot reach {}: {e}", candidate.base_url()))?,
+    // Autodetect the server type: probe the model list on both protocols,
+    // trying first whichever the URL shape suggests (…/v1 = OpenAI-style).
+    // Ad-hoc hosts get no API key — keyed endpoints belong in `providers`.
+    let looks_openai = arg.trim_end_matches('/').ends_with("/v1") || arg.contains("/v1/");
+    let candidates: Vec<(&str, Arc<dyn Provider>)> = if looks_openai {
+        vec![
+            ("openai-compatible", Arc::new(OpenAiClient::new(arg, None))),
+            ("ollama", Arc::new(OllamaClient::new(arg))),
+        ]
+    } else {
+        vec![
+            ("ollama", Arc::new(OllamaClient::new(arg))),
+            ("openai-compatible", Arc::new(OpenAiClient::new(arg, None))),
+        ]
     };
-    let url = candidate.base_url().to_string();
-    let has_model = models.iter().any(|m| m.name == agent.cfg.model);
-    agent.set_client(candidate);
-    // Keep the default host in sync so a later bare `/model <name>` rebuilds
-    // its client against this server, not the stale startup one.
-    cx.host = url.clone();
-    let mut msg = format!("switched to {url} ({} model(s))", models.len());
-    if !has_model {
-        msg.push_str(&format!("\n! current model '{}' not found there — pick one with /model", agent.cfg.model));
+    let mut errors: Vec<String> = vec![];
+    for (kind, candidate) in candidates {
+        let models = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => bail!("cancelled"),
+            r = candidate.tags() => r,
+        };
+        let models = match models {
+            Ok(m) if !m.is_empty() => m,
+            Ok(_) => {
+                errors.push(format!("{kind} at {}: reachable but lists no models", candidate.base_url()));
+                continue;
+            }
+            Err(e) => {
+                errors.push(format!("{kind} at {}: {e:#}", candidate.base_url()));
+                continue;
+            }
+        };
+        let url = candidate.base_url().to_string();
+        let has_model = models.iter().any(|m| m.name == agent.cfg.model);
+        agent.set_client(candidate);
+        // Keep the default host in sync so a later bare `/model <name>`
+        // rebuilds against this server with the right protocol —
+        // build_provider routes …/v1 hosts through the OpenAI client.
+        cx.host = url.clone();
+        // And the UI's copy, so /restart relaunches against this server.
+        let _ = fx.send(UiEffect::Host(url.clone()));
+        let mut msg = format!("switched to {url} ({kind}, {} model(s))", models.len());
+        if !has_model {
+            msg.push_str(&format!(
+                "\n! current model '{}' not found there — pick one with /model",
+                agent.cfg.model
+            ));
+        }
+        let _ = fx.send(UiEffect::Out(if has_model { Kind::Info } else { Kind::Warn }, msg));
+        return Ok(format!("host: {url}"));
     }
-    let _ = fx.send(UiEffect::Out(if has_model { Kind::Info } else { Kind::Warn }, msg));
-    Ok(format!("host: {url}"))
+    bail!("no model server answered at {arg}:\n  {}", errors.join("\n  "))
 }
 
 async fn cmd_think(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {

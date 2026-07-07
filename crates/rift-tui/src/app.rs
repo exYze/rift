@@ -1515,9 +1515,11 @@ impl App {
                     self.transcript.push_block(Kind::Warn, format!("! (btw) {reply}"));
                 }
             }
-            // Handled by the event loop (need stdout/terminal); never reach here.
+            // Handled by the event loop (need stdout/terminal/restart state);
+            // never reach here.
             UiEffect::Osc52(_) => {}
             UiEffect::EditFile(_) => {}
+            UiEffect::Host(_) => {}
             UiEffect::Status(status) => self.status = status,
             UiEffect::Done(status) => {
                 self.idle();
@@ -2162,8 +2164,10 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     let cwd = std::env::current_dir()?;
     let cwd_ui = cwd.clone();
     // Captured for /restart before the store/host move into the agent task.
+    // The host copy is UPDATED by UiEffect::Host on /host switches, so a
+    // restart relaunches against the current server, not the startup one.
     let restart_session = store.path().to_path_buf();
-    let restart_host = host.clone();
+    let mut restart_host = host.clone();
     // UI-side effect sender: for commands the UI handles itself (/copy log).
     let fx_ui = fx_tx.clone();
     // Background-task events must reach the UI outside any turn — give the
@@ -2284,6 +2288,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                             .transcript
                             .push_block(Kind::Warn, "! editor exited with an error; config not reloaded".into()),
                     }
+                } else if let UiEffect::Host(url) = fx {
+                    // /host switched servers: keep the restart target current.
+                    restart_host = url;
                 } else {
                     app.handle_ui_effect(fx);
                 }
