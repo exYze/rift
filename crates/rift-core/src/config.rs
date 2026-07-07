@@ -39,6 +39,10 @@ pub struct Config {
     /// Default sampling temperature. Overridden by `--temp`.
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// Default reasoning effort (minimal|low|medium|high|xhigh|max) for
+    /// thinking models. Overridden by `--effort` / `/think <level>`.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Default max agent-loop iterations per turn. Overridden by `--max-iterations`.
     #[serde(default)]
     pub max_iterations: Option<usize>,
@@ -172,6 +176,9 @@ impl Config {
         }
         if p.num_ctx.is_some() {
             self.num_ctx = p.num_ctx;
+        }
+        if p.effort.is_some() {
+            self.effort = p.effort;
         }
         if p.temperature.is_some() {
             self.temperature = p.temperature;

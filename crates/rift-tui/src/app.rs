@@ -744,6 +744,21 @@ mod tests {
     }
 
     #[test]
+    fn apply_theme_switches_and_rejects_unknown() {
+        // Regression: theme switching is UI-side; both the typed form and
+        // the picker route through apply_theme (the picker used to forward
+        // "/theme <name>" to the agent dispatcher → "unknown command").
+        let mut app = App::new("m".into(), vec![], &theme::DARK, std::env::temp_dir());
+        app.apply_theme("mono");
+        assert_eq!(app.theme.name, "mono");
+        app.apply_theme("dracula");
+        assert_eq!(app.theme.name, "dracula");
+        app.apply_theme("not-a-theme");
+        assert_eq!(app.theme.name, "dracula"); // unchanged, warning pushed
+        assert!(app.transcript.raw_text().contains("unknown theme"));
+    }
+
+    #[test]
     fn sanitize_strips_ansi_and_controls_expands_tabs() {
         assert_eq!(sanitize_for_pane("\x1b[1;32m✓\x1b[0m ok"), "✓ ok");
         assert_eq!(sanitize_for_pane("a\tb"), "a    b");
@@ -1254,6 +1269,28 @@ impl App {
             self.input.replace_range(start..self.cursor, &replacement);
             self.cursor = start + replacement.len();
             self.palette_idx = 0;
+        }
+    }
+
+    /// Switch the color theme by name (typed `/theme <name>` and the picker
+    /// share this — the theme is pure UI state, never routed to the agent).
+    fn apply_theme(&mut self, name: &str) {
+        match theme::find(name) {
+            Some(th) => {
+                self.theme = th;
+                // Cached code spans hold the old syntect colors.
+                self.transcript.set_syntax(th.syntax);
+                self.transcript.dirty = true;
+                self.log.dirty = true;
+                self.diff.dirty = true;
+                self.status = format!("theme: {}", th.name);
+            }
+            None => {
+                self.transcript.push_block(
+                    Kind::Warn,
+                    format!("! unknown theme '{name}' — available: {}", theme::names().join(", ")),
+                );
+            }
         }
     }
 
@@ -1951,6 +1988,7 @@ fn spawn_btw(
             tools: vec![],
             stream: true,
             think: handle.cfg.think,
+            effort: handle.cfg.effort.clone(),
             keep_alive: Some("10m".into()),
             options: Some(ChatOptions {
                 num_ctx: Some(handle.cfg.num_ctx),
@@ -2392,12 +2430,19 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                                 app.transcript.push_block(Kind::User, line.clone());
                                                 app.history.push(line.clone());
                                                 app.history_idx = None;
-                                                app.busy = true;
-                                                app.turn_started = Some(Instant::now());
-                                                app.status = "running command…".into();
-                                                let cancel = CancellationToken::new();
-                                                app.cancel = Some(cancel.clone());
-                                                let _ = prompt_tx.send(UiMsg::Command(line, cancel));
+                                                // UI-side commands are applied right here — the
+                                                // agent-task dispatcher doesn't know them and
+                                                // would report "unknown command".
+                                                if let Some(name) = line.strip_prefix("/theme ") {
+                                                    app.apply_theme(name.trim());
+                                                } else {
+                                                    app.busy = true;
+                                                    app.turn_started = Some(Instant::now());
+                                                    app.status = "running command…".into();
+                                                    let cancel = CancellationToken::new();
+                                                    app.cancel = Some(cancel.clone());
+                                                    let _ = prompt_tx.send(UiMsg::Command(line, cancel));
+                                                }
                                             }
                                         }
                                         PickerKind::Elicit { mut reply } => {
@@ -2774,19 +2819,8 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                     });
                                     app.status =
                                         "themes — ↑↓ select, Enter switch, Esc cancel · persist with \"theme\" in config".into();
-                                } else if let Some(th) = theme::find(arg) {
-                                    app.theme = th;
-                                    // Cached code spans hold the old syntect colors.
-                                    app.transcript.set_syntax(th.syntax);
-                                    app.transcript.dirty = true;
-                                    app.log.dirty = true;
-                                    app.diff.dirty = true;
-                                    app.status = format!("theme: {}", th.name);
                                 } else {
-                                    app.transcript.push_block(
-                                        Kind::Warn,
-                                        format!("! unknown theme '{arg}' — available: {}", theme::names().join(", ")),
-                                    );
+                                    app.apply_theme(arg);
                                 }
                             } else if trimmed == "/goal" || trimmed.starts_with("/goal ") {
                                 // Completion-condition mode: the turn starts now

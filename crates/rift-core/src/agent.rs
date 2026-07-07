@@ -27,6 +27,11 @@ use crate::compact;
 use crate::tools::{ToolCtx, ToolRegistry};
 use crate::trace::{FailureCounters, ToolTraceRecord, TraceWriter, TurnTrace};
 
+/// Recognized reasoning-effort levels, weakest to strongest. Providers pass
+/// them through verbatim; servers with fewer grades map internally (DeepSeek:
+/// low/medium→high, xhigh→max) or reject with a clear error.
+pub const EFFORT_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub model: String,
@@ -36,6 +41,9 @@ pub struct AgentConfig {
     /// None = server default. Only set true after confirming the model has the
     /// "thinking" capability (otherwise Ollama returns a 400).
     pub think: Option<bool>,
+    /// Reasoning effort ("low"/"medium"/"high"/"max"/…) for models that
+    /// grade their thinking; None = server default. Implies thinking on.
+    pub effort: Option<String>,
     /// The prompt is known to be a work item (headless --prompt, swarm
     /// candidates): a turn that ends without any tool use always gets the
     /// apply-your-changes nudge, regardless of phrasing.
@@ -53,6 +61,7 @@ impl Default for AgentConfig {
             temperature: Some(0.2),
             max_iterations: 25,
             think: None,
+            effort: None,
             always_task: false,
         }
     }
@@ -315,6 +324,7 @@ impl Agent {
                 tools: tools.clone(),
                 stream: true,
                 think: self.cfg.think,
+                effort: self.cfg.effort.clone(),
                 keep_alive: Some("10m".into()),
                 options: Some(ChatOptions {
                     num_ctx: Some(self.cfg.num_ctx),

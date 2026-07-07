@@ -72,6 +72,11 @@ struct AnthropicRequest {
     tools: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<Value>,
+    /// Reasoning-effort level for Anthropic-format endpoints that grade
+    /// thinking (DeepSeek: {"effort": "high"/"max"}). Only sent when the
+    /// user explicitly set an effort.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
 }
@@ -151,8 +156,13 @@ fn build_request(req: &ChatRequest) -> AnthropicRequest {
     // Thinking: only ever send `adaptive` — `disabled` 400s on Fable-tier
     // models and `budget_tokens` 400s on Opus 4.7+, while omitting the field
     // is accepted everywhere. `display: summarized` so rift can show it.
-    let thinking = (req.think == Some(true))
+    // A set effort implies thinking on.
+    let thinking = (req.think == Some(true) || req.effort.is_some())
         .then(|| json!({"type": "adaptive", "display": "summarized"}));
+
+    // Effort levels ride the Anthropic-format output_config (DeepSeek's
+    // dual-API syntax); omitted entirely unless the user set one.
+    let output_config = req.effort.as_ref().map(|e| json!({"effort": e}));
 
     // Adaptive-thinking models reject sampling params; only pass temperature
     // through when thinking is off.
@@ -174,6 +184,7 @@ fn build_request(req: &ChatRequest) -> AnthropicRequest {
         messages,
         tools,
         thinking,
+        output_config,
         temperature,
     }
 }
@@ -517,6 +528,7 @@ mod tests {
             )],
             stream: true,
             think: None,
+            effort: None,
             keep_alive: None,
             options: Some(ChatOptions { num_ctx: Some(32768), temperature: Some(0.2), num_predict: None }),
         }

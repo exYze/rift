@@ -482,6 +482,7 @@ pub async fn judge_swarm(
         tools: vec![],
         stream: true,
         think,
+        effort: None,
         keep_alive: Some("10m".into()),
         options: Some(ChatOptions {
             num_ctx: Some(num_ctx),

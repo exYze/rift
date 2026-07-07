@@ -100,6 +100,10 @@ struct Cli {
     /// Sampling temperature, low = reliable tool calling [default: 0.2, or `temperature` in config]
     #[arg(long)]
     temp: Option<f64>,
+    /// Reasoning effort for thinking models: minimal|low|medium|high|xhigh|max
+    /// [default: the model's own, or `effort` in config]
+    #[arg(long)]
+    effort: Option<String>,
     /// Append one JSON line per turn (model, tokens, tool calls, failure
     /// counters, outcome) to this file. Local file only; off by default
     #[arg(long, env = "RIFT_TRACE")]
@@ -172,6 +176,12 @@ async fn main() -> Result<()> {
     let explicit_ctx = cli.num_ctx.or(config.num_ctx);
     let num_ctx = explicit_ctx.unwrap_or(32_768);
     let temp = cli.temp.or(config.temperature).unwrap_or(0.2);
+    let effort = cli.effort.clone().or_else(|| config.effort.clone());
+    if let Some(e) = &effort {
+        if !rift_core::EFFORT_LEVELS.contains(&e.as_str()) {
+            bail!("unknown effort '{e}' — use one of: {}", rift_core::EFFORT_LEVELS.join(", "));
+        }
+    }
     let max_iterations = cli.max_iterations.or(config.max_iterations).unwrap_or(25);
 
     // A `provider/model` string routes through a configured provider; otherwise
@@ -196,6 +206,7 @@ async fn main() -> Result<()> {
                 temperature: Some(temp),
                 max_iterations,
                 think: None,
+                effort: effort.clone(),
                 always_task: true,
             };
             let factory = provider_factory(&host, &config.providers);
@@ -277,6 +288,7 @@ async fn main() -> Result<()> {
         temperature: Some(temp),
         max_iterations,
         think,
+        effort,
         always_task: cli.prompt.is_some(),
     };
 

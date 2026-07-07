@@ -42,6 +42,7 @@ async fn live_stream_completes_with_usage() {
         tools: vec![],
         stream: true,
         think: None,
+        effort: None,
         keep_alive: None,
         options: Some(ChatOptions { num_ctx: None, temperature: None, num_predict: Some(100) }),
     };
@@ -76,6 +77,7 @@ async fn live_tool_call_round_trip() {
         tools: tools.clone(),
         stream: true,
         think: None,
+        effort: None,
         keep_alive: None,
         options: Some(ChatOptions { num_ctx: None, temperature: None, num_predict: Some(300) }),
     };
@@ -101,6 +103,7 @@ async fn live_tool_call_round_trip() {
         tools,
         stream: true,
         think: None,
+        effort: None,
         keep_alive: None,
         options: Some(ChatOptions { num_ctx: None, temperature: None, num_predict: Some(300) }),
     };

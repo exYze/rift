@@ -13,6 +13,7 @@ fn chat_req(num_ctx: Option<u64>) -> ChatRequest {
         tools: vec![],
         stream: true,
         think: None,
+        effort: None,
         keep_alive: None,
         options: num_ctx.map(|n| ChatOptions { num_ctx: Some(n), temperature: None, num_predict: None }),
     }
@@ -131,4 +132,21 @@ async fn proxy_error_keeps_the_status_code() {
     let client = OllamaClient::new(&server.base_url);
     let err = format!("{:#}", client.tags().await.expect_err("502 must fail"));
     assert!(err.contains("502"), "status missing: {err}");
+}
+
+// Effort levels use Ollama's string `think` form and win over the bool.
+#[tokio::test]
+async fn effort_becomes_string_think() {
+    let server = MockServer::start(vec![MockResponse::stream(&[
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":true,\"done_reason\":\"stop\"}\n",
+    ])])
+    .await;
+    let mut req = chat_req(None);
+    req.think = Some(true);
+    req.effort = Some("high".into());
+    let r = run(&server, &req).await;
+    r.outcome.expect("stream should succeed");
+    let raw = &server.requests().await[0];
+    assert!(raw.contains("\"think\":\"high\""), "think must carry the level string: {raw}");
+    assert!(!raw.contains("\"effort\""), "the neutral effort field must not leak to the wire: {raw}");
 }

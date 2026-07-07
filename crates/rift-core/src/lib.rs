@@ -14,7 +14,7 @@ pub mod tasks;
 pub mod tools;
 pub mod trace;
 
-pub use agent::{Agent, AgentConfig, AgentEvent, TurnStats};
+pub use agent::{Agent, AgentConfig, AgentEvent, TurnStats, EFFORT_LEVELS};
 pub use config::{
     mcp_entry_trusted, trust_mcp_entry, untrust_mcp_entry, Config, LoadedConfig, ProviderConfig,
 };

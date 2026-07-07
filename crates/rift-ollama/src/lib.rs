@@ -125,7 +125,15 @@ impl Provider for OllamaClient {
         req: &ChatRequest,
         on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> Result<ChatOutcome> {
-        let resp = send_with_retry(self.http.post(format!("{}/api/chat", self.base_url)).json(req)).await?;
+        // Effort levels ride Ollama's own syntax: `think` takes a level
+        // string ("low"/"medium"/"high") instead of a bool for models that
+        // grade their reasoning (gpt-oss, deepseek…). A set effort implies
+        // thinking on, so it wins over the bool.
+        let mut body = serde_json::to_value(req).map_err(OllamaError::Json)?;
+        if let Some(effort) = &req.effort {
+            body["think"] = serde_json::Value::String(effort.clone());
+        }
+        let resp = send_with_retry(self.http.post(format!("{}/api/chat", self.base_url)).json(&body)).await?;
         let resp = Self::check(resp).await?;
 
         let mut acc = Message {

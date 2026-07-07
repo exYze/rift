@@ -14,6 +14,7 @@ fn chat_req(think: Option<bool>) -> ChatRequest {
         tools: vec![],
         stream: true,
         think,
+        effort: None,
         keep_alive: None,
         options: Some(ChatOptions { num_ctx: None, temperature: Some(0.0), num_predict: Some(500) }),
     }
@@ -188,4 +189,22 @@ async fn show_maps_context_window_and_capabilities() {
     assert!(caps.supports("tools"));
     assert!(caps.supports("thinking"));
     assert_eq!(caps.context_length, Some(1_000_000));
+}
+
+// A set effort implies thinking on and rides output_config (DeepSeek's
+// Anthropic-format syntax); omitted entirely when unset.
+#[tokio::test]
+async fn effort_maps_to_output_config_and_enables_thinking() {
+    let server = MockServer::start(vec![MockResponse::stream(&[
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+    ])])
+    .await;
+    let mut req = chat_req(None);
+    req.effort = Some("max".into());
+    let r = run(&server, &req).await;
+    r.outcome.expect("stream should succeed");
+    let raw = &server.requests().await[0];
+    assert!(raw.contains("\"output_config\":{\"effort\":\"max\"}"), "missing output_config: {raw}");
+    assert!(raw.contains("\"thinking\":{"), "effort must imply thinking on: {raw}");
+    assert!(!raw.contains("\"temperature\""), "sampling params must drop with thinking: {raw}");
 }

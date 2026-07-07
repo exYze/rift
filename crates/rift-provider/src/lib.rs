@@ -143,6 +143,12 @@ pub struct ChatRequest {
     /// capability check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub think: Option<bool>,
+    /// Reasoning effort level ("low"/"medium"/"high"/"max"/…), for models
+    /// that grade their thinking. Never serialized directly — each provider
+    /// translates it to its own wire form (Ollama: string `think`; OpenAI:
+    /// `reasoning_effort`; Anthropic-format: `output_config.effort`).
+    #[serde(skip_serializing)]
+    pub effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -3,6 +3,28 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.0.5 — 2026-07-06
+
+- Fix: picking a theme from the `/theme` picker failed with "unknown
+  command '/theme'" — the picker forwarded its selection to the agent-side
+  command dispatcher, but the theme is UI state. Both the picker and the
+  typed form now share one UI-side switch (regression-tested)
+- **Reasoning-effort levels**: `/think` now takes
+  `minimal|low|medium|high|xhigh|max` alongside on/off/auto (a level
+  implies thinking on), plus `--effort` and `"effort"` in config. One
+  neutral knob, translated per provider: Ollama's graded string `think`,
+  OpenAI/DeepSeek `reasoning_effort` + `thinking:{type}` toggle (per the
+  DeepSeek V4 thinking-mode API), Anthropic-format
+  `output_config.effort`. The OpenAI form also carries vLLM's
+  `chat_template_kwargs` variant ({"thinking": bool, "reasoning_effort":
+  …} per the DeepSeek-V4 vLLM recipe) — verified live against a vLLM
+  DeepSeek-V4-Flash: thinking off/high/max produced 0/49/260 reasoning
+  chunks. DeepSeek requirements honored: sampling params drop in
+  thinking mode and `reasoning_content` is passed back during tool
+  loops. Servers that reject any of the params get one retry without
+  them, so an effort set on a model that can't grade is a no-op, not a
+  failure
+
 ## v1.0.4 — 2026-07-06
 
 - Fix: headless (`-p`) runs hung forever after printing their final line —

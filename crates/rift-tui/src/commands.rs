@@ -104,7 +104,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/swarm", "<task> [--models a,b] [--judge m]", "WarpDrive race in isolated worktrees"),
     ("/tasks", "[kill <id>]", "background tasks (shells + agents): list, or kill one"),
     ("/worktrees", "", "list swarm worktrees + patches"),
-    ("/think", "[on|off|auto]", "thinking mode (capability-checked)"),
+    ("/think", "[on|off|auto|minimal|low|medium|high|xhigh|max]", "thinking mode and reasoning effort (capability-checked)"),
     ("/tokens", "", "context budget, usage estimate, calibration"),
     ("/yolo", "[off]", "stop asking before write/edit/bash (deny list still applies); /yolo off restores prompts"),
     ("/stats", "", "session totals: turns, tokens, tools, compactions"),
@@ -183,9 +183,9 @@ pub async fn run_command(
         "/save" => cmd_save(rest, agent, cx, fx),
         "/tasks" => cmd_tasks(rest, agent, fx),
         "/worktrees" => cmd_worktrees(cx, fx).await,
-        // Handled in the chat input (they drive the UI's turn scheduling);
+        // Handled in the chat input (they drive UI state directly);
         // reachable here only via odd nesting like a /loop body.
-        "/goal" | "/loop" | "/btw" => Err(anyhow!("{cmd} runs from the chat input directly")),
+        "/goal" | "/loop" | "/btw" | "/theme" => Err(anyhow!("{cmd} runs from the chat input directly")),
         other => Err(anyhow!("unknown command '{other}' — /help lists available commands")),
     };
     let status = match result {
@@ -1086,15 +1086,31 @@ async fn cmd_host(
 }
 
 async fn cmd_think(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    /// Render the (mode, effort) pair the way /think reports it.
+    fn describe(cfg: &rift_core::AgentConfig) -> String {
+        let mode = match cfg.think {
+            None => "auto (server default)",
+            Some(true) => "on",
+            Some(false) => "off",
+        };
+        match &cfg.effort {
+            Some(e) => format!("{mode}, effort {e}"),
+            None => format!("{mode}, effort auto"),
+        }
+    }
     let state = match arg {
         "" => {
-            let now = match agent.cfg.think {
-                None => "auto (server default)",
-                Some(true) => "on",
-                Some(false) => "off",
-            };
-            let _ = fx.send(UiEffect::Out(Kind::Info, format!("thinking: {now}\nset with /think on|off|auto")));
-            return Ok(format!("thinking: {now}"));
+            let _ = fx.send(UiEffect::Out(
+                Kind::Info,
+                format!(
+                    "thinking: {}\nset with /think on|off|auto or an effort level: /think {}\n\
+                     (levels imply thinking on; servers with fewer grades map between them — \
+                     DeepSeek treats low/medium as high and xhigh as max)",
+                    describe(&agent.cfg),
+                    rift_core::EFFORT_LEVELS.join("|"),
+                ),
+            ));
+            return Ok(format!("thinking: {}", describe(&agent.cfg)));
         }
         "on" => {
             let show = agent.client().show(&agent.cfg.model).await?;
@@ -1102,18 +1118,32 @@ async fn cmd_think(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>)
                 bail!("model '{}' does not have the 'thinking' capability", agent.cfg.model);
             }
             agent.cfg.think = Some(true);
-            "on"
+            describe(&agent.cfg)
         }
         "off" => {
             agent.cfg.think = Some(false);
-            "off"
+            agent.cfg.effort = None;
+            describe(&agent.cfg)
         }
         "auto" => {
             let show = agent.client().show(&agent.cfg.model).await?;
             agent.cfg.think = if show.supports("thinking") { None } else { Some(false) };
-            "auto (server default)"
+            agent.cfg.effort = None;
+            describe(&agent.cfg)
         }
-        other => bail!("unknown value '{other}' — use on, off, or auto"),
+        level if rift_core::EFFORT_LEVELS.contains(&level) => {
+            let show = agent.client().show(&agent.cfg.model).await?;
+            if !show.supports("thinking") {
+                bail!("model '{}' does not have the 'thinking' capability", agent.cfg.model);
+            }
+            agent.cfg.think = Some(true);
+            agent.cfg.effort = Some(level.to_string());
+            describe(&agent.cfg)
+        }
+        other => bail!(
+            "unknown value '{other}' — use on, off, auto, or an effort level ({})",
+            rift_core::EFFORT_LEVELS.join(", ")
+        ),
     };
     let _ = fx.send(UiEffect::Out(Kind::Info, format!("thinking: {state}")));
     Ok(format!("thinking: {state}"))

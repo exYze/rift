@@ -181,6 +181,7 @@ pub async fn summarize_history(
         tools: vec![],
         stream: false,
         think: Some(false),
+        effort: None,
         keep_alive: Some("10m".into()),
         options: Some(ChatOptions { num_ctx: Some(num_ctx), temperature: Some(0.0), num_predict: Some(1500) }),
     };

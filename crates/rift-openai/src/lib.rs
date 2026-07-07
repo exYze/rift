@@ -14,7 +14,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use rift_provider::{
     api_error_message, for_each_line, http_client, normalize_base_url, send_with_retry,
@@ -65,6 +65,23 @@ struct OaiRequest {
     /// `None` after a retry against servers that reject the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    /// Reasoning effort ("low"/"medium"/"high"/"max"…): OpenAI o-series
+    /// syntax, also spoken by DeepSeek (which maps low/medium→high,
+    /// xhigh→max). Cleared and retried when a server rejects it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    /// DeepSeek's thinking toggle ({"type": "enabled"/"disabled"}). Only
+    /// sent when the user explicitly set a thinking mode; cleared and
+    /// retried when a server rejects it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<Value>,
+    /// vLLM routes the same controls through the chat template instead
+    /// (per the DeepSeek-V4 vLLM recipe: {"thinking": bool,
+    /// "reasoning_effort": "high"/"max"}). Sent alongside the top-level
+    /// fields — each server reads its own form and ignores or (via the 400
+    /// retry) sheds the other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -83,6 +100,12 @@ struct OaiMessage {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    /// Reasoning models (DeepSeek) require their chain-of-thought passed
+    /// back during a tool-call loop; the agent already keeps thinking only
+    /// on the current turn's messages, so presence here is exactly the
+    /// "with tool calls" case. Absent for models that never produce it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -160,6 +183,11 @@ fn to_oai_message(m: &Message) -> OaiMessage {
             None
         },
         name: if m.role == Role::Tool { m.tool_name.clone() } else { None },
+        reasoning_content: if m.role == Role::Assistant {
+            m.thinking.clone().filter(|t| !t.is_empty())
+        } else {
+            None
+        },
     }
 }
 
@@ -180,11 +208,32 @@ fn build_request(req: &ChatRequest) -> OaiRequest {
             })
             .collect(),
         stream: true,
-        temperature: req.options.as_ref().and_then(|o| o.temperature),
+        // DeepSeek rejects sampling params in thinking mode — drop
+        // temperature whenever reasoning is explicitly requested.
+        temperature: if req.effort.is_some() || req.think == Some(true) {
+            None
+        } else {
+            req.options.as_ref().and_then(|o| o.temperature)
+        },
         // Ollama's num_predict maps to OpenAI's max_tokens; num_ctx has no
-        // equivalent (context is fixed per model) and `think` isn't sent.
+        // equivalent (context is fixed per model).
         max_tokens: req.options.as_ref().and_then(|o| o.num_predict),
         stream_options: Some(StreamOptions { include_usage: true }),
+        reasoning_effort: req.effort.clone(),
+        // Only an EXPLICIT user choice travels: unknown body fields are a
+        // 400 on some servers, and None means "server default" anyway.
+        thinking: req.think.map(|on| json!({"type": if on { "enabled" } else { "disabled" }})),
+        chat_template_kwargs: {
+            let mut kw = serde_json::Map::new();
+            if let Some(e) = &req.effort {
+                // A set effort implies thinking on.
+                kw.insert("thinking".into(), json!(true));
+                kw.insert("reasoning_effort".into(), json!(e));
+            } else if let Some(on) = req.think {
+                kw.insert("thinking".into(), json!(on));
+            }
+            (!kw.is_empty()).then_some(Value::Object(kw))
+        },
     }
 }
 
@@ -373,11 +422,13 @@ impl Provider for OpenAiClient {
     }
 
     async fn show(&self, model: &str) -> Result<ModelCapabilities> {
-        // No /show in the OpenAI protocol. Assume tool support (nearly universal
-        // for chat models), and recover the context length from the /models
-        // listing where servers expose it — vLLM (`max_model_len`), OpenRouter
-        // (`context_length`), LM Studio (`max_context_length`), llama.cpp
-        // (`meta.n_ctx_train`). Absent or unreachable just means unknown.
+        // No /show in the OpenAI protocol. Assume tool + thinking support
+        // (undetectable here; explicitly-set reasoning params degrade
+        // gracefully via the 400 retry), and recover the context length from
+        // the /models listing where servers expose it — vLLM
+        // (`max_model_len`), OpenRouter (`context_length`), LM Studio
+        // (`max_context_length`), llama.cpp (`meta.n_ctx_train`). Absent or
+        // unreachable just means unknown.
         let context_length = async {
             let resp = send_with_retry(self.req(reqwest::Method::GET, "/models")).await.ok()?;
             let body: Value = resp.json().await.ok()?;
@@ -395,7 +446,7 @@ impl Provider for OpenAiClient {
         }
         .await
         .filter(|n| *n > 0);
-        Ok(ModelCapabilities { capabilities: vec!["tools".into()], context_length })
+        Ok(ModelCapabilities { capabilities: vec!["tools".into(), "thinking".into()], context_length })
     }
 
     async fn chat_stream(
@@ -405,14 +456,29 @@ impl Provider for OpenAiClient {
     ) -> Result<ChatOutcome> {
         let mut body = build_request(req);
         let mut resp = send_with_retry(self.req(reqwest::Method::POST, "/chat/completions").json(&body)).await?;
-        // Some older OpenAI-compatible servers 400 on stream_options wholesale;
-        // drop it and retry once so they still work (only usage stats are lost).
-        if resp.status() == reqwest::StatusCode::BAD_REQUEST && body.stream_options.is_some() {
+        // Parameter-compat fallback: servers differ on which optional params
+        // they accept (older ones 400 on stream_options; non-reasoning ones
+        // on reasoning_effort/thinking). Drop exactly the params the error
+        // names and retry once, so a mixed fleet still works.
+        if resp.status() == reqwest::StatusCode::BAD_REQUEST {
             let text = resp.text().await.unwrap_or_default();
-            if !text.contains("stream_options") {
+            let mut retry = false;
+            if body.stream_options.is_some() && text.contains("stream_options") {
+                body.stream_options = None;
+                retry = true;
+            }
+            if (body.reasoning_effort.is_some() && text.contains("reasoning_effort"))
+                || (body.thinking.is_some() && text.contains("thinking"))
+                || (body.chat_template_kwargs.is_some() && text.contains("chat_template_kwargs"))
+            {
+                body.reasoning_effort = None;
+                body.thinking = None;
+                body.chat_template_kwargs = None;
+                retry = true;
+            }
+            if !retry {
                 return Err(anyhow!("openai api error (400 Bad Request): {}", api_error_message(&text)));
             }
-            body.stream_options = None;
             resp = send_with_retry(self.req(reqwest::Method::POST, "/chat/completions").json(&body)).await?;
         }
         if !resp.status().is_success() {
