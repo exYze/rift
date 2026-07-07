@@ -3,6 +3,14 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.0.4 — 2026-07-06
+
+- Fix: headless (`-p`) runs hung forever after printing their final line —
+  the background-task registry held a clone of the event channel sender,
+  so the output printer's wait for channel-close never ended and every
+  headless run since v1.0.0 left a zombie rift process. The registry now
+  detaches its channel before the final wait (regression-tested)
+
 ## v1.0.3 — 2026-07-06
 
 - **10 new color themes**: `dracula`, `nord`, `gruvbox`, `solarized-dark`,
