@@ -49,6 +49,8 @@ pub(crate) enum Kind {
     ToolErr,
     Warn,
     Info,
+    /// Startup ASCII banner — accent-colored, never re-wrapped.
+    Logo,
     DiffAdd,
     DiffDel,
     DiffHunk,
@@ -59,7 +61,10 @@ impl Kind {
     /// Kinds whose lines must be hard-cut (never re-wrapped) so indentation
     /// and alignment stay exact.
     fn hard_cut(self) -> bool {
-        matches!(self, Kind::Code | Kind::DiffAdd | Kind::DiffDel | Kind::DiffHunk | Kind::DiffMeta)
+        matches!(
+            self,
+            Kind::Code | Kind::Logo | Kind::DiffAdd | Kind::DiffDel | Kind::DiffHunk | Kind::DiffMeta
+        )
     }
 }
 
@@ -74,6 +79,7 @@ pub(crate) fn style_for(kind: Kind, t: &theme::Theme) -> Style {
         Kind::ToolErr => Style::default().fg(t.error),
         Kind::Warn => Style::default().fg(t.warn),
         Kind::Info => Style::default().fg(t.muted),
+        Kind::Logo => Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
         Kind::DiffAdd => Style::default().fg(t.diff_add),
         Kind::DiffDel => Style::default().fg(t.diff_del),
         Kind::DiffHunk => Style::default().fg(t.diff_hunk),
@@ -1206,8 +1212,25 @@ impl App {
         }
     }
 
+    /// RIFT banner at the top of the transcript, shown once at startup.
+    fn push_logo(&mut self) {
+        const LOGO: &str = "\
+██████╗ ██╗███████╗████████╗
+██╔══██╗██║██╔════╝╚══██╔══╝
+██████╔╝██║█████╗     ██║
+██╔══██╗██║██╔══╝     ██║
+██║  ██║██║██║        ██║
+╚═╝  ╚═╝╚═╝╚═╝        ╚═╝";
+        for line in LOGO.lines() {
+            self.transcript.push_line(Kind::Logo, line.to_string());
+        }
+        self.transcript.push_line(Kind::Logo, String::new());
+        self.transcript.push_block(Kind::Info, format!("v{} · {}", env!("CARGO_PKG_VERSION"), self.model));
+    }
+
     /// Rebuild the transcript from a resumed session's message history.
     fn seed_from_messages(&mut self, messages: &[Message]) {
+        let blocks_before = self.transcript.blocks.len();
         for msg in messages {
             match msg.role {
                 Role::System => {}
@@ -1238,7 +1261,7 @@ impl App {
                 }
             }
         }
-        if !self.transcript.blocks.is_empty() {
+        if self.transcript.blocks.len() > blocks_before {
             self.transcript.push_block(Kind::Info, "── session resumed ──".into());
         }
     }
@@ -2397,6 +2420,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     }));
 
     let mut app = App::new(model, skills, theme, cwd_ui.clone());
+    app.push_logo();
     app.seed_from_messages(&resumed);
 
     let result = (|| -> Result<()> {

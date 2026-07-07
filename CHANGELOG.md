@@ -3,6 +3,13 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.5.1 — 2026-07-07
+
+- **Startup banner**: a RIFT ascii-art logo (accent-colored, never
+  re-wrapped on narrow terminals) opens the transcript, with a
+  `v<version> · <model>` tagline beneath. The "session resumed" marker
+  now keys off actual seeded history instead of transcript emptiness
+
 ## v1.5.0 — 2026-07-07
 
 - **`web_search` tool + `/search`**: web search through a self-hosted
