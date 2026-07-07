@@ -117,6 +117,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/theme", "[name]", "browse/switch color themes (13 built-in: dark, light, mono, dracula, nord, gruvbox, …)"),
     ("/ctx", "<n>", "set context window (num_ctx)"),
     ("/retry", "", "re-run the last prompt"),
+    ("/rewind", "[n]", "rewind n turns (default 1): restore write/edit changes AND the conversation"),
     ("/quit", "", "exit rift"),
     ("/tools", "", "tools the model can call (builtin + MCP)"),
     ("/undo", "", "revert last turn's write/edit changes"),
@@ -187,6 +188,7 @@ pub async fn run_command(
         "/ctx" => cmd_ctx(rest, agent, fx),
         "/save" => cmd_save(rest, agent, cx, fx),
         "/tasks" => cmd_tasks(rest, agent, fx),
+        "/rewind" => cmd_rewind(rest, agent, cx, fx),
         "/worktrees" => cmd_worktrees(cx, fx).await,
         // Handled in the chat input (they drive UI state directly);
         // reachable here only via odd nesting like a /loop body.
@@ -907,6 +909,32 @@ async fn cmd_merge(rest: &str, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Re
     Ok(msg)
 }
 
+/// /rewind [n] — the checkpoint restore: files (via the edit journal) and
+/// conversation truncate together, then the transcript reseeds and the
+/// session file is rewritten so the rewind survives a /restart.
+fn cmd_rewind(arg: &str, agent: &mut Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let n: usize = match arg.trim() {
+        "" => 1,
+        s => s.parse().map_err(|_| anyhow!("usage: /rewind [n] — got '{s}'"))?,
+    };
+    let restored = agent.rewind(n)?;
+    let cwd = cx.cwd.display().to_string();
+    cx.store.save(&agent.cfg.model, &cwd, &agent.messages)?;
+    let _ = fx.send(UiEffect::Seed(agent.messages.clone()));
+    let mut msg = format!("⏪ rewound {n} turn(s)");
+    if restored.is_empty() {
+        msg.push_str(" — no write/edit changes to restore");
+    } else {
+        msg.push_str(&format!(" — restored {} file(s):", restored.len()));
+        for p in &restored {
+            msg.push_str(&format!("\n  {}", p.display()));
+        }
+    }
+    msg.push_str("\n(bash-made changes are outside the journal — check /diff if the turn ran scripts)");
+    let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+    Ok(format!("rewound {n} turn(s), {} file(s) restored", restored.len()))
+}
+
 fn cmd_approve(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     match arg {
         "on" => agent.ctx().set_approval(true),
@@ -1000,6 +1028,18 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
             agent.ctx().set_deny(&config.permissions.bash_deny);
             agent.ctx().set_allow(&config.permissions.bash_allow);
             agent.ctx().set_approval(config.permissions.approve_effective());
+            // Hooks: only already-trusted project entries reload here (the
+            // trust prompt is a startup interaction); new ones need /restart.
+            let mut post_edit = config.hooks.post_edit.clone();
+            post_edit.extend(
+                config
+                    .project_hooks
+                    .post_edit
+                    .iter()
+                    .filter(|h| rift_core::config::hook_trusted(h))
+                    .cloned(),
+            );
+            agent.ctx().set_post_edit_hooks(&post_edit);
             cx.config_path = loaded.paths.last().cloned();
             let msg = format!(
                 "config reloaded — approval {}, {} allowed / {} user deny pattern(s) (host/model/MCP changes need a restart)",

@@ -32,6 +32,9 @@ pub struct SubAgentHandle {
     /// Named model roles from config `models` ({"fast": "ornith:35b", …});
     /// a task's `model` can be a role instead of a full model string.
     pub roles: std::collections::HashMap<String, String>,
+    /// Custom sub-agent personas (`.rift/agents/*.md` + user-wide); tasks
+    /// select one via their `agent` field.
+    pub personas: Vec<AgentPersona>,
 }
 
 impl SubAgentHandle {
@@ -65,6 +68,76 @@ impl SubAgentHandle {
 /// Cap on tasks per call — each one is a full concurrent model conversation.
 const SUBAGENT_MAX_TASKS: usize = 4;
 
+/// A custom sub-agent persona (`.rift/agents/<name>.md`, or user-wide in
+/// `~/.config/rift/agents/`): its own system-prompt body, optionally a
+/// default model (role or full name) and a tool whitelist. The `agent`
+/// tool's tasks select one by name.
+#[derive(Debug, Clone)]
+pub struct AgentPersona {
+    pub name: String,
+    pub description: String,
+    /// Default model for this persona (a role name or full model string);
+    /// a task-level `model` still overrides it.
+    pub model: Option<String>,
+    /// Tool whitelist (names from the standard set); None = all tools.
+    pub tools: Option<Vec<String>>,
+    pub body: String,
+}
+
+/// Parse a persona file: `---` frontmatter with name/description/model/tools
+/// (tools comma-separated), then the prompt body.
+fn parse_persona(text: &str, fallback_name: &str) -> AgentPersona {
+    let mut name = fallback_name.to_string();
+    let mut description = String::new();
+    let mut model = None;
+    let mut tools = None;
+    let mut body = text;
+    if let Some(rest) = text.strip_prefix("---") {
+        if let Some((front, after)) = rest.split_once("\n---") {
+            for line in front.lines() {
+                let Some((key, value)) = line.split_once(':') else { continue };
+                let value = value.trim();
+                match key.trim() {
+                    "name" if !value.is_empty() => name = value.to_string(),
+                    "description" => description = value.to_string(),
+                    "model" if !value.is_empty() => model = Some(value.to_string()),
+                    "tools" if !value.is_empty() => {
+                        tools = Some(value.split(',').map(|t| t.trim().to_string()).collect())
+                    }
+                    _ => {}
+                }
+            }
+            body = after.trim_start_matches(['-']).trim_start();
+        }
+    }
+    AgentPersona { name, description, model, tools, body: body.trim().to_string() }
+}
+
+/// Load personas: project `.rift/agents/*.md` first, then user-wide
+/// `~/.config/rift/agents/*.md` (project wins name conflicts).
+pub fn load_personas(cwd: &std::path::Path) -> Vec<AgentPersona> {
+    let mut personas: Vec<AgentPersona> = Vec::new();
+    let user_dir = crate::paths::config_dir().map(|d| d.join("rift/agents"));
+    let dirs = std::iter::once(cwd.join(".rift/agents")).chain(user_dir);
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("agent").to_string();
+            let persona = parse_persona(&text, &stem);
+            if !personas.iter().any(|p| p.name == persona.name) {
+                personas.push(persona);
+            }
+        }
+    }
+    personas.sort_by(|a, b| a.name.cmp(&b.name));
+    personas
+}
+
 pub struct AgentTool;
 
 #[async_trait]
@@ -97,7 +170,8 @@ impl Tool for AgentTool {
                         "properties": {
                             "description": {"type": "string", "description": "3-6 word label shown to the user"},
                             "prompt": {"type": "string", "description": "Complete self-contained instructions — include paths and context; the sub-agent cannot see this conversation"},
-                            "model": {"type": "string", "description": "Optional: run this task on a different model — a configured role name (e.g. 'fast', 'smart') or a full model string. Default: the session model. Route mechanical work (write code from a clear spec, run tests, fix straightforward errors) to a cheaper role when one exists; keep judgment work on the stronger model."}
+                            "model": {"type": "string", "description": "Optional: run this task on a different model — a configured role name (e.g. 'fast', 'smart') or a full model string. Default: the session model. Route mechanical work (write code from a clear spec, run tests, fix straightforward errors) to a cheaper role when one exists; keep judgment work on the stronger model."},
+                            "agent": {"type": "string", "description": "Optional: run this task as a configured persona (from .rift/agents/) — a specialized system prompt, default model, and tool set (e.g. a read-only 'reviewer')."}
                         }
                     }
                 },
@@ -124,11 +198,13 @@ impl Tool for AgentTool {
 
 /// Accept the documented `tasks` array, or a lenient single
 /// `{description, prompt}` at the top level (weak models do this).
-/// One delegated task: label, prompt, and (optionally) which model runs it.
+/// One delegated task: label, prompt, and (optionally) which model and
+/// which persona run it.
 struct TaskSpec {
     label: String,
     prompt: String,
     model: Option<String>,
+    agent: Option<String>,
 }
 
 fn parse_tasks(args: &Map<String, Value>) -> Result<Vec<TaskSpec>> {
@@ -162,6 +238,7 @@ fn parse_tasks(args: &Map<String, Value>) -> Result<Vec<TaskSpec>> {
                 label: desc.trim().to_string(),
                 prompt: prompt.to_string(),
                 model: obj.get("model").and_then(|v| v.as_str()).map(|s| s.trim().to_string()),
+                agent: obj.get("agent").and_then(|v| v.as_str()).map(|s| s.trim().to_string()),
             })
         })
         .collect()
@@ -169,15 +246,45 @@ fn parse_tasks(args: &Map<String, Value>) -> Result<Vec<TaskSpec>> {
 
 /// A fresh child agent: routed provider/config, standard tools (no agent tool
 /// state → no recursion), isolated plan/undo state, shared permission policy.
-fn build_child(handle: &SubAgentHandle, ctx: &ToolCtx, model: Option<&str>) -> Result<Agent> {
+/// A persona layers on its own prompt body, default model, and tool whitelist.
+fn build_child(
+    handle: &SubAgentHandle,
+    ctx: &ToolCtx,
+    model: Option<&str>,
+    persona: Option<&str>,
+) -> Result<Agent> {
+    let persona = match persona.filter(|p| !p.trim().is_empty()) {
+        Some(name) => Some(handle.personas.iter().find(|p| p.name == name.trim()).ok_or_else(|| {
+            anyhow!(
+                "unknown agent persona '{name}' — available: {}",
+                if handle.personas.is_empty() {
+                    "none configured (.rift/agents/*.md)".to_string()
+                } else {
+                    handle.personas.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+                }
+            )
+        })?),
+        None => None,
+    };
+    // Model precedence: task model > persona model > session model.
+    let model = model.or(persona.and_then(|p| p.model.as_deref()));
     let (client, cfg) = handle.child_target(model)?;
+    let mut registry = ToolRegistry::standard();
+    if let Some(allowed) = persona.and_then(|p| p.tools.as_ref()) {
+        registry.retain_tools(allowed);
+    }
+    // The base prompt keeps the tool mechanics local models depend on; the
+    // persona body layers role instructions on top.
     let mut prompt = crate::system_prompt_with_guide(&cfg.model, &ctx.cwd).0;
+    if let Some(p) = persona {
+        prompt.push_str(&format!("\n\n[persona: {}]\n{}", p.name, p.body));
+    }
     prompt.push_str(
         "\n\nYou are a sub-agent handling ONE delegated task from a main agent. Complete it, \
          then reply with a concise final report (findings, files changed, verification results) — \
          that report is all the main agent receives, so include everything it needs and nothing else.",
     );
-    Ok(Agent::new(client, cfg, ToolRegistry::standard(), ctx.subagent_ctx(), prompt))
+    Ok(Agent::new(client, cfg, registry, ctx.subagent_ctx(), prompt))
 }
 
 /// The last plain-text assistant message — the child's final report.
@@ -226,8 +333,8 @@ async fn run_foreground(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskS
     let reg = ctx.bg().clone();
     let many = specs.len() > 1;
     let futs = specs.into_iter().enumerate().map(|(i, spec)| {
-        let TaskSpec { label, prompt, model } = spec;
-        let child = build_child(handle, ctx, model.as_deref());
+        let TaskSpec { label, prompt, model, agent } = spec;
+        let child = build_child(handle, ctx, model.as_deref(), agent.as_deref());
         let reg = reg.clone();
         async move {
             let mut agent = match child {
@@ -267,9 +374,9 @@ async fn run_foreground(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskS
 fn run_background(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskSpec>) -> Result<String> {
     let reg = ctx.bg().clone();
     let mut lines = vec![];
-    for TaskSpec { label, prompt, model } in specs {
+    for TaskSpec { label, prompt, model, agent: persona } in specs {
         // Routing failures surface as the tool result, before anything runs.
-        let mut agent = build_child(handle, ctx, model.as_deref())?;
+        let mut agent = build_child(handle, ctx, model.as_deref(), persona.as_deref())?;
         let (id, cancel) = reg.register(TaskKind::Agent, &label, None)?;
         lines.push(format!("  #{id} — {label} ({})", agent.cfg.model));
         let reg2 = reg.clone();
@@ -373,7 +480,59 @@ mod tests {
                 Ok((Arc::new(StubProvider(format!("routed:{model}"))) as Arc<dyn Provider>, model.to_string()))
             })),
             roles: std::collections::HashMap::from([("fast".to_string(), "cheap:7b".to_string())]),
+            personas: vec![],
         }
+    }
+
+    #[test]
+    fn persona_files_parse_and_load() {
+        let text = "---\nname: reviewer\ndescription: read-only code reviewer\nmodel: fast\ntools: read, grep, glob\n---\n\nReview code without changing it.";
+        let p = parse_persona(text, "fallback");
+        assert_eq!(p.name, "reviewer");
+        assert_eq!(p.description, "read-only code reviewer");
+        assert_eq!(p.model.as_deref(), Some("fast"));
+        assert_eq!(p.tools.as_deref(), Some(&["read".to_string(), "grep".into(), "glob".into()][..]));
+        assert_eq!(p.body, "Review code without changing it.");
+        // No frontmatter: whole file is the body, filename is the name.
+        let bare = parse_persona("Just do things.", "doer");
+        assert_eq!(bare.name, "doer");
+        assert!(bare.model.is_none() && bare.tools.is_none());
+        assert_eq!(bare.body, "Just do things.");
+
+        // Loading: project dir wins name conflicts, sorted output.
+        let dir = std::env::temp_dir().join(format!("rift-personas-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".rift/agents")).unwrap();
+        std::fs::write(dir.join(".rift/agents/reviewer.md"), text).unwrap();
+        std::fs::write(dir.join(".rift/agents/tester.md"), "---\nname: tester\ndescription: runs tests\n---\nRun the tests.").unwrap();
+        let personas = load_personas(&dir);
+        assert_eq!(personas.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["reviewer", "tester"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persona_selection_and_tool_whitelist() {
+        let mut handle = routing_handle();
+        handle.personas = vec![AgentPersona {
+            name: "reviewer".into(),
+            description: "read-only".into(),
+            model: Some("fast".into()),
+            tools: Some(vec!["read".into(), "grep".into()]),
+            body: "Review only.".into(),
+        }];
+        let ctx = ToolCtx::new(std::env::temp_dir());
+        // Persona model applies when the task sets none.
+        let agent = build_child(&handle, &ctx, None, Some("reviewer")).unwrap();
+        assert_eq!(agent.cfg.model, "cheap:7b");
+        assert_eq!(agent.registry().names(), vec!["read".to_string(), "grep".into()]);
+        // Task model outranks the persona's.
+        let agent = build_child(&handle, &ctx, Some("other:1b"), Some("reviewer")).unwrap();
+        assert_eq!(agent.cfg.model, "other:1b");
+        // Unknown personas fail with the available list.
+        let err = match build_child(&handle, &ctx, None, Some("nope")) {
+            Err(e) => e,
+            Ok(_) => panic!("unknown persona must fail"),
+        };
+        assert!(err.to_string().contains("reviewer"), "got: {err}");
     }
 
     #[test]

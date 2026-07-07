@@ -115,6 +115,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/swarm <task> [--models a,b] [--judge m] [--explore]` | WarpDrive race without leaving the chat — models may span providers; the optional judge scores the diffs and recommends a winner |
 | `/merge <name> [--cleanup]` | apply a swarm candidate's patch |
 | `/undo` | revert the last turn's write/edit changes |
+| `/rewind [n]` | checkpoint restore: rewind n turns (default 1) — write/edit changes AND the conversation roll back together (up to 20 turns; bash-made changes are outside the journal) |
 | `/diff` | colored git diff of the working tree |
 | `/init` | generate a RIFT.md project guide for agents |
 | `/restart` | relaunch rift and resume this session — pick up a fresh `/update` without losing your chat |
@@ -148,7 +149,27 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 
 The optional `models` map names **model roles** for multi-model workflows: the agent tool accepts `model: "<role>"` (or any full model string) per delegated task, so one session can research/spec/review on a strong model and implement on a cheap one — e.g. ask the session model to plan, then have it delegate implementation tasks with `model: "fast"` and review the reports itself. The system prompt advertises configured roles to the model automatically, `/model`'s picker lists them first, and with no `models` map everything behaves exactly as a single-model setup.
 
-Permissions work like Claude Code's: interactive sessions **ask before `write`/`edit`/`bash` by default**, and each bash prompt offers *allow once* / *always allow `<pattern>`* (persisted to `permissions.bash_allow` in your user config — those commands never prompt again) / *allow all bash this session* / *deny*. The deny list (built-ins + `bash_deny`) is always enforced, even in YOLO mode. `"approve": false` in the user config or `/yolo` turns prompting off; a project `.rift.json` can only tighten (add denies, force approval on — its `bash_allow` is ignored).
+Permissions work like Claude Code's: interactive sessions **ask before `write`/`edit`/`bash` by default**, and each bash prompt offers *allow once* / *always allow `<pattern>`* (persisted to `permissions.bash_allow` in your user config — those commands never prompt again) / *allow all bash this session* / *deny*. Write/edit approval prompts show a **diff-colored preview of the pending change**, so you review what you're allowing. The deny list (built-ins + `bash_deny`) is always enforced, even in YOLO mode. `"approve": false` in the user config or `/yolo` turns prompting off; a project `.rift.json` can only tighten (add denies, force approval on — its `bash_allow` is ignored).
+
+### Hooks
+
+`"hooks": {"post_edit": ["cargo check --quiet"]}` runs each command after every successful write/edit. A failing hook's output is appended to the **tool result**, so the model sees broken builds/tests immediately and fixes them in the same turn — verification stops depending on the model remembering to check. Successes just log a `hook ✓` line. Hooks in a project `.rift.json` need one-time trust at startup (they execute automatically; a cloned repo must not get that for free); user-config hooks apply as-is. Sub-agents run the same hooks.
+
+### Agent personas
+
+Drop `.rift/agents/<name>.md` (project) or `~/.config/rift/agents/<name>.md` (user-wide) files to define custom sub-agent types:
+
+```markdown
+---
+name: reviewer
+description: read-only code reviewer
+model: fast
+tools: read, grep, glob, outline, repo_map
+---
+You review code for correctness and style. You never modify anything; report findings with file:line references.
+```
+
+The `agent` tool then accepts `agent: "reviewer"` per delegated task — the persona's prompt body layers onto the base system prompt, its `tools` whitelist restricts the child's tool set, and its `model` (a role or full name) is the default when the task doesn't pick one. Configured personas are advertised to the model automatically.
 
 Copy [`.rift.json.example`](.rift.json.example) to `.rift.json` (project — it's gitignored, so a private host stays out of git) or `~/.config/rift/config.json` (user-wide), then edit. Set `host` and `model` once and you can start the TUI with a bare `rift` — no flags needed; they're the startup defaults (a `--host`/`--model` flag or `RIFT_HOST`/`RIFT_MODEL` env var still overrides them). Other optional keys mirror the flags: `num_ctx`, `temperature`, `max_iterations`. For metered providers, `/stats` shows an estimated cost — Anthropic model rates are built in; add a `"pricing"` map (`{"gpt-5": {"input": 1.25, "output": 10.0}}`, $ per million tokens, matched by model-name substring) for anything else. Set `"approve": true` (or launch with `--approve`) to pause for a y/n picker before every write/edit/shell action, with per-session "always allow". Project context files (`RIFT.md`, `AGENTS.md`, `CLAUDE.md`) at the repo root are loaded into the system prompt automatically (`/init` writes a RIFT.md for you). On multi-step tasks the agent maintains a visible task checklist, pinned at the top of the activity pane.
 

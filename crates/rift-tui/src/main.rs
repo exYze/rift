@@ -393,6 +393,27 @@ async fn main() -> Result<()> {
         eprintln!("note: approval mode needs the interactive TUI; running headless without it");
     }
 
+    // post_edit hooks: user-config entries apply as-is; project entries
+    // execute commands from a possibly-cloned repo, so each needs one-time
+    // trust (same model as project MCP servers).
+    let mut post_edit_hooks = config.hooks.post_edit.clone();
+    for hook in &config.project_hooks.post_edit {
+        if rift_core::config::hook_trusted(hook) {
+            post_edit_hooks.push(hook.clone());
+        } else if interactive && confirm_hook(hook) {
+            if let Err(e) = rift_core::config::trust_hook(hook) {
+                eprintln!("warning: could not persist hook approval: {e:#}");
+            }
+            post_edit_hooks.push(hook.clone());
+        } else {
+            eprintln!("project post_edit hook skipped (not trusted): {hook}");
+        }
+    }
+    if !post_edit_hooks.is_empty() {
+        eprintln!("post-edit hooks: {}", post_edit_hooks.join(" · "));
+    }
+    ctx.set_post_edit_hooks(&post_edit_hooks);
+
     let (mut prompt_text, guide_files) = rift_core::system_prompt_with_guide(&model, &cwd);
     if !guide_files.is_empty() {
         eprintln!("loaded project context: {}", guide_files.join(", "));
@@ -412,11 +433,19 @@ async fn main() -> Result<()> {
     // delegation stays one level deep. run_turn refreshes client/cfg, so
     // later /model and /host switches carry over; the factory + roles let
     // individual tasks run on OTHER models (config `models` role map).
+    let personas = rift_core::subagent::load_personas(&cwd);
+    if !personas.is_empty() {
+        eprintln!(
+            "agent personas: {}",
+            personas.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
     ctx.set_subagent(rift_core::SubAgentHandle {
         client: client.clone(),
         cfg: cfg.clone(),
         factory: Some(provider_factory(&host, &config.providers)),
         roles: config.models.clone(),
+        personas: personas.clone(),
     });
     registry.register(Box::new(rift_core::AgentTool));
     // Multi-model workflows are opt-in: the model only hears about roles
@@ -429,6 +458,15 @@ async fn main() -> Result<()> {
              per task): {}. Route mechanical work (implementing a written spec, running tests) to \
              cheaper roles; keep research, specs, and review on the stronger model.",
             roles.join(", ")
+        ));
+    }
+    if !personas.is_empty() {
+        let listed: Vec<String> =
+            personas.iter().map(|p| format!("{} ({})", p.name, p.description)).collect();
+        prompt_text.push_str(&format!(
+            "\n\nAgent personas available for delegated tasks (the agent tool accepts agent=\"<name>\" \
+             per task): {}.",
+            listed.join("; ")
         ));
     }
 
@@ -681,6 +719,21 @@ async fn run_swarm_cli(
 
     println!("\napply a winner with: rift merge <name> [--cleanup]   (worktrees kept under .rift/worktrees/)");
     Ok(())
+}
+
+/// Startup y/N prompt for an untrusted project-config post_edit hook.
+fn confirm_hook(command: &str) -> bool {
+    use std::io::Write;
+    eprint!(
+        "project .rift.json defines a post_edit hook: `{command}`\nit will run automatically after every \
+         write/edit. Run and trust it on this machine? [y/N] "
+    );
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim(), "y" | "Y" | "yes" | "YES")
 }
 
 /// Startup y/N prompt for an untrusted project-config MCP server. Runs before

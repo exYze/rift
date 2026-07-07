@@ -711,6 +711,7 @@ mod tests {
             cfg: rift_core::AgentConfig { model, ..Default::default() },
             factory: None,
             roles: std::collections::HashMap::new(),
+            personas: vec![],
         });
         // A session snapshot the side question should see through.
         let session = std::env::temp_dir().join("rift-btw-test-session.json");
@@ -1175,6 +1176,14 @@ impl App {
     /// Route an incoming ask_user question to the right surface: choices get
     /// the picker overlay, free-text questions switch the input into answer mode.
     fn handle_ask(&mut self, req: AskRequest) {
+        // Approval prompts carry the pending diff — render it diff-colored
+        // above the question so the user reviews what they're allowing.
+        for line in &req.detail {
+            self.transcript.push_line(diff_kind(line), line.clone());
+        }
+        if !req.detail.is_empty() {
+            self.transcript.push_line(Kind::Info, String::new());
+        }
         self.transcript.push_block(Kind::Warn, format!("? {}", req.question));
         if req.choices.is_empty() {
             self.answering = Some(req.reply);

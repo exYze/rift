@@ -21,7 +21,7 @@ pub use config::{
 pub use mcp::{McpClient, McpTool};
 pub use session::{SavedSession, SessionStore};
 pub use skills::{load_skills, skills_prompt_section, Skill, SkillTool};
-pub use subagent::{AgentTool, SubAgentHandle};
+pub use subagent::{AgentPersona, AgentTool, SubAgentHandle};
 pub use tasks::{BgTasks, TaskKind, TaskStatus, TaskView};
 pub use swarm::{
     judge_swarm, run_swarm, Candidate, CandidateOutcome, JudgeVerdict, ProviderFactory, Swarm,

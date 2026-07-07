@@ -50,6 +50,17 @@ pub struct Config {
     /// another. Unset = single-model behavior, exactly as before.
     #[serde(default)]
     pub models: HashMap<String, String>,
+    /// Automation hooks. `post_edit` commands run after every successful
+    /// write/edit; a failing hook's output is appended to the tool result,
+    /// so the model sees broken builds/tests immediately and fixes them in
+    /// the same turn.
+    #[serde(default)]
+    pub hooks: Hooks,
+    /// Hooks contributed by the project `.rift.json` — they execute
+    /// arbitrary commands from a possibly-cloned repo, so each needs
+    /// one-time trust (like project MCP entries) before it runs.
+    #[serde(skip)]
+    pub project_hooks: Hooks,
     /// Default max agent-loop iterations per turn. Overridden by `--max-iterations`.
     #[serde(default)]
     pub max_iterations: Option<usize>,
@@ -122,6 +133,14 @@ pub struct Pricing {
     pub output: f64,
 }
 
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct Hooks {
+    /// Shell commands run after each successful write/edit (e.g.
+    /// "cargo check --quiet"). Failures feed back to the model.
+    #[serde(default)]
+    pub post_edit: Vec<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct Permissions {
     /// Extra glob patterns for shell commands to refuse (merged with the
@@ -191,6 +210,9 @@ impl Config {
         // guarded) provider table, so a project adding/overriding them is
         // no more powerful than it setting `model`.
         self.models.extend(p.models);
+        // Project hooks are held apart: they run commands automatically, so
+        // the frontend collects one-time trust before merging them in.
+        self.project_hooks.post_edit.extend(p.hooks.post_edit);
         if p.temperature.is_some() {
             self.temperature = p.temperature;
         }
@@ -238,6 +260,40 @@ impl Config {
             );
         }
     }
+}
+
+// ---- hook trust store -------------------------------------------------------
+//
+// Hooks from a project `.rift.json` execute automatically after edits — in a
+// cloned repo that's remote code execution. Same model as project MCP
+// entries: one-time approval per exact command, remembered user-side.
+
+fn hook_store_path() -> Option<std::path::PathBuf> {
+    crate::paths::data_dir().map(|d| d.join("rift/trusted-hooks.json"))
+}
+
+/// Has the user previously approved this exact project hook command?
+pub fn hook_trusted(command: &str) -> bool {
+    let Some(path) = hook_store_path() else { return false };
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    serde_json::from_str::<Vec<String>>(&text).map(|v| v.iter().any(|c| c == command)).unwrap_or(false)
+}
+
+/// Remember approval for a project hook command.
+pub fn trust_hook(command: &str) -> Result<()> {
+    let path = hook_store_path().context("no data directory for the hook trust store")?;
+    let mut list: Vec<String> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    if !list.iter().any(|c| c == command) {
+        list.push(command.to_string());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&list)? + "\n")
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Persist an MCP server entry (`/mcp add`) into the user config or the

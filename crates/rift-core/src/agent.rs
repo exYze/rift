@@ -126,6 +126,10 @@ pub struct Agent {
     /// Image attachments (data URLs) queued for the NEXT turn's user
     /// message — @-mentioned images and --attach files land here.
     pending_images: Vec<String>,
+    /// Checkpoint per turn: (ctx turn number, message index of the turn's
+    /// user message). /rewind pops these to restore files (via the edit
+    /// journal) and truncate the conversation together.
+    turn_marks: Vec<(u64, usize)>,
 }
 
 impl Agent {
@@ -140,7 +144,35 @@ impl Agent {
             trace: None,
             interrupted: false,
             pending_images: vec![],
+            turn_marks: vec![],
         }
+    }
+
+    /// How many turns /rewind can currently reach back.
+    pub fn rewindable_turns(&self) -> usize {
+        self.turn_marks.len()
+    }
+
+    /// Rewind `n` turns: restore every file the write/edit tools touched in
+    /// those turns (bash-made changes are outside the journal) and truncate
+    /// the conversation to just before the first rewound turn. Returns the
+    /// restored paths.
+    pub fn rewind(&mut self, n: usize) -> Result<Vec<std::path::PathBuf>> {
+        if n == 0 {
+            anyhow::bail!("rewind how far? /rewind <n> with n >= 1");
+        }
+        if self.turn_marks.len() < n {
+            anyhow::bail!(
+                "only {} turn(s) are rewindable (checkpoints reach back at most 20 turns and don't survive compaction)",
+                self.turn_marks.len()
+            );
+        }
+        let (turn, msg_index) = self.turn_marks[self.turn_marks.len() - n];
+        let restored = self.ctx.undo_to_turn(turn.saturating_sub(1))?;
+        self.messages.truncate(msg_index.min(self.messages.len()));
+        self.turn_marks.truncate(self.turn_marks.len() - n);
+        self.interrupted = false;
+        Ok(restored)
     }
 
     /// Queue image attachments (data URLs) for the next turn's user message.
@@ -211,6 +243,9 @@ impl Agent {
         match compact::summarize_history(&*self.client, &self.cfg.model, self.cfg.num_ctx, &self.messages).await {
             Ok(rebuilt) => {
                 self.messages = rebuilt;
+                // Summarization rebuilds history — message indices in the
+                // rewind checkpoints no longer point anywhere meaningful.
+                self.turn_marks.clear();
                 counters.compact_summaries += 1;
                 let est3 = compact::estimate_prompt_tokens(&self.messages, tools_overhead, self.calibration);
                 let _ = tx.send(AgentEvent::Info(format!("compacted: history summarized (~{est3} tok)")));
@@ -292,10 +327,19 @@ impl Agent {
             user_input.to_string()
         };
         let user_input = user_input.as_str();
+        // Checkpoint BEFORE this turn's message lands: /rewind restores to
+        // this index and the journal turn that begin_turn is about to open.
+        let mark_index = self.messages.len();
         let mut user_msg = Message::user(user_input);
         user_msg.images = std::mem::take(&mut self.pending_images);
         self.messages.push(user_msg);
         self.ctx.begin_turn();
+        self.turn_marks.push((self.ctx.current_turn(), mark_index));
+        const REWIND_KEEP: usize = 20;
+        if self.turn_marks.len() > REWIND_KEEP {
+            let drop = self.turn_marks.len() - REWIND_KEEP;
+            self.turn_marks.drain(..drop);
+        }
         // Keep the sub-agent handle tracking the live provider/config, so
         // /model and /host switches carry over to delegated agents. Only
         // refreshes where a frontend installed one — child agents and swarm
@@ -695,6 +739,66 @@ fn preview(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StubProvider;
+    #[async_trait::async_trait]
+    impl Provider for StubProvider {
+        fn base_url(&self) -> &str {
+            "stub"
+        }
+        async fn tags(&self) -> Result<Vec<rift_provider::ModelEntry>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _m: &str) -> Result<rift_provider::ModelCapabilities> {
+            Ok(rift_provider::ModelCapabilities::default())
+        }
+        async fn chat_stream(
+            &self,
+            _req: &ChatRequest,
+            _on_delta: &mut (dyn FnMut(StreamDelta) + Send),
+        ) -> Result<rift_provider::ChatOutcome> {
+            anyhow::bail!("stub")
+        }
+    }
+
+    #[test]
+    fn rewind_truncates_messages_and_marks() {
+        let mut agent = Agent::new(
+            Arc::new(StubProvider),
+            AgentConfig::default(),
+            ToolRegistry::standard(),
+            ToolCtx::new(std::env::temp_dir()),
+            "system".into(),
+        );
+        // Simulate three completed turns the way run_turn records them.
+        for i in 1..=3 {
+            let mark_index = agent.messages.len();
+            agent.messages.push(Message::user(format!("turn {i}")));
+            agent.ctx.begin_turn();
+            agent.turn_marks.push((agent.ctx.current_turn(), mark_index));
+            agent.messages.push(Message {
+                role: Role::Assistant,
+                content: format!("reply {i}"),
+                thinking: None,
+                tool_calls: vec![],
+                tool_name: None,
+                tool_call_id: None,
+                provider_data: None,
+                images: vec![],
+            });
+        }
+        assert_eq!(agent.rewindable_turns(), 3);
+        assert_eq!(agent.messages.len(), 7); // system + 3×(user+assistant)
+
+        // Rewind 2 turns: back to just after turn 1's exchange.
+        agent.rewind(2).unwrap();
+        assert_eq!(agent.messages.len(), 3);
+        assert_eq!(agent.messages.last().unwrap().content, "reply 1");
+        assert_eq!(agent.rewindable_turns(), 1);
+        // Beyond the marks → a clear error, nothing changes.
+        assert!(agent.rewind(5).is_err());
+        assert_eq!(agent.messages.len(), 3);
+    }
 
     #[test]
     fn content_requests_suppress_the_apply_nudge() {

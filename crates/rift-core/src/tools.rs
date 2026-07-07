@@ -54,8 +54,47 @@ pub struct EditRecord {
 /// whatever frontend is attached. `choices` empty = free-text answer.
 pub struct AskRequest {
     pub question: String,
+    /// Supporting lines shown above the question — approval prompts put the
+    /// pending diff here, rendered with diff coloring. Empty = none.
+    pub detail: Vec<String>,
     pub choices: Vec<String>,
     pub reply: tokio::sync::oneshot::Sender<String>,
+}
+
+/// A compact ±diff between two texts for approval previews: common prefix
+/// and suffix lines are trimmed, the changed middle shows as -old/+new.
+/// Whole-file precision isn't the goal — seeing what you're approving is.
+pub fn preview_diff(old: &str, new: &str, max_lines: usize) -> Vec<String> {
+    let o: Vec<&str> = old.lines().collect();
+    let n: Vec<&str> = new.lines().collect();
+    let mut start = 0;
+    while start < o.len() && start < n.len() && o[start] == n[start] {
+        start += 1;
+    }
+    let (mut oe, mut ne) = (o.len(), n.len());
+    while oe > start && ne > start && o[oe - 1] == n[ne - 1] {
+        oe -= 1;
+        ne -= 1;
+    }
+    if start == oe && start == ne {
+        return vec![]; // identical
+    }
+    let mut out = Vec::new();
+    if start > 0 || oe < o.len() {
+        out.push(format!("@@ line {} @@", start + 1));
+    }
+    for l in &o[start..oe] {
+        out.push(format!("-{l}"));
+    }
+    for l in &n[start..ne] {
+        out.push(format!("+{l}"));
+    }
+    if out.len() > max_lines {
+        let hidden = out.len() - max_lines;
+        out.truncate(max_lines);
+        out.push(format!("… [{hidden} more diff lines]"));
+    }
+    out
 }
 
 /// One step of the model's self-declared task checklist (the `plan` tool).
@@ -88,6 +127,9 @@ pub struct ToolCtx {
     /// Provider handle for the `agent` tool. Installed by the frontend on the
     /// ROOT ctx only; sub-agent ctxs get None, which is what stops recursion.
     subagent: std::sync::Arc<std::sync::RwLock<Option<crate::subagent::SubAgentHandle>>>,
+    /// post_edit hook commands (config `hooks`, project ones trust-gated);
+    /// run after every successful write/edit, failures fed to the model.
+    hooks: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 fn build_deny_set(extra: &[String]) -> globset::GlobSet {
@@ -141,7 +183,19 @@ impl ToolCtx {
             approved_kinds: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             bg: crate::tasks::BgTasks::default(),
             subagent: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            hooks: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
         }
+    }
+
+    /// Replace the post_edit hook commands (startup, /config reload).
+    pub fn set_post_edit_hooks(&self, hooks: &[String]) {
+        if let Ok(mut h) = self.hooks.lock() {
+            *h = hooks.to_vec();
+        }
+    }
+
+    pub fn post_edit_hooks(&self) -> Vec<String> {
+        self.hooks.lock().map(|h| h.clone()).unwrap_or_default()
     }
 
     /// The session's background task registry.
@@ -194,7 +248,72 @@ impl ToolCtx {
             approved_kinds: self.approved_kinds.clone(),
             bg: self.bg.clone(),
             subagent: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            // Sub-agents edit files too — the same verification applies.
+            hooks: self.hooks.clone(),
         }
+    }
+
+    /// Run the post_edit hooks after a successful write/edit. Returns a
+    /// report to append to the tool result when any hook fails — that puts
+    /// broken builds/tests in front of the model in the same tool result,
+    /// so it fixes them before moving on. Successes only log.
+    pub(crate) async fn run_post_edit_hooks(&self, edited: &Path) -> Option<String> {
+        const HOOK_TIMEOUT_SECS: u64 = 120;
+        const HOOK_OUTPUT_CAP: usize = 4000;
+        let hooks = self.post_edit_hooks();
+        if hooks.is_empty() {
+            return None;
+        }
+        let mut failures = String::new();
+        for hook in hooks {
+            let mut cmd = shell_command(&hook);
+            cmd.current_dir(&self.cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            let outcome = async {
+                let out = cmd.output().await?;
+                anyhow::Ok(out)
+            };
+            let result = tokio::time::timeout(Duration::from_secs(HOOK_TIMEOUT_SECS), outcome).await;
+            match result {
+                Ok(Ok(out)) if out.status.success() => {
+                    self.bg.emit(crate::agent::AgentEvent::Info(format!("hook ✓ {hook}")));
+                }
+                Ok(Ok(out)) => {
+                    self.bg.emit(crate::agent::AgentEvent::Info(format!("hook ✗ {hook}")));
+                    let mut text = String::new();
+                    text.push_str(&strip_ansi(&String::from_utf8_lossy(&out.stdout)));
+                    let err = strip_ansi(&String::from_utf8_lossy(&out.stderr));
+                    if !err.trim().is_empty() {
+                        if !text.trim().is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&err);
+                    }
+                    failures.push_str(&format!(
+                        "\n\n[post-edit hook FAILED (exit {}): {hook}]\n{}",
+                        out.status.code().unwrap_or(-1),
+                        truncate_middle(text.trim(), HOOK_OUTPUT_CAP)
+                    ));
+                }
+                Ok(Err(e)) => {
+                    failures.push_str(&format!("\n\n[post-edit hook FAILED to run: {hook}]\n{e:#}"));
+                }
+                Err(_) => {
+                    failures.push_str(&format!(
+                        "\n\n[post-edit hook TIMED OUT after {HOOK_TIMEOUT_SECS}s: {hook}]"
+                    ));
+                }
+            }
+        }
+        (!failures.is_empty()).then(|| {
+            format!(
+                "{failures}\n\nThe edit to {} is applied, but the checks above now fail — fix them before moving on.",
+                edited.display()
+            )
+        })
     }
 
     /// Require user approval before write/edit/bash execute. Only effective
@@ -291,6 +410,7 @@ impl ToolCtx {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let _ = ask.send(AskRequest {
             question: format!("Allow bash: {preview}"),
+            detail: vec![],
             choices: vec!["allow once".into(), always.clone(), session.clone(), "deny".into()],
             reply: reply_tx,
         });
@@ -316,8 +436,9 @@ impl ToolCtx {
     }
 
     /// Gate a mutating action behind user approval. Returns Err when denied —
-    /// the model sees that as a tool error and adjusts course.
-    async fn check_approval(&self, kind: &str, summary: &str) -> Result<()> {
+    /// the model sees that as a tool error and adjusts course. `detail`
+    /// lines (the pending diff) render above the question, diff-colored.
+    async fn check_approval(&self, kind: &str, summary: &str, detail: Vec<String>) -> Result<()> {
         if !self.approval_enabled() {
             return Ok(());
         }
@@ -330,6 +451,7 @@ impl ToolCtx {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let _ = ask.send(AskRequest {
             question: format!("Allow {kind}: {summary}"),
+            detail,
             choices: vec!["allow".into(), always.clone(), "deny".into()],
             reply: reply_tx,
         });
@@ -387,11 +509,16 @@ impl ToolCtx {
         self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// The current turn number (checkpoint id) — /rewind targets these.
+    pub fn current_turn(&self) -> u64 {
+        self.turn.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn record_edit(&self, path: PathBuf, prior: Option<Vec<u8>>) {
-        // How many turns back /undo can reach. Bounds journal memory: a long
-        // session rewriting large files would otherwise hold every prior
-        // version until exit.
-        const UNDO_KEEP_TURNS: u64 = 3;
+        // How many turns back /undo and /rewind can reach. Bounds journal
+        // memory: a long session rewriting large files would otherwise hold
+        // every prior version until exit.
+        const UNDO_KEEP_TURNS: u64 = 20;
         let turn = self.turn.load(std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut j) = self.journal.lock() {
             j.retain(|r| r.turn + UNDO_KEEP_TURNS > turn);
@@ -426,6 +553,40 @@ impl ToolCtx {
             }
             restored.push(rec.path);
         }
+        Ok(restored)
+    }
+
+    /// Restore every write/edit made AFTER `target` turn (the /rewind
+    /// machinery): for each touched file, the earliest snapshot past the
+    /// target is its pre-rewind state. Like Claude Code's checkpoints, this
+    /// covers the write/edit tools — changes made via bash (git, formatters,
+    /// scripts) are outside the journal.
+    pub fn undo_to_turn(&self, target: u64) -> Result<Vec<PathBuf>> {
+        let records: Vec<EditRecord> = {
+            let mut j = self.journal.lock().map_err(|_| anyhow!("edit journal poisoned"))?;
+            let taken = j.iter().filter(|r| r.turn > target).cloned().collect();
+            j.retain(|r| r.turn <= target);
+            taken
+        };
+        let mut earliest: std::collections::HashMap<PathBuf, EditRecord> = std::collections::HashMap::new();
+        for rec in records {
+            let replace = earliest.get(&rec.path).map(|e| rec.turn < e.turn).unwrap_or(true);
+            if replace {
+                earliest.insert(rec.path.clone(), rec);
+            }
+        }
+        let mut restored = Vec::with_capacity(earliest.len());
+        for (path, rec) in earliest {
+            match &rec.prior {
+                Some(content) => std::fs::write(&path, content)
+                    .with_context(|| format!("restoring {}", path.display()))?,
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            restored.push(path);
+        }
+        restored.sort();
         Ok(restored)
     }
 
@@ -473,6 +634,12 @@ impl ToolRegistry {
     /// Add a tool (e.g. from an MCP server) to the registry.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
+    }
+
+    /// Keep only the named tools (persona whitelists). Unknown names are
+    /// ignored — a typo narrows the set rather than erroring the spawn.
+    pub fn retain_tools(&mut self, allowed: &[String]) {
+        self.tools.retain(|t| allowed.iter().any(|a| a == t.name()));
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
@@ -795,21 +962,34 @@ impl Tool for WriteTool {
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
         let path = ctx.resolve(req_str(args, "path")?);
         let content = req_str(args, "content")?;
-        ctx.check_approval("write", &format!("{} ({} bytes)", path.display(), content.len())).await?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         // Snapshot as bytes: a prior read failure other than NotFound must
         // abort the write, not degrade to "file didn't exist" — undo would
-        // then delete a file it should restore.
+        // then delete a file it should restore. Read before the approval so
+        // the prompt can show what actually changes.
         let prior = match tokio::fs::read(&path).await {
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e).with_context(|| format!("cannot snapshot {} for undo", path.display())),
         };
+        let diff = match &prior {
+            None => preview_diff("", content, 40),
+            Some(bytes) if !looks_binary(bytes) => {
+                preview_diff(&String::from_utf8_lossy(bytes), content, 40)
+            }
+            Some(_) => vec!["(overwriting a binary file)".into()],
+        };
+        ctx.check_approval("write", &format!("{} ({} bytes)", path.display(), content.len()), diff)
+            .await?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
         ctx.record_edit(path.clone(), prior);
         tokio::fs::write(&path, content).await.with_context(|| format!("cannot write {}", path.display()))?;
-        Ok(format!("Wrote {} bytes to {}", content.len(), path.display()))
+        let mut result = format!("Wrote {} bytes to {}", content.len(), path.display());
+        if let Some(report) = ctx.run_post_edit_hooks(&path).await {
+            result.push_str(&report);
+        }
+        Ok(result)
     }
 }
 
@@ -877,11 +1057,16 @@ impl Tool for EditTool {
         if count > 1 && !replace_all {
             bail!("old_string occurs {count} times in {}; include more surrounding context to make it unique, or set replace_all", path.display());
         }
-        ctx.check_approval("edit", &path.display().to_string()).await?;
         let updated = if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) };
+        ctx.check_approval("edit", &path.display().to_string(), preview_diff(&text, &updated, 40)).await?;
         ctx.record_edit(path.clone(), Some(text.clone().into_bytes()));
         tokio::fs::write(&path, &updated).await?;
-        Ok(format!("Edited {} ({} replacement{})", path.display(), count, if count == 1 { "" } else { "s" }))
+        let mut result =
+            format!("Edited {} ({} replacement{})", path.display(), count, if count == 1 { "" } else { "s" });
+        if let Some(report) = ctx.run_post_edit_hooks(&path).await {
+            result.push_str(&report);
+        }
+        Ok(result)
     }
 }
 
@@ -1288,7 +1473,7 @@ impl Tool for AskUserTool {
             bail!("ask_user is not available in this session (no interactive user); decide using your best judgment");
         };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        ask.send(AskRequest { question, choices, reply: reply_tx })
+        ask.send(AskRequest { question, detail: vec![], choices, reply: reply_tx })
             .map_err(|_| anyhow!("the interactive session is gone"))?;
         match reply_rx.await {
             Ok(answer) => Ok(format!("User answered: {answer}")),
@@ -1634,6 +1819,82 @@ impl Tool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_diff_trims_context_and_caps() {
+        // Only the changed middle shows, with a location hint.
+        let old = "a\nb\nc\nd";
+        let new = "a\nB\nC\nd";
+        let d = preview_diff(old, new, 40);
+        assert_eq!(d, vec!["@@ line 2 @@", "-b", "-c", "+B", "+C"]);
+        // New file: all additions, no hunk header.
+        assert_eq!(preview_diff("", "x\ny", 40), vec!["+x", "+y"]);
+        // Identical: empty.
+        assert!(preview_diff("same", "same", 40).is_empty());
+        // Cap: long diffs truncate with a count.
+        let old: String = (0..100).map(|i| format!("o{i}\n")).collect();
+        let new: String = (0..100).map(|i| format!("n{i}\n")).collect();
+        let d = preview_diff(&old, &new, 10);
+        assert_eq!(d.len(), 11);
+        assert!(d.last().unwrap().contains("more diff lines"));
+    }
+
+    #[tokio::test]
+    async fn post_edit_hooks_feed_failures_back() {
+        let dir = std::env::temp_dir().join(format!("rift-hooks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ToolCtx::new(&dir);
+        // No hooks configured → silent.
+        assert!(ctx.run_post_edit_hooks(Path::new("x.rs")).await.is_none());
+        // A passing hook stays out of the tool result.
+        ctx.set_post_edit_hooks(&["exit 0".to_string()]);
+        assert!(ctx.run_post_edit_hooks(Path::new("x.rs")).await.is_none());
+        // A failing hook's output and exit code reach the model.
+        ctx.set_post_edit_hooks(&["echo boom&& exit 3".to_string()]);
+        let report = ctx.run_post_edit_hooks(Path::new("x.rs")).await.expect("failure must report");
+        assert!(report.contains("FAILED"), "got: {report}");
+        assert!(report.contains("boom"), "hook output missing: {report}");
+        assert!(report.contains("exit 3"), "exit code missing: {report}");
+        // And it rides an edit tool result end-to-end.
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String(dir.join("hooked.txt").display().to_string()));
+        args.insert("content".into(), Value::String("hello".into()));
+        let result = WriteTool.execute(&args, &ctx).await.unwrap();
+        assert!(result.starts_with("Wrote 5 bytes"));
+        assert!(result.contains("post-edit hook FAILED"), "got: {result}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn undo_to_turn_restores_across_turns() {
+        let dir = std::env::temp_dir().join(format!("rift-rewind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ToolCtx::new(&dir);
+        let file = dir.join("f.txt");
+        let write = |content: &str| {
+            let mut args = Map::new();
+            args.insert("path".into(), Value::String(file.display().to_string()));
+            args.insert("content".into(), Value::String(content.into()));
+            args
+        };
+        // Turn 1 creates, turns 2 and 3 rewrite.
+        ctx.begin_turn();
+        WriteTool.execute(&write("v1"), &ctx).await.unwrap();
+        ctx.begin_turn();
+        WriteTool.execute(&write("v2"), &ctx).await.unwrap();
+        ctx.begin_turn();
+        WriteTool.execute(&write("v3"), &ctx).await.unwrap();
+        // Rewind past turns 3 and 2 → the file is back at v1.
+        let restored = ctx.undo_to_turn(1).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v1");
+        // Rewinding past turn 1 removes the file entirely (didn't exist).
+        ctx.begin_turn();
+        WriteTool.execute(&write("v4"), &ctx).await.unwrap();
+        let _ = ctx.undo_to_turn(0).unwrap();
+        assert!(!file.exists(), "file should be gone before its creating turn");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn bash_background_runs_and_notifies() {
