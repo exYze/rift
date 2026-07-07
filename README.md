@@ -105,10 +105,11 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/sessions [n]` | interactive session picker, or resume the nth directly |
 | `/skills` · `/skill:<name> [task]` | list packaged skills, or run one |
 | `/skills new [--global] <desc>` · `/mcp new [--global] <desc>` | the agent builds its own extensions: writes a skill file, or writes + self-tests a local MCP server and registers it (trust-gated). Default is project-scoped (`.rift/`, this repo only); `--global` installs user-wide (`~/.config/rift/`, every project) — `/restart` loads them |
-| `/mcp add [--global] <name> <command> [args…]` | connect an existing stdio MCP server (e.g. `/mcp add fetch uvx mcp-server-fetch`) — verified, registered live (no restart), and persisted to the project `.rift.json` or user config. Same as adding it to the config `mcp` map by hand, minus the hand |
+| `/mcp add [--global] <name> <command\|url> [args…]` | connect an existing MCP server — stdio (`/mcp add fetch uvx mcp-server-fetch`) or **remote streamable-HTTP** (`/mcp add docs https://host/mcp`) — verified, registered live (no restart), and persisted to the project `.rift.json` or user config. Remote entries take `"headers"` in the config for auth tokens |
 | `/goal <condition>` | keep working until the model verifies the goal is met — turns auto-continue (up to 25) until a verified `GOAL MET`; `/goal clear` or Esc stops, bare `/goal` shows status |
 | `/loop [30s\|5m\|2h] <prompt or /command>` | re-run a prompt on an interval (or back-to-back without one); `/loop stop` or Esc ends it |
-| `/tasks [kill <id>]` | background tasks (shells + sub-agents): the model starts them with `bash run_in_background=true` or `agent background=true`; they keep running while you chat, the status bar shows the count, and a `[task notification]` turn reports each result back to the model |
+| `/tasks [send <id> <text>\|eof <id>\|kill <id>]` | background tasks (shells + sub-agents): the model starts them with `bash run_in_background=true` or `agent background=true`; they keep running while you chat, the status bar shows the count, and a `[task notification]` turn reports each result back to the model. Tasks are **interactive**: `send` writes a line to a task's stdin (answer REPLs/prompts — the model does the same via its `task` tool), `eof` closes it |
+| `/paste` | attach a clipboard image to your next message (vision models) — copy a screenshot, `/paste`, type your question |
 | `/btw <question>` | quick side question (Claude Code-style): it sees the whole conversation but has no tools, the exchange never enters the main history, and it works even while the agent is mid-turn — ask asides (related or not) without polluting context; `/btw clear` resets the side thread |
 | `/plan [clear]` | the agent's task checklist (also pinned live in the activity pane) |
 | `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, deny list + approval state |
@@ -209,7 +210,11 @@ MCP server tools are exposed to the model as `<server>_<tool>`. A built-in deny 
 
 ## Attachments
 
-Mention a file with `@path` in any prompt (Tab completes against the project file index). Text/code files attach as a token-stingy outline — the model sees the structure and can `read` exact ranges itself. **Images** (`@screenshot.png`, jpg/gif/webp/bmp, up to 10 MB) attach as base64 for vision-capable models: paste a UI screenshot and ask what's wrong, attach a diagram and ask the model to implement it. Ollama reports vision capability per model (`gemma4`, llava, …); OpenAI-compatible servers reject images on text-only models with a clear error. Headless runs attach with `--attach <path>` (repeatable; text files append their content, images ride as base64).
+Mention a file with `@path` in any prompt (Tab completes against the project file index). Text/code files attach as a token-stingy outline — the model sees the structure and can `read` exact ranges itself. **Images** (`@screenshot.png`, jpg/gif/webp/bmp, up to 10 MB) attach as base64 for vision-capable models: paste a UI screenshot and ask what's wrong, attach a diagram and ask the model to implement it. `/paste` grabs an image straight off the clipboard (PowerShell on Windows, `pngpaste` on macOS, `wl-paste`/`xclip` on Linux) and stages it for your next message. Ollama reports vision capability per model (`gemma4`, llava, …); OpenAI-compatible servers reject images on text-only models with a clear error. Headless runs attach with `--attach <path>` (repeatable; text files append their content, images ride as base64).
+
+### Scripting (headless JSON output)
+
+`rift -p "..." --output-format json` reserves stdout for a single machine-readable result object — `{"model", "reply", "tools": [{name, ok}…], "stats": {iterations, tokens, duration…}, "estimated_cost_usd", "session"}` — while progress streams to stderr. Pipe it to `jq`, parse it in CI, or chain rift runs in scripts.
 
 ## Elicitation
 

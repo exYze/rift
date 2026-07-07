@@ -21,16 +21,80 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::tools::{Tool, ToolCtx};
 
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use rift_provider::test_support::{MockResponse, MockServer};
+
+    // The streamable-HTTP transport: initialize captures the session id,
+    // the initialized notification is fire-and-forget, and tools/list
+    // parses both plain-JSON and SSE-framed responses.
+    #[tokio::test]
+    async fn http_transport_handshakes_and_lists_tools() {
+        let server = MockServer::start(vec![
+            MockResponse::json(
+                200,
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"mock\"}}}",
+            ),
+            MockResponse::json(202, ""),
+            MockResponse {
+                status: 200,
+                content_type: "text/event-stream",
+                chunks: vec![
+                    "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"fetch\",\"description\":\"gets a url\",\"inputSchema\":{\"type\":\"object\"}}]}}\n\n".into(),
+                ],
+            },
+        ])
+        .await;
+        let cfg = McpServerConfig {
+            command: String::new(),
+            args: vec![],
+            env: Default::default(),
+            url: Some(server.base_url.clone()),
+            headers: HashMap::from([("x-test".to_string(), "1".to_string())]),
+        };
+        let client = McpClient::spawn("mock", &cfg).await.expect("handshake");
+        let tools = client.list_tools().await.expect("tools/list");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "fetch");
+        let reqs = server.requests().await;
+        assert_eq!(reqs.len(), 3);
+        assert!(reqs[0].contains("\"method\":\"initialize\""));
+        assert!(reqs[0].to_lowercase().contains("x-test: 1"), "custom header missing");
+        assert!(reqs[1].contains("notifications/initialized"));
+        assert!(reqs[2].contains("tools/list"));
+    }
+}
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct McpServerConfig {
+    /// Stdio transport: the command to spawn. Empty when `url` is set.
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Streamable-HTTP transport: the server endpoint (remote/hosted MCP).
+    /// Takes precedence over `command`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Extra HTTP headers for `url` servers (e.g. an Authorization bearer).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+impl McpServerConfig {
+    /// What this entry connects to, for display and trust prompts.
+    pub fn target(&self) -> String {
+        match &self.url {
+            Some(u) => u.clone(),
+            None => format!("{} {}", self.command, self.args.join(" ")).trim().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,15 +106,60 @@ pub struct McpToolInfo {
 
 pub struct McpClient {
     pub name: String,
-    stdin: Mutex<ChildStdin>,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
     next_id: AtomicI64,
-    _child: Child,
+    transport: Transport,
+}
+
+#[allow(clippy::large_enum_variant)] // one per server, boxed behind an Arc
+enum Transport {
+    Stdio {
+        stdin: Mutex<ChildStdin>,
+        pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
+        _child: Child,
+    },
+    /// Streamable HTTP: one POST per JSON-RPC message; the server answers
+    /// with plain JSON or a one-shot SSE stream, and hands out a session id
+    /// on initialize that later requests echo back.
+    Http {
+        url: String,
+        headers: HashMap<String, String>,
+        session: tokio::sync::RwLock<Option<String>>,
+        http: reqwest::Client,
+    },
 }
 
 impl McpClient {
-    /// Spawn the server process and run the initialize handshake.
+    /// Connect a server (stdio spawn or HTTP endpoint) and run the
+    /// initialize handshake.
     pub async fn spawn(name: &str, cfg: &McpServerConfig) -> Result<Arc<Self>> {
+        if let Some(url) = &cfg.url {
+            let client = Arc::new(Self {
+                name: name.to_string(),
+                next_id: AtomicI64::new(1),
+                transport: Transport::Http {
+                    url: url.clone(),
+                    headers: cfg.headers.clone(),
+                    session: tokio::sync::RwLock::new(None),
+                    http: rift_provider::http_client(),
+                },
+            });
+            client
+                .request(
+                    "initialize",
+                    json!({
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {"name": "rift", "version": env!("CARGO_PKG_VERSION")}
+                    }),
+                )
+                .await
+                .with_context(|| format!("MCP initialize failed for '{name}' at {url}"))?;
+            client.notify("notifications/initialized", json!({})).await?;
+            return Ok(client);
+        }
+        if cfg.command.trim().is_empty() {
+            bail!("MCP server '{name}' has neither a command nor a url");
+        }
         let mut child = Command::new(&cfg.command)
             .args(&cfg.args)
             .envs(&cfg.env)
@@ -66,10 +175,12 @@ impl McpClient {
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>> = Arc::default();
         let client = Arc::new(Self {
             name: name.to_string(),
-            stdin: Mutex::new(stdin),
-            pending: pending.clone(),
             next_id: AtomicI64::new(1),
-            _child: child,
+            transport: Transport::Stdio {
+                stdin: Mutex::new(stdin),
+                pending: pending.clone(),
+                _child: child,
+            },
         });
 
         // Reader: route responses to waiting requests; politely refuse
@@ -122,37 +233,118 @@ impl McpClient {
     }
 
     async fn send_raw(&self, msg: &Value) -> Result<()> {
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(serde_json::to_string(msg)?.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
-        Ok(())
+        match &self.transport {
+            Transport::Stdio { stdin, .. } => {
+                let mut stdin = stdin.lock().await;
+                stdin.write_all(serde_json::to_string(msg)?.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+                Ok(())
+            }
+            Transport::Http { .. } => {
+                // Fire-and-forget over HTTP (client error replies): drop it —
+                // the server never sees our JSON-RPC errors anyway.
+                Ok(())
+            }
+        }
+    }
+
+    /// POST one JSON-RPC message to an HTTP server, returning the response
+    /// body (None for accepted-without-body notifications). Captures the
+    /// Mcp-Session-Id header the first time the server sends one.
+    async fn http_post(&self, msg: &Value) -> Result<Option<Value>> {
+        let Transport::Http { url, headers, session, http } = &self.transport else {
+            bail!("not an HTTP transport");
+        };
+        let mut req = http
+            .post(url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", PROTOCOL_VERSION);
+        if let Some(sid) = session.read().await.clone() {
+            req = req.header("mcp-session-id", sid);
+        }
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let resp = tokio::time::timeout(REQUEST_TIMEOUT, req.json(msg).send())
+            .await
+            .map_err(|_| anyhow!("MCP server '{}' timed out", self.name))?
+            .with_context(|| format!("MCP server '{}' unreachable", self.name))?;
+        if let Some(sid) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+            *session.write().await = Some(sid.to_string());
+        }
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = tokio::time::timeout(REQUEST_TIMEOUT, resp.text())
+            .await
+            .map_err(|_| anyhow!("MCP server '{}' timed out reading the response", self.name))??;
+        if !status.is_success() {
+            bail!("MCP server '{}' returned {status}: {}", self.name, body.chars().take(300).collect::<String>());
+        }
+        if body.trim().is_empty() {
+            return Ok(None); // 202 Accepted (notifications)
+        }
+        if content_type.contains("text/event-stream") {
+            // One-shot SSE: the response to our request is the last data
+            // event carrying a result or error.
+            let mut answer = None;
+            for line in body.lines() {
+                let Some(data) = line.strip_prefix("data:") else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(data.trim()) else { continue };
+                if v.get("result").is_some() || v.get("error").is_some() {
+                    answer = Some(v);
+                }
+            }
+            return Ok(answer);
+        }
+        Ok(Some(serde_json::from_str(&body).with_context(|| {
+            format!("MCP server '{}' sent invalid JSON", self.name)
+        })?))
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
-        self.send_raw(&json!({"jsonrpc": "2.0", "method": method, "params": params})).await
+        let msg = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        match &self.transport {
+            Transport::Stdio { .. } => self.send_raw(&msg).await,
+            Transport::Http { .. } => self.http_post(&msg).await.map(|_| ()),
+        }
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        // Every early exit must remove the pending entry, or a wedged server
-        // (accepts requests, never answers) grows the map for the whole
-        // session — one dead oneshot per 60s-timeout call.
-        let outcome = async {
-            self.send_raw(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await?;
-            tokio::time::timeout(REQUEST_TIMEOUT, rx)
-                .await
-                .map_err(|_| anyhow!("MCP server '{}' timed out on {method}", self.name))?
-                .map_err(|_| anyhow!("MCP server '{}' closed during {method}", self.name))
-        }
-        .await;
-        let resp = match outcome {
-            Ok(resp) => resp,
-            Err(e) => {
-                self.pending.lock().await.remove(&id);
-                return Err(e);
+        let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let resp = match &self.transport {
+            Transport::Http { .. } => self
+                .http_post(&msg)
+                .await?
+                .ok_or_else(|| anyhow!("MCP server '{}' sent no response to {method}", self.name))?,
+            Transport::Stdio { pending, .. } => {
+                let (tx, rx) = oneshot::channel();
+                pending.lock().await.insert(id, tx);
+                // Every early exit must remove the pending entry, or a wedged
+                // server (accepts requests, never answers) grows the map for
+                // the whole session — one dead oneshot per 60s-timeout call.
+                let outcome = async {
+                    self.send_raw(&msg).await?;
+                    tokio::time::timeout(REQUEST_TIMEOUT, rx)
+                        .await
+                        .map_err(|_| anyhow!("MCP server '{}' timed out on {method}", self.name))?
+                        .map_err(|_| anyhow!("MCP server '{}' closed during {method}", self.name))
+                }
+                .await;
+                match outcome {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        pending.lock().await.remove(&id);
+                        return Err(e);
+                    }
+                }
             }
         };
         if let Some(err) = resp.get("error") {

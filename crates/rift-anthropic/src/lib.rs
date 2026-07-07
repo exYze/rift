@@ -65,8 +65,10 @@ struct AnthropicRequest {
     model: String,
     max_tokens: i64,
     stream: bool,
+    /// Content-block form so the last block can carry a cache_control
+    /// breakpoint (prompt caching).
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Value>,
     messages: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Value>,
@@ -86,14 +88,23 @@ struct AnthropicRequest {
 /// consecutive results merged into ONE user message, which the API requires
 /// for parallel tool calls.
 fn build_request(req: &ChatRequest) -> AnthropicRequest {
-    let system: Option<String> = {
+    // System prompt as a cache-marked block: with tools + system identical
+    // across iterations, every agent-loop call after the first reads the
+    // prefix from cache instead of re-billing it at full price.
+    let system: Option<Value> = {
         let joined: Vec<&str> = req
             .messages
             .iter()
             .filter(|m| m.role == Role::System)
             .map(|m| m.content.as_str())
             .collect();
-        (!joined.is_empty()).then(|| joined.join("\n\n"))
+        (!joined.is_empty()).then(|| {
+            json!([{
+                "type": "text",
+                "text": joined.join("\n\n"),
+                "cache_control": {"type": "ephemeral"},
+            }])
+        })
     };
 
     // Raw content blocks (thinking signatures, exact tool_use blocks) matter
@@ -160,6 +171,26 @@ fn build_request(req: &ChatRequest) -> AnthropicRequest {
                     messages.push(json!({"role": "user", "content": [block]}));
                 }
             }
+        }
+    }
+
+    // Second cache breakpoint on the LAST message: each agent-loop
+    // iteration re-sends the whole conversation, so caching up to the tail
+    // makes iteration N+1 pay only for what iteration N appended.
+    if let Some(last) = messages.last_mut() {
+        match &mut last["content"] {
+            // Empty text blocks are rejected by the API — leave "" alone.
+            Value::String(s) if !s.is_empty() => {
+                let text = std::mem::take(s);
+                last["content"] =
+                    json!([{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]);
+            }
+            Value::Array(blocks) => {
+                if let Some(Value::Object(block)) = blocks.last_mut() {
+                    block.insert("cache_control".into(), json!({"type": "ephemeral"}));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -561,9 +592,15 @@ mod tests {
     fn system_lifts_out_and_tools_map_to_input_schema() {
         let req = neutral_request(vec![Message::system("be brief"), Message::user("hi")]);
         let built = build_request(&req);
-        assert_eq!(built.system.as_deref(), Some("be brief"));
+        // System is a cache-marked content block now (prompt caching).
+        let system = built.system.as_ref().expect("system present");
+        assert_eq!(system[0]["text"], "be brief");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(built.messages.len(), 1);
         assert_eq!(built.messages[0]["role"], "user");
+        // The conversation tail carries the second cache breakpoint.
+        let last_content = &built.messages[0]["content"];
+        assert_eq!(last_content[0]["cache_control"]["type"], "ephemeral", "tail breakpoint missing: {last_content}");
         assert_eq!(built.tools[0]["name"], "read");
         assert!(built.tools[0]["input_schema"].is_object());
         assert_eq!(built.max_tokens, DEFAULT_MAX_TOKENS);

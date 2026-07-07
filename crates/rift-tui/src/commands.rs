@@ -65,6 +65,9 @@ pub enum UiEffect {
     /// A /btw side question finished (UI-side task): render the answer and,
     /// on success, remember the exchange for follow-up side questions.
     Btw { question: String, reply: String, ok: bool },
+    /// /paste grabbed a clipboard image (data URL, size KB): stage it for
+    /// the next prompt.
+    Pasted(String, u64),
     /// Command finished; status-line text. Always the final effect.
     Done(String),
 }
@@ -100,13 +103,14 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/mcp", "[add [--global] <name> <cmd> [args…]|new [--global] <desc>|trust <name>]", "list MCP servers, connect an existing one, generate one, manage trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
+    ("/paste", "", "attach a clipboard image to your next message (vision models)"),
     ("/permissions", "", "active shell deny patterns"),
     ("/plan", "[clear]", "show or clear the agent's task checklist"),
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
     ("/save", "<name>", "name this session (keeps autosaving to it)"),
     ("/skills", "[new [--global] <desc>]", "list skills, or generate one (project or user-wide)"),
     ("/swarm", "<task> [--models a,b] [--judge m]", "WarpDrive race in isolated worktrees"),
-    ("/tasks", "[kill <id>]", "background tasks (shells + agents): list, or kill one"),
+    ("/tasks", "[send <id> <text>|kill <id>]", "background tasks: list, write to one's stdin, or kill one"),
     ("/worktrees", "", "list swarm worktrees + patches"),
     ("/think", "[on|off|auto|minimal|low|medium|high|xhigh|max]", "thinking mode and reasoning effort (capability-checked)"),
     ("/tokens", "", "context budget, usage estimate, calibration"),
@@ -217,8 +221,27 @@ fn cmd_tasks(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result
         let _ = fx.send(UiEffect::Out(Kind::Info, format!("⚙ killed task #{id} ({})", view.label)));
         return Ok(format!("task #{id} killed"));
     }
+    if let Some(rest) = arg.strip_prefix("send") {
+        let (id, line) = rest
+            .trim()
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| anyhow!("usage: /tasks send <id> <text>"))?;
+        let id: u64 = id.parse().map_err(|_| anyhow!("usage: /tasks send <id> <text>"))?;
+        agent.ctx().bg().send_input(id, line.trim())?;
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("⚙ sent to task #{id} stdin: {}", line.trim())));
+        return Ok(format!("input sent to task #{id}"));
+    }
+    if let Some(rest) = arg.strip_prefix("eof") {
+        let id: u64 = rest.trim().parse().map_err(|_| anyhow!("usage: /tasks eof <id>"))?;
+        agent.ctx().bg().close_input(id)?;
+        let _ = fx.send(UiEffect::Out(Kind::Info, format!("⚙ closed task #{id}'s stdin (EOF)")));
+        return Ok(format!("stdin closed for task #{id}"));
+    }
     if !arg.is_empty() {
-        bail!("usage: /tasks — list · /tasks kill <id> — terminate one");
+        bail!(
+            "usage: /tasks — list · /tasks send <id> <text> — write to stdin · /tasks eof <id> — close stdin · \
+             /tasks kill <id> — terminate"
+        );
     }
     let tasks = agent.ctx().bg().list();
     if tasks.is_empty() {
@@ -611,11 +634,11 @@ async fn cmd_mcp(
                 };
                 out.push_str("MCP servers:\n");
                 for (n, s) in &config.mcp {
-                    out.push_str(&format!("  {n}: {} — user config, {}\n", s.command, active(n)));
+                    out.push_str(&format!("  {n}: {} — user config, {}\n", s.target(), active(n)));
                 }
                 for (n, s) in &config.project_mcp {
                     let trust = if rift_core::mcp_entry_trusted(n, s) { "trusted" } else { "NOT trusted" };
-                    out.push_str(&format!("  {n}: {} — project config, {trust}, {}\n", s.command, active(n)));
+                    out.push_str(&format!("  {n}: {} — project config, {trust}, {}\n", s.target(), active(n)));
                 }
                 out.push_str("(/mcp trust <name> starts an untrusted project server; /mcp untrust <name> revokes)");
             }
@@ -671,7 +694,10 @@ async fn cmd_mcp(
             };
             let mut words = rest.split_whitespace();
             let (Some(name), Some(command)) = (words.next(), words.next()) else {
-                bail!("usage: /mcp add [--global] <name> <command> [args…] — e.g. /mcp add fetch uvx mcp-server-fetch");
+                bail!(
+                    "usage: /mcp add [--global] <name> <command|url> [args…] — e.g. /mcp add fetch uvx \
+                     mcp-server-fetch, or /mcp add docs https://host/mcp"
+                );
             };
             if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
                 bail!("server name '{name}' must be alphanumeric/dash/underscore (tools register as {name}_<tool>)");
@@ -682,10 +708,25 @@ async fn cmd_mcp(
             {
                 bail!("MCP server '{name}' already exists — /mcp lists servers, /config edit changes them");
             }
-            let entry = rift_core::mcp::McpServerConfig {
-                command: command.to_string(),
-                args: words.map(str::to_string).collect(),
-                env: Default::default(),
+            // An http(s) target is a remote (streamable-HTTP) server; anything
+            // else spawns as a stdio command. Auth headers go in the config
+            // file ({"headers": {"Authorization": "Bearer …"}}).
+            let entry = if command.starts_with("http://") || command.starts_with("https://") {
+                rift_core::mcp::McpServerConfig {
+                    command: String::new(),
+                    args: vec![],
+                    env: Default::default(),
+                    url: Some(command.to_string()),
+                    headers: Default::default(),
+                }
+            } else {
+                rift_core::mcp::McpServerConfig {
+                    command: command.to_string(),
+                    args: words.map(str::to_string).collect(),
+                    env: Default::default(),
+                    url: None,
+                    headers: Default::default(),
+                }
             };
             // Prove it works BEFORE persisting anything: spawn, handshake,
             // and list tools, bounded so a wedged command can't hang the TUI.

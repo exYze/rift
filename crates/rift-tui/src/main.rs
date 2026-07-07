@@ -120,6 +120,10 @@ struct Cli {
     /// vision-capable models as base64; text files append their content
     #[arg(long)]
     attach: Vec<std::path::PathBuf>,
+    /// Headless output: "text" streams the transcript; "json" prints one
+    /// machine-readable result object to stdout (progress goes to stderr)
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+    output_format: String,
     /// Max agent-loop iterations per turn [default: 25, or `max_iterations` in config]
     #[arg(long)]
     max_iterations: Option<usize>,
@@ -339,7 +343,7 @@ async fn main() -> Result<()> {
     let project_mcp = config.project_mcp.iter().map(|(n, s)| (n, s, true));
     for (name, server_cfg, from_project) in user_mcp.chain(project_mcp) {
         if from_project && !rift_core::mcp_entry_trusted(name, server_cfg) {
-            let cmdline = format!("{} {}", server_cfg.command, server_cfg.args.join(" "));
+            let cmdline = server_cfg.target();
             if interactive && confirm_mcp(name, cmdline.trim()) {
                 if let Err(e) = rift_core::trust_mcp_entry(name, server_cfg) {
                     eprintln!("warning: could not persist MCP approval: {e:#}");
@@ -553,7 +557,7 @@ async fn main() -> Result<()> {
                 agent.attach_images(images);
             }
             let rates = pricing::lookup(&model, &config.pricing);
-            run_headless(agent, prompt, store, rates).await
+            run_headless(agent, prompt, store, rates, cli.output_format == "json").await
         }
         None => {
             let restart = app::run_tui(
@@ -761,12 +765,29 @@ async fn run_headless(
     prompt: String,
     store: SessionStore,
     rates: Option<(f64, f64)>,
+    json: bool,
 ) -> Result<()> {
     use std::io::Write;
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     let printer = tokio::spawn(async move {
         let mut in_thinking = false;
+        // json mode: stdout is reserved for the final result object — all
+        // streaming goes to stderr — and tool activity is collected for it.
+        let mut tools: Vec<serde_json::Value> = vec![];
         while let Some(ev) = rx.recv().await {
+            if json {
+                match &ev {
+                    AgentEvent::Content(c) => eprint!("{c}"),
+                    AgentEvent::ToolStart { name, args } => eprintln!("\n→ {name} {args}"),
+                    AgentEvent::ToolResult { name, ok, .. } => {
+                        tools.push(serde_json::json!({"name": name, "ok": ok}));
+                        eprintln!("{} {name}", if *ok { "✓" } else { "✗" });
+                    }
+                    AgentEvent::Warning(w) => eprintln!("! {w}"),
+                    _ => {}
+                }
+                continue;
+            }
             match ev {
                 AgentEvent::Iteration(i) => {
                     if i > 1 {
@@ -847,6 +868,7 @@ async fn run_headless(
                 }
             }
         }
+        tools
     });
 
     // Background-task events (start/finish) surface through the same
@@ -854,7 +876,7 @@ async fn run_headless(
     agent.ctx().bg().set_notify(tx.clone());
 
     let cancel = CancellationToken::new();
-    agent.run_turn(&prompt, &tx, &cancel).await?;
+    let stats = agent.run_turn(&prompt, &tx, &cancel).await?;
     let cwd = std::env::current_dir()?.display().to_string();
     store.save(&agent.cfg.model, &cwd, &agent.messages)?;
     let still_running = agent.ctx().bg().running_count();
@@ -869,6 +891,35 @@ async fn run_headless(
     // after printing its final line (the v1.0.0–v1.0.3 headless zombie bug).
     agent.ctx().bg().clear_notify();
     drop(tx);
-    let _ = printer.await;
+    let tools = printer.await.unwrap_or_default();
+    if json {
+        // The machine-readable result: everything a pipeline needs, on one
+        // stdout line. `reply` is the final plain-text assistant message.
+        let reply = agent
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == rift_ollama::Role::Assistant && m.tool_calls.is_empty() && !m.content.trim().is_empty())
+            .map(|m| m.content.trim().to_string())
+            .unwrap_or_default();
+        let cost = rates.map(|r| pricing::cost(stats.billed_prompt_tokens, stats.output_tokens, r));
+        let result = serde_json::json!({
+            "model": agent.cfg.model,
+            "reply": reply,
+            "tools": tools,
+            "stats": {
+                "iterations": stats.iterations,
+                "prompt_tokens": stats.prompt_tokens,
+                "billed_prompt_tokens": stats.billed_prompt_tokens,
+                "output_tokens": stats.output_tokens,
+                "duration_ms": stats.duration_ms,
+                "tokens_per_sec": stats.tokens_per_sec,
+                "recoveries": stats.failures.model_failures(),
+            },
+            "estimated_cost_usd": cost,
+            "session": store.path().display().to_string(),
+        });
+        println!("{result}");
+    }
     Ok(())
 }
