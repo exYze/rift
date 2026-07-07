@@ -3,6 +3,31 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.0.2 — 2026-07-06
+
+- **Claude Code-style permissions**: interactive sessions now **ask before
+  write/edit/bash by default**, and each bash prompt offers allow once /
+  **always allow `<pattern>`** (e.g. `git push *`, persisted to
+  `permissions.bash_allow` in the user config — never prompts again) /
+  allow all bash this session / deny. Allow-listed commands run silently;
+  chained commands need every segment allowed; the deny list still always
+  wins. A project `.rift.json` can only tighten (its `bash_allow` is
+  ignored, its `approve: true` is honored, `approve: false` is not).
+  Opt out with `"approve": false` in the user config
+- **`/yolo [off]`**: stop asking before write/edit/bash entirely (the
+  built-in + configured deny list is still enforced); `/yolo off` restores
+  prompts. `/permissions` now shows allowed and banned patterns side by
+  side
+- **`/btw <question>`** (modeled on Claude Code's /btw): a quick side
+  question that sees the whole conversation but has no tools, never enters
+  the main history (the agent never sees the exchange), and runs on a
+  UI-side task — so it works even while the agent is mid-turn. Follow-up
+  `/btw`s continue a small side thread (kept to the last 10 exchanges,
+  `/btw clear` resets it); answers render as dimmed `(btw)` blocks,
+  buffered so a streaming main turn is never garbled. Context comes from
+  the session autosave (history up to the last completed turn); the side
+  question always uses the session's current model
+
 ## v1.0.1 — 2026-07-06
 
 Verified against DeepSeek V4 Flash on vLLM; fixes for OpenAI-compatible
