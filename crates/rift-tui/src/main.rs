@@ -373,10 +373,28 @@ async fn main() -> Result<()> {
 
     // Sub-agents: the agent tool needs a provider handle to build child
     // agents. Installed on the root ctx only — children get a bare ctx, so
-    // delegation stays one level deep. run_turn refreshes the handle, so
-    // later /model and /host switches carry over automatically.
-    ctx.set_subagent(rift_core::SubAgentHandle { client: client.clone(), cfg: cfg.clone() });
+    // delegation stays one level deep. run_turn refreshes client/cfg, so
+    // later /model and /host switches carry over; the factory + roles let
+    // individual tasks run on OTHER models (config `models` role map).
+    ctx.set_subagent(rift_core::SubAgentHandle {
+        client: client.clone(),
+        cfg: cfg.clone(),
+        factory: Some(provider_factory(&host, &config.providers)),
+        roles: config.models.clone(),
+    });
     registry.register(Box::new(rift_core::AgentTool));
+    // Multi-model workflows are opt-in: the model only hears about roles
+    // that are actually configured.
+    if !config.models.is_empty() {
+        let mut roles: Vec<String> = config.models.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+        roles.sort();
+        prompt_text.push_str(&format!(
+            "\n\nModel roles available for delegated tasks (the agent tool accepts model=\"<role>\" \
+             per task): {}. Route mechanical work (implementing a written spec, running tests) to \
+             cheaper roles; keep research, specs, and review on the stronger model.",
+            roles.join(", ")
+        ));
+    }
 
     let mut agent = Agent::new(client, cfg, registry, ctx, prompt_text);
 

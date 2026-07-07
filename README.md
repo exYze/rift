@@ -137,9 +137,15 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
   "mcp": {
     "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}
   },
+  "models": {
+    "smart": "vllm/deepseek-ai/DeepSeek-V4-Flash",
+    "fast": "gemma4:26b"
+  },
   "permissions": {"bash_deny": ["docker push *"], "bash_allow": ["git status *", "cargo *"]}
 }
 ```
+
+The optional `models` map names **model roles** for multi-model workflows: the agent tool accepts `model: "<role>"` (or any full model string) per delegated task, so one session can research/spec/review on a strong model and implement on a cheap one — e.g. ask the session model to plan, then have it delegate implementation tasks with `model: "fast"` and review the reports itself. The system prompt advertises configured roles to the model automatically, `/model`'s picker lists them first, and with no `models` map everything behaves exactly as a single-model setup.
 
 Permissions work like Claude Code's: interactive sessions **ask before `write`/`edit`/`bash` by default**, and each bash prompt offers *allow once* / *always allow `<pattern>`* (persisted to `permissions.bash_allow` in your user config — those commands never prompt again) / *allow all bash this session* / *deny*. The deny list (built-ins + `bash_deny`) is always enforced, even in YOLO mode. `"approve": false` in the user config or `/yolo` turns prompting off; a project `.rift.json` can only tighten (add denies, force approval on — its `bash_allow` is ignored).
 

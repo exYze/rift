@@ -20,12 +20,46 @@ use crate::tools::{Tool, ToolCtx, ToolRegistry};
 
 /// Everything needed to construct child agents. The frontend installs it on
 /// the root ToolCtx only — child ctxs get None, so delegation stays one level
-/// deep — and Agent::run_turn refreshes it each turn so /model and /host
-/// switches carry over.
+/// deep — and Agent::run_turn refreshes client/cfg each turn so /model and
+/// /host switches carry over (the routing parts are startup-fixed).
 #[derive(Clone)]
 pub struct SubAgentHandle {
     pub client: Arc<dyn Provider>,
     pub cfg: AgentConfig,
+    /// Resolves a model string to a provider client (the swarm's factory).
+    /// None = children always run on the session model.
+    pub factory: Option<crate::swarm::ProviderFactory>,
+    /// Named model roles from config `models` ({"fast": "ornith:35b", …});
+    /// a task's `model` can be a role instead of a full model string.
+    pub roles: std::collections::HashMap<String, String>,
+}
+
+impl SubAgentHandle {
+    /// The (client, cfg) a child runs on. No requested model (or the
+    /// session model itself) inherits the parent's client and thinking
+    /// setup; a different model gets a fresh client via the factory, with
+    /// think/effort reset to server defaults — the parent's capability
+    /// check doesn't transfer across models.
+    fn child_target(&self, requested: Option<&str>) -> Result<(Arc<dyn Provider>, AgentConfig)> {
+        let mut cfg = self.cfg.clone();
+        cfg.always_task = false;
+        let Some(requested) = requested.filter(|m| !m.trim().is_empty()) else {
+            return Ok((self.client.clone(), cfg));
+        };
+        let name = self.roles.get(requested.trim()).map(String::as_str).unwrap_or(requested.trim());
+        if name == self.cfg.model {
+            return Ok((self.client.clone(), cfg));
+        }
+        let Some(factory) = &self.factory else {
+            bail!("per-task models are not available in this session (no model router configured)");
+        };
+        let (client, actual) = factory(name)
+            .map_err(|e| anyhow!("cannot route model '{requested}' (resolved to '{name}'): {e:#}"))?;
+        cfg.model = actual;
+        cfg.think = None;
+        cfg.effort = None;
+        Ok((client, cfg))
+    }
 }
 
 /// Cap on tasks per call — each one is a full concurrent model conversation.
@@ -43,7 +77,9 @@ impl Tool for AgentTool {
          window and the full tool set; ALL tasks in one call run CONCURRENTLY — the way to \
          parallelize independent work (explore three modules at once, run a long test suite while \
          fixing something else). Prompts must be fully self-contained: sub-agents see nothing of \
-         this conversation. By default the call waits and returns every sub-agent's final report; \
+         this conversation. Each task may set `model` to run on a configured role (e.g. 'fast') \
+         or another model — route mechanical work to cheap models, keep judgment on strong ones. \
+         By default the call waits and returns every sub-agent's final report; \
          set background=true to launch them asynchronously and keep working — each finished agent \
          then sends a [task notification], and the task tool shows progress/results."
     }
@@ -60,7 +96,8 @@ impl Tool for AgentTool {
                         "required": ["description", "prompt"],
                         "properties": {
                             "description": {"type": "string", "description": "3-6 word label shown to the user"},
-                            "prompt": {"type": "string", "description": "Complete self-contained instructions — include paths and context; the sub-agent cannot see this conversation"}
+                            "prompt": {"type": "string", "description": "Complete self-contained instructions — include paths and context; the sub-agent cannot see this conversation"},
+                            "model": {"type": "string", "description": "Optional: run this task on a different model — a configured role name (e.g. 'fast', 'smart') or a full model string. Default: the session model. Route mechanical work (write code from a clear spec, run tests, fix straightforward errors) to a cheaper role when one exists; keep judgment work on the stronger model."}
                         }
                     }
                 },
@@ -87,7 +124,14 @@ impl Tool for AgentTool {
 
 /// Accept the documented `tasks` array, or a lenient single
 /// `{description, prompt}` at the top level (weak models do this).
-fn parse_tasks(args: &Map<String, Value>) -> Result<Vec<(String, String)>> {
+/// One delegated task: label, prompt, and (optionally) which model runs it.
+struct TaskSpec {
+    label: String,
+    prompt: String,
+    model: Option<String>,
+}
+
+fn parse_tasks(args: &Map<String, Value>) -> Result<Vec<TaskSpec>> {
     let items: Vec<Value> = match args.get("tasks").and_then(|v| v.as_array()) {
         Some(arr) => arr.clone(),
         None if args.contains_key("prompt") => vec![Value::Object(args.clone())],
@@ -114,25 +158,26 @@ fn parse_tasks(args: &Map<String, Value>) -> Result<Vec<(String, String)>> {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or("delegated task");
-            Ok((desc.trim().to_string(), prompt.to_string()))
+            Ok(TaskSpec {
+                label: desc.trim().to_string(),
+                prompt: prompt.to_string(),
+                model: obj.get("model").and_then(|v| v.as_str()).map(|s| s.trim().to_string()),
+            })
         })
         .collect()
 }
 
-/// A fresh child agent: parent provider/config, standard tools (no agent tool
+/// A fresh child agent: routed provider/config, standard tools (no agent tool
 /// state → no recursion), isolated plan/undo state, shared permission policy.
-fn build_child(handle: &SubAgentHandle, ctx: &ToolCtx) -> Agent {
-    let mut cfg = handle.cfg.clone();
-    // Children get research prompts as often as work items; never force the
-    // headless work-item recovery machinery on them.
-    cfg.always_task = false;
+fn build_child(handle: &SubAgentHandle, ctx: &ToolCtx, model: Option<&str>) -> Result<Agent> {
+    let (client, cfg) = handle.child_target(model)?;
     let mut prompt = crate::system_prompt_with_guide(&cfg.model, &ctx.cwd).0;
     prompt.push_str(
         "\n\nYou are a sub-agent handling ONE delegated task from a main agent. Complete it, \
          then reply with a concise final report (findings, files changed, verification results) — \
          that report is all the main agent receives, so include everything it needs and nothing else.",
     );
-    Agent::new(handle.client.clone(), cfg, ToolRegistry::standard(), ctx.subagent_ctx(), prompt)
+    Ok(Agent::new(client, cfg, ToolRegistry::standard(), ctx.subagent_ctx(), prompt))
 }
 
 /// The last plain-text assistant message — the child's final report.
@@ -177,15 +222,20 @@ fn spawn_forwarder(
 /// Run all children concurrently and wait: the tool result is the combined
 /// reports. Cancelling the parent turn drops these futures, which aborts the
 /// children's in-flight requests too.
-async fn run_foreground(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<(String, String)>) -> String {
+async fn run_foreground(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskSpec>) -> String {
     let reg = ctx.bg().clone();
     let many = specs.len() > 1;
-    let futs = specs.into_iter().enumerate().map(|(i, (label, prompt))| {
-        let mut agent = build_child(handle, ctx);
+    let futs = specs.into_iter().enumerate().map(|(i, spec)| {
+        let TaskSpec { label, prompt, model } = spec;
+        let child = build_child(handle, ctx, model.as_deref());
         let reg = reg.clone();
         async move {
+            let mut agent = match child {
+                Ok(a) => a,
+                Err(e) => return (label, format!("ERROR: {e:#}")),
+            };
             let tag = format!("agent {}", i + 1);
-            reg.emit(AgentEvent::Info(format!("⧉ {tag} started: {label}")));
+            reg.emit(AgentEvent::Info(format!("⧉ {tag} started ({}): {label}", agent.cfg.model)));
             let (tx, rx) = mpsc::unbounded_channel();
             let fwd = spawn_forwarder(rx, reg.clone(), tag);
             let res = agent.run_turn(&prompt, &tx, &CancellationToken::new()).await;
@@ -214,12 +264,14 @@ async fn run_foreground(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<(Stri
 /// Launch the children detached and return immediately. Each is a background
 /// task: its report lands in the task output buffer, and completion emits the
 /// TaskFinished notification the frontend turns into a [task notification].
-fn run_background(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<(String, String)>) -> Result<String> {
+fn run_background(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskSpec>) -> Result<String> {
     let reg = ctx.bg().clone();
     let mut lines = vec![];
-    for (label, prompt) in specs {
+    for TaskSpec { label, prompt, model } in specs {
+        // Routing failures surface as the tool result, before anything runs.
+        let mut agent = build_child(handle, ctx, model.as_deref())?;
         let (id, cancel) = reg.register(TaskKind::Agent, &label, None)?;
-        let mut agent = build_child(handle, ctx);
+        lines.push(format!("  #{id} — {label} ({})", agent.cfg.model));
         let reg2 = reg.clone();
         tokio::spawn(async move {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -243,7 +295,6 @@ fn run_background(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<(String, St
                 }
             }
         });
-        lines.push(format!("  #{id} — {label}"));
     }
     Ok(format!(
         "launched {} background agent(s):\n{}\nThey keep running while the conversation continues. \
@@ -269,14 +320,87 @@ mod tests {
         .unwrap();
         let specs = parse_tasks(&args).unwrap();
         assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].0, "audit tests");
+        assert_eq!(specs[0].label, "audit tests");
+        assert!(specs[0].model.is_none());
 
         // Lenient form: a single task passed at the top level.
         let bare: Map<String, Value> =
             serde_json::from_value(json!({"description": "solo", "prompt": "Do the thing."})).unwrap();
         let specs = parse_tasks(&bare).unwrap();
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].1, "Do the thing.");
+        assert_eq!(specs[0].prompt, "Do the thing.");
+
+        // Per-task model requests parse through.
+        let routed: Map<String, Value> = serde_json::from_value(json!({
+            "tasks": [{"description": "impl", "prompt": "Write it.", "model": "fast"}]
+        }))
+        .unwrap();
+        assert_eq!(parse_tasks(&routed).unwrap()[0].model.as_deref(), Some("fast"));
+    }
+
+    /// A provider stub, enough for routing tests (never actually called).
+    struct StubProvider(String);
+    #[async_trait]
+    impl Provider for StubProvider {
+        fn base_url(&self) -> &str {
+            &self.0
+        }
+        async fn tags(&self) -> Result<Vec<rift_provider::ModelEntry>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _m: &str) -> Result<rift_provider::ModelCapabilities> {
+            Ok(rift_provider::ModelCapabilities::default())
+        }
+        async fn chat_stream(
+            &self,
+            _req: &rift_provider::ChatRequest,
+            _on_delta: &mut (dyn FnMut(rift_provider::StreamDelta) + Send),
+        ) -> Result<rift_provider::ChatOutcome> {
+            bail!("stub")
+        }
+    }
+
+    fn routing_handle() -> SubAgentHandle {
+        SubAgentHandle {
+            client: Arc::new(StubProvider("session".into())),
+            cfg: AgentConfig {
+                model: "session-model".into(),
+                think: Some(true),
+                effort: Some("max".into()),
+                ..Default::default()
+            },
+            factory: Some(Arc::new(|model: &str| {
+                Ok((Arc::new(StubProvider(format!("routed:{model}"))) as Arc<dyn Provider>, model.to_string()))
+            })),
+            roles: std::collections::HashMap::from([("fast".to_string(), "cheap:7b".to_string())]),
+        }
+    }
+
+    #[test]
+    fn child_target_routes_roles_and_resets_thinking() {
+        let handle = routing_handle();
+        // No request → session model, thinking setup inherited.
+        let (client, cfg) = handle.child_target(None).unwrap();
+        assert_eq!(client.base_url(), "session");
+        assert_eq!(cfg.model, "session-model");
+        assert_eq!(cfg.effort.as_deref(), Some("max"));
+        assert!(!cfg.always_task);
+        // Role name → resolved model via the factory; think/effort reset
+        // (the parent's capability check doesn't transfer across models).
+        let (client, cfg) = handle.child_target(Some("fast")).unwrap();
+        assert_eq!(client.base_url(), "routed:cheap:7b");
+        assert_eq!(cfg.model, "cheap:7b");
+        assert!(cfg.think.is_none() && cfg.effort.is_none());
+        // A full model string routes as-is; the session model short-circuits.
+        let (_, cfg) = handle.child_target(Some("other:34b")).unwrap();
+        assert_eq!(cfg.model, "other:34b");
+        let (client, _) = handle.child_target(Some("session-model")).unwrap();
+        assert_eq!(client.base_url(), "session");
+        // No factory + a different model = a clear error.
+        let mut bare = routing_handle();
+        bare.factory = None;
+        assert!(bare.child_target(Some("fast")).is_err());
+        assert!(bare.child_target(None).is_ok());
     }
 
     #[test]

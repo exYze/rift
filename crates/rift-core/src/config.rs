@@ -43,6 +43,13 @@ pub struct Config {
     /// thinking models. Overridden by `--effort` / `/think <level>`.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Optional named model roles for multi-model workflows, e.g.
+    /// {"smart": "vllm/deepseek-ai/DeepSeek-V4-Flash", "fast": "ornith:35b"}.
+    /// The agent tool accepts a role (or full model string) per delegated
+    /// task, so one session can plan/review on one model and implement on
+    /// another. Unset = single-model behavior, exactly as before.
+    #[serde(default)]
+    pub models: HashMap<String, String>,
     /// Default max agent-loop iterations per turn. Overridden by `--max-iterations`.
     #[serde(default)]
     pub max_iterations: Option<usize>,
@@ -180,6 +187,10 @@ impl Config {
         if p.effort.is_some() {
             self.effort = p.effort;
         }
+        // Roles are plain model names resolved through the (redefinition-
+        // guarded) provider table, so a project adding/overriding them is
+        // no more powerful than it setting `model`.
+        self.models.extend(p.models);
         if p.temperature.is_some() {
             self.temperature = p.temperature;
         }

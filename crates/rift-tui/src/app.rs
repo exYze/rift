@@ -708,6 +708,8 @@ mod tests {
         ctx.set_subagent(rift_core::SubAgentHandle {
             client: std::sync::Arc::new(rift_openai::OpenAiClient::new(&url, None)),
             cfg: rift_core::AgentConfig { model, ..Default::default() },
+            factory: None,
+            roles: std::collections::HashMap::new(),
         });
         // A session snapshot the side question should see through.
         let session = std::env::temp_dir().join("rift-btw-test-session.json");

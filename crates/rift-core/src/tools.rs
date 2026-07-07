@@ -157,13 +157,19 @@ impl ToolCtx {
         }
     }
 
-    /// Update the handle ONLY where one is installed — run_turn calls this
-    /// so /model & /host switches propagate without enabling delegation in
-    /// ctxs that never had it (sub-agents, swarm candidates).
-    pub fn refresh_subagent(&self, handle: crate::subagent::SubAgentHandle) {
+    /// Update the live client/cfg ONLY where a handle is installed —
+    /// run_turn calls this so /model & /host switches propagate without
+    /// enabling delegation in ctxs that never had it (sub-agents, swarm
+    /// candidates). The routing parts (factory, roles) are startup-fixed.
+    pub fn refresh_subagent(
+        &self,
+        client: std::sync::Arc<dyn rift_provider::Provider>,
+        cfg: crate::agent::AgentConfig,
+    ) {
         if let Ok(mut h) = self.subagent.write() {
-            if h.is_some() {
-                *h = Some(handle);
+            if let Some(h) = h.as_mut() {
+                h.client = client;
+                h.cfg = cfg;
             }
         }
     }

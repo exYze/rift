@@ -253,17 +253,31 @@ async fn cmd_model(
             bail!("no models installed on {}", agent.client().base_url());
         }
         let count = models.len();
-        let items = models
-            .into_iter()
-            .map(|m| {
-                let detail = if m.name == agent.cfg.model {
-                    "current".to_string()
-                } else {
-                    m.capabilities.join(", ")
-                };
-                PickerItem { value: m.name.clone(), label: m.name, detail }
+        // Configured roles first — the named tiers of a multi-model setup.
+        let mut items: Vec<PickerItem> = agent
+            .ctx()
+            .subagent_handle()
+            .map(|h| {
+                let mut roles: Vec<(String, String)> = h.roles.into_iter().collect();
+                roles.sort();
+                roles
+                    .into_iter()
+                    .map(|(role, model)| PickerItem {
+                        value: model.clone(),
+                        label: format!("{role} → {model}"),
+                        detail: "configured role".into(),
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
+        items.extend(models.into_iter().map(|m| {
+            let detail = if m.name == agent.cfg.model {
+                "current".to_string()
+            } else {
+                m.capabilities.join(", ")
+            };
+            PickerItem { value: m.name.clone(), label: m.name, detail }
+        }));
         let _ = fx.send(UiEffect::Picker {
             title: format!("select model — {}", agent.client().base_url()),
             items,

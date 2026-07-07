@@ -261,10 +261,7 @@ impl Agent {
         // /model and /host switches carry over to delegated agents. Only
         // refreshes where a frontend installed one — child agents and swarm
         // candidates stay without (no nested delegation).
-        self.ctx.refresh_subagent(crate::subagent::SubAgentHandle {
-            client: self.client.clone(),
-            cfg: self.cfg.clone(),
-        });
+        self.ctx.refresh_subagent(self.client.clone(), self.cfg.clone());
 
         let tools = self.registry.tool_defs();
         let known = self.registry.names();
