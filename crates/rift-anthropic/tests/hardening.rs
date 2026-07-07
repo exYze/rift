@@ -69,7 +69,9 @@ async fn request_carries_headers_system_and_max_tokens() {
     assert!(raw.contains("POST /v1/messages"), "wrong path: {raw}");
     assert!(raw.to_lowercase().contains("x-api-key: sk-test-key"), "missing api key header");
     assert!(raw.to_lowercase().contains("anthropic-version: 2023-06-01"), "missing version header");
-    assert!(raw.contains("\"system\":\"be brief\""), "system not lifted: {raw}");
+    // System lifts to a cache-marked content block (prompt caching).
+    assert!(raw.contains("\"text\":\"be brief\""), "system not lifted: {raw}");
+    assert!(raw.contains("\"cache_control\":{\"type\":\"ephemeral\"}"), "cache breakpoint missing: {raw}");
     assert!(raw.contains("\"max_tokens\":500"), "max_tokens missing: {raw}");
     assert!(!raw.contains("\"thinking\""), "thinking must be omitted when not requested");
 }

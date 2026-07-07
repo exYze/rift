@@ -68,6 +68,9 @@ struct BgTask {
     output: String,
     pid: Option<u32>,
     cancel: CancellationToken,
+    /// Channel into the task's stdin (shell tasks) — lines sent here reach
+    /// the running process, so interactive prompts/REPLs can be answered.
+    input: Option<UnboundedSender<String>>,
 }
 
 /// A cloneable listing row (the lock never leaves this module).
@@ -145,10 +148,50 @@ impl BgTasks {
                 output: String::new(),
                 pid,
                 cancel: cancel.clone(),
+                input: None,
             });
         }
         self.emit(AgentEvent::TaskStarted { id, label: label.to_string() });
         Ok((id, cancel))
+    }
+
+    /// Attach a stdin channel to a task (shell tasks pipe their stdin).
+    pub fn set_input(&self, id: u64, tx: UnboundedSender<String>) {
+        if let Ok(mut tasks) = self.inner.lock() {
+            if let Some(t) = tasks.iter_mut().find(|t| t.id == id) {
+                t.input = Some(tx);
+            }
+        }
+    }
+
+    /// Send a line to a running task's stdin (a trailing newline is added).
+    pub fn send_input(&self, id: u64, line: &str) -> Result<()> {
+        let Ok(tasks) = self.inner.lock() else { bail!("task registry lock poisoned") };
+        let Some(t) = tasks.iter().find(|t| t.id == id) else {
+            bail!("no background task #{id}");
+        };
+        if t.status != TaskStatus::Running {
+            bail!("task #{id} is not running (status: {})", t.status.describe());
+        }
+        let Some(input) = &t.input else {
+            bail!("task #{id} does not accept input (only shell tasks have stdin)");
+        };
+        input
+            .send(line.to_string())
+            .map_err(|_| anyhow::anyhow!("task #{id}'s stdin is closed (the process likely exited)"))
+    }
+
+    /// Close a running task's stdin (EOF) — programs that read stdin to the
+    /// end (sort, filters, many REPLs) finish only after this.
+    pub fn close_input(&self, id: u64) -> Result<()> {
+        let Ok(mut tasks) = self.inner.lock() else { bail!("task registry lock poisoned") };
+        let Some(t) = tasks.iter_mut().find(|t| t.id == id) else {
+            bail!("no background task #{id}");
+        };
+        if t.input.take().is_none() {
+            bail!("task #{id} has no open stdin");
+        }
+        Ok(())
     }
 
     pub fn append_output(&self, id: u64, chunk: &str) {

@@ -320,7 +320,10 @@ pub fn append_mcp_entry(
     if mcp.contains_key(name) {
         bail!("MCP server '{name}' is already configured in {} — edit it with /config edit", path.display());
     }
-    let mut val = serde_json::json!({"command": entry.command, "args": entry.args});
+    let mut val = match &entry.url {
+        Some(url) => serde_json::json!({"url": url}),
+        None => serde_json::json!({"command": entry.command, "args": entry.args}),
+    };
     if !entry.env.is_empty() {
         val["env"] = serde_json::json!(entry.env);
     }
@@ -381,7 +384,14 @@ fn read_config(path: &Path) -> Result<Config> {
 fn mcp_entry_identity(name: &str, entry: &McpServerConfig) -> String {
     let mut env: Vec<(&String, &String)> = entry.env.iter().collect();
     env.sort();
-    format!("{name}\u{0}{}\u{0}{}\u{0}{env:?}", entry.command, entry.args.join("\u{1}"))
+    let mut headers: Vec<(&String, &String)> = entry.headers.iter().collect();
+    headers.sort();
+    format!(
+        "{name}\u{0}{}\u{0}{}\u{0}{env:?}\u{0}{}\u{0}{headers:?}",
+        entry.command,
+        entry.args.join("\u{1}"),
+        entry.url.as_deref().unwrap_or("")
+    )
 }
 
 fn trust_store_path() -> Option<std::path::PathBuf> {
@@ -477,6 +487,8 @@ mod tests {
             command: "uvx".into(),
             args: vec!["mcp-server-fetch".into()],
             env: Default::default(),
+            url: None,
+            headers: Default::default(),
         };
         let path = append_mcp_entry(false, &dir, "fetch", &entry).unwrap();
         let root: serde_json::Value =

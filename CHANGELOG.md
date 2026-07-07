@@ -3,6 +3,25 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## Unreleased
+
+- **Remote MCP servers (streamable HTTP)**: config entries and
+  `/mcp add <name> <url>` now take a `url` instead of a command — one
+  POST per JSON-RPC message, plain-JSON and SSE-framed responses both
+  handled, `Mcp-Session-Id` captured and echoed, custom `headers` for
+  auth tokens. Trust identity covers url + headers
+- **Interactive background tasks**: the `task` tool (and `/tasks send` /
+  `/tasks eof`) can write lines to a running task's stdin and close it —
+  REPLs, y/n prompts, and read-to-EOF filters are now drivable
+- **`/paste`**: attach a clipboard image to your next message
+  (PowerShell / pngpaste / wl-paste+xclip per platform)
+- **`--output-format json`**: headless runs print one machine-readable
+  result object (reply, tool calls, token/duration stats, estimated
+  cost, session path) on stdout with progress on stderr — verified live
+- **Anthropic prompt caching**: cache_control breakpoints on the system
+  prompt and the conversation tail, so agent-loop iterations re-read the
+  prefix from cache instead of re-billing full input price
+
 ## v1.3.0 — 2026-07-06
 
 - **Hooks — automatic post-edit verification**: `"hooks": {"post_edit":

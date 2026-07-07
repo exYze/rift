@@ -1251,7 +1251,7 @@ impl Tool for BashTool {
 fn bash_background(command: &str, ctx: &ToolCtx) -> Result<String> {
     let mut cmd = shell_command(command);
     cmd.current_dir(&ctx.cwd)
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -1263,6 +1263,21 @@ fn bash_background(command: &str, ctx: &ToolCtx) -> Result<String> {
     let (id, cancel) = ctx.bg().register(crate::tasks::TaskKind::Shell, command, pid)?;
 
     let reg = ctx.bg().clone();
+    // Interactive input: lines sent via the task tool (or /tasks send) are
+    // written to the process's stdin, so REPLs and y/n prompts stay usable.
+    if let Some(mut stdin) = child.stdin.take() {
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        reg.set_input(id, in_tx);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            while let Some(line) = in_rx.recv().await {
+                if stdin.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                    break;
+                }
+                let _ = stdin.flush().await;
+            }
+        });
+    }
     let out_task = tokio::spawn(pump(child.stdout.take(), reg.clone(), id));
     let err_task = tokio::spawn(pump(child.stderr.take(), reg.clone(), id));
     tokio::spawn(async move {
@@ -1313,13 +1328,16 @@ impl Tool for TaskTool {
     fn description(&self) -> &str {
         "Manage background tasks (bash run_in_background commands and background sub-agents). \
          No arguments: list all tasks with ids and statuses. With id: that task's status and \
-         accumulated output. With id and kill=true: terminate it."
+         accumulated output. With id and input: send a line to the task's stdin (answer REPLs \
+         and y/n prompts). With id and kill=true: terminate it."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "id": {"type": "integer", "description": "Task id (from the bash/agent tool result or the list)"},
+                "input": {"type": "string", "description": "Line to write to the running task's stdin (newline appended)"},
+                "close_stdin": {"type": "boolean", "description": "true = send EOF (programs that read stdin to the end finish only after this)"},
                 "kill": {"type": "boolean", "description": "true = terminate the task instead of reading it"}
             }
         })
@@ -1349,6 +1367,16 @@ impl Tool for TaskTool {
         if args.get("kill").and_then(|v| v.as_bool()).unwrap_or(false) {
             let view = ctx.bg().kill(id)?;
             return Ok(format!("killed task #{id} ({}) after {}s", view.label, view.elapsed_secs));
+        }
+        if let Some(line) = args.get("input").and_then(|v| v.as_str()) {
+            ctx.bg().send_input(id, line)?;
+            return Ok(format!(
+                "sent to task #{id}'s stdin: {line}\nCheck the task's output shortly to see how it reacted."
+            ));
+        }
+        if args.get("close_stdin").and_then(|v| v.as_bool()).unwrap_or(false) {
+            ctx.bg().close_input(id)?;
+            return Ok(format!("closed task #{id}'s stdin (EOF) — programs reading to the end will now finish"));
         }
         let (view, output) = ctx
             .bg()
@@ -1894,6 +1922,41 @@ mod tests {
         let _ = ctx.undo_to_turn(0).unwrap();
         assert!(!file.exists(), "file should be gone before its creating turn");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn background_task_stdin_round_trips() {
+        let dir = std::env::temp_dir();
+        let ctx = ToolCtx::new(&dir);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.bg().set_notify(tx);
+        // A filter that copies matching stdin lines and exits on EOF —
+        // exercising both send_input and close_input, portably.
+        #[cfg(windows)]
+        let cmd = "findstr REPLY";
+        #[cfg(not(windows))]
+        let cmd = "grep REPLY";
+        let mut args = Map::new();
+        args.insert("command".into(), Value::String(cmd.into()));
+        args.insert("run_in_background".into(), Value::Bool(true));
+        BashTool.execute(&args, &ctx).await.unwrap();
+        // TaskStarted first; then feed stdin, close it (EOF), and expect the
+        // echoed line in the finish preview.
+        matches!(rx.recv().await.unwrap(), crate::agent::AgentEvent::TaskStarted { .. });
+        ctx.bg().send_input(1, "REPLY-hello").unwrap();
+        ctx.bg().close_input(1).unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+            .await
+            .expect("task never finished")
+            .unwrap();
+        match ev {
+            crate::agent::AgentEvent::TaskFinished { preview, .. } => {
+                assert!(preview.contains("REPLY-hello"), "stdin did not reach the task: {preview}");
+            }
+            other => panic!("expected TaskFinished, got {other:?}"),
+        }
+        // Input to a finished task errors cleanly.
+        assert!(ctx.bg().send_input(1, "again").is_err());
     }
 
     #[tokio::test]

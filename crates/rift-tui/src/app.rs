@@ -1080,6 +1080,9 @@ struct App {
     /// Completed-task reports waiting to be fed back to the model as a
     /// [task notification] turn (fires on the next idle tick).
     task_notes: Vec<String>,
+    /// Clipboard images staged by /paste (data URLs) — attached to the next
+    /// prompt that gets sent.
+    pending_paste: Vec<String>,
     /// /btw side-question exchanges (question, answer) this session — sent
     /// as context for follow-up side questions, never into the main history.
     btw_exchanges: Vec<(String, String)>,
@@ -1145,6 +1148,7 @@ impl App {
             session_stats: SessionStats::default(),
             bg_running: vec![],
             task_notes: vec![],
+            pending_paste: vec![],
             btw_exchanges: vec![],
             btw_busy: false,
         }
@@ -1543,6 +1547,17 @@ impl App {
             }
             UiEffect::Model(name) => self.model = name,
             UiEffect::Plan(items) => self.plan = items,
+            UiEffect::Pasted(url, kb) => {
+                self.pending_paste.push(url);
+                self.transcript.push_block(
+                    Kind::Info,
+                    format!(
+                        "📋 clipboard image attached ({kb} KB, {} staged) — it goes with your next message (vision models)",
+                        self.pending_paste.len()
+                    ),
+                );
+                self.status = "image staged — type your message".into();
+            }
             UiEffect::Btw { question, reply, ok } => {
                 self.btw_busy = false;
                 if ok {
@@ -1932,6 +1947,45 @@ fn expand_mentions(input: &str, cwd: &std::path::Path) -> (String, Vec<String>, 
         notes.push(format!("attached {label} of {rel} ({} chars)", attach.chars().count()));
     }
     (expanded, notes, images)
+}
+
+/// Grab an image from the system clipboard into a temp PNG and return it as
+/// a data URL (for /paste). Best-effort per platform: PowerShell on Windows,
+/// pngpaste on macOS, wl-paste/xclip on Linux.
+pub(crate) fn clipboard_image_data_url() -> anyhow::Result<(String, u64)> {
+    let out = std::env::temp_dir().join(format!("rift-paste-{}.png", std::process::id()));
+    let path_str = out.display().to_string();
+    #[cfg(windows)]
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-STA",
+            "-Command",
+            &format!(
+                "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+                 $img = [System.Windows.Forms.Clipboard]::GetImage(); \
+                 if ($img -eq $null) {{ exit 2 }}; \
+                 $img.Save('{path_str}', [System.Drawing.Imaging.ImageFormat]::Png)"
+            ),
+        ])
+        .status();
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("pngpaste").arg(&path_str).status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "wl-paste --type image/png > '{path_str}' 2>/dev/null || xclip -selection clipboard -t image/png -o > '{path_str}'"
+        ))
+        .status();
+    match status {
+        Ok(s) if s.success() && out.is_file() && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) => {}
+        Ok(_) => anyhow::bail!("no image on the clipboard (copy a screenshot first)"),
+        Err(e) => anyhow::bail!("clipboard tool unavailable: {e}"),
+    }
+    let result = read_image_data_url(&out, "image/png");
+    let _ = std::fs::remove_file(&out);
+    result
 }
 
 /// Image media type by extension; None = not an image we attach.
@@ -2735,6 +2789,26 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 }
                                 app.status = "answer sent".into();
                             }
+                        } else if app.input.trim() == "/paste" {
+                            // Clipboard image → staged attachment. Runs off
+                            // the UI thread (the clipboard helper spawns a
+                            // process); works while the agent is busy.
+                            app.input.clear();
+                            app.cursor = 0;
+                            app.status = "reading clipboard…".into();
+                            let fx2 = fx_ui.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let fx = fx2;
+                                match clipboard_image_data_url() {
+                                    Ok((url, kb)) => {
+                                        let _ = fx.send(UiEffect::Pasted(url, kb));
+                                    }
+                                    Err(e) => {
+                                        let _ = fx.send(UiEffect::Out(Kind::Warn, format!("! /paste: {e:#}")));
+                                        let _ = fx.send(UiEffect::Status("paste failed".into()));
+                                    }
+                                }
+                            });
                         } else if app.input.trim() == "/btw" || app.input.trim().starts_with("/btw ") {
                             // Side question (Claude Code's /btw): sees the
                             // conversation, has no tools, never joins the main
@@ -3124,9 +3198,18 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 // outlines (structure without full-read
                                 // tokens); images attach as base64 for
                                 // vision-capable models.
-                                let (expanded, notes, images) = expand_mentions(&raw, &app.cwd);
+                                let (expanded, notes, mut images) = expand_mentions(&raw, &app.cwd);
                                 for n in notes {
                                     app.log.push_block(Kind::Info, format!("· {n}"));
+                                }
+                                // Staged /paste images ride along with this
+                                // message.
+                                if !app.pending_paste.is_empty() {
+                                    app.log.push_block(
+                                        Kind::Info,
+                                        format!("· attaching {} pasted image(s)", app.pending_paste.len()),
+                                    );
+                                    images.append(&mut app.pending_paste);
                                 }
                                 app.last_prompt = Some(expanded.clone());
                                 let _ = prompt_tx.send(UiMsg::Prompt(expanded, images, cancel));
