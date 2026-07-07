@@ -58,6 +58,9 @@ pub enum UiEffect {
     Status(String),
     /// Fresh `git diff` output for the live diff pane (UI-side refresh task).
     TurnDiff(String),
+    /// A /btw side question finished (UI-side task): render the answer and,
+    /// on success, remember the exchange for follow-up side questions.
+    Btw { question: String, reply: String, ok: bool },
     /// Command finished; status-line text. Always the final effect.
     Done(String),
 }
@@ -78,6 +81,7 @@ pub struct CmdCx {
 /// driving both `/help` and the input popup palette.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/approve", "[on|off]", "toggle approval mode for write/edit/bash"),
+    ("/btw", "<question>|clear", "quick side question — sees the conversation, no tools, never joins the history; works while the agent is busy"),
     ("/clear", "", "wipe the conversation (keeps the session file)"),
     ("/config", "[edit]", "show or edit .rift.json (hot-reloads permissions)"),
     ("/compact", "", "force history compaction now"),
@@ -102,6 +106,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/worktrees", "", "list swarm worktrees + patches"),
     ("/think", "[on|off|auto]", "thinking mode (capability-checked)"),
     ("/tokens", "", "context budget, usage estimate, calibration"),
+    ("/yolo", "[off]", "stop asking before write/edit/bash (deny list still applies); /yolo off restores prompts"),
     ("/stats", "", "session totals: turns, tokens, tools, compactions"),
     ("/system", "[text]", "show or override the system prompt"),
     ("/temp", "<0.0-2.0>", "set sampling temperature"),
@@ -148,6 +153,7 @@ pub async fn run_command(
             Ok("ready".into())
         }
         "/approve" => cmd_approve(rest, agent, fx),
+        "/yolo" => cmd_yolo(rest, agent, fx),
         "/config" => cmd_config(rest, agent, cx, fx),
         "/model" => cmd_model(rest, agent, cx, fx).await,
         "/clear" => cmd_clear(agent, cx, fx),
@@ -179,7 +185,7 @@ pub async fn run_command(
         "/worktrees" => cmd_worktrees(cx, fx).await,
         // Handled in the chat input (they drive the UI's turn scheduling);
         // reachable here only via odd nesting like a /loop body.
-        "/goal" | "/loop" => Err(anyhow!("{cmd} runs from the chat input directly")),
+        "/goal" | "/loop" | "/btw" => Err(anyhow!("{cmd} runs from the chat input directly")),
         other => Err(anyhow!("unknown command '{other}' — /help lists available commands")),
     };
     let status = match result {
@@ -639,12 +645,24 @@ async fn cmd_mcp(
 
 fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     let user = agent.ctx().user_deny_patterns();
+    let allow = agent.ctx().user_allow_patterns();
     let mut out = format!(
-        "approval mode: {} (write/edit/bash {}; --approve or permissions.approve in config)\n\n",
-        if agent.ctx().approval_enabled() { "ON" } else { "off" },
-        if agent.ctx().approval_enabled() { "ask before running" } else { "run without asking" },
+        "approval mode: {}\n\n",
+        if agent.ctx().approval_enabled() {
+            "ON — write/edit/bash ask first (/yolo stops asking)"
+        } else {
+            "off (YOLO) — write/edit/bash run without asking (/yolo off restores prompts)"
+        },
     );
-    out.push_str("shell commands matching these patterns are refused:\n\nbuilt-in (always on):\n");
+    out.push_str("allowed (run without an approval prompt; permissions.bash_allow, grown by 'always allow'):\n");
+    if allow.is_empty() {
+        out.push_str("  none yet — choose \"always allow '<pattern>'\" on an approval prompt to add one\n");
+    } else {
+        for pat in &allow {
+            out.push_str(&format!("  {pat}\n"));
+        }
+    }
+    out.push_str("\nbanned (always refused, even in YOLO mode):\n\nbuilt-in:\n");
     for pat in builtin_bash_deny() {
         out.push_str(&format!("  {pat}\n"));
     }
@@ -660,7 +678,12 @@ fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) ->
         out.push_str(&format!("\nconfig: {}", p.display()));
     }
     let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
-    Ok(format!("{} builtin + {} user pattern(s)", builtin_bash_deny().len(), user.len()))
+    Ok(format!(
+        "{} allowed · {} builtin + {} user deny pattern(s)",
+        allow.len(),
+        builtin_bash_deny().len(),
+        user.len()
+    ))
 }
 
 async fn cmd_swarm(
@@ -816,7 +839,41 @@ fn cmd_approve(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Resu
     Ok(format!("approval: {state}"))
 }
 
-const CONFIG_TEMPLATE: &str = "{\n  \"host\": \"http://localhost:11434\",\n  \"model\": \"gemma4:26b\",\n  \"mcp\": {},\n  \"permissions\": {\"bash_deny\": [], \"approve\": false}\n}\n";
+/// /yolo — approval prompts off; /yolo off — back to asking (with the
+/// allow-list tracking). Sugar over the same switch /approve flips, named
+/// for what it means.
+fn cmd_yolo(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    match arg {
+        "" | "on" => {
+            if agent.ctx().approval_enabled() {
+                agent.ctx().set_approval(false);
+                let _ = fx.send(UiEffect::Out(
+                    Kind::Warn,
+                    "YOLO mode ON — write/edit/bash run without asking. The deny list still applies. \
+                     /yolo off restores approval prompts."
+                        .into(),
+                ));
+            } else {
+                let _ = fx.send(UiEffect::Out(Kind::Info, "already in YOLO mode — /yolo off restores approval prompts".into()));
+            }
+            Ok("YOLO: on".into())
+        }
+        "off" => {
+            agent.ctx().set_approval(true);
+            let _ = fx.send(UiEffect::Out(
+                Kind::Info,
+                format!(
+                    "YOLO mode off — write/edit/bash ask first again ({} allowed pattern(s) skip the prompt)",
+                    agent.ctx().user_allow_patterns().len()
+                ),
+            ));
+            Ok("YOLO: off".into())
+        }
+        other => bail!("usage: /yolo [off] — got '{other}'"),
+    }
+}
+
+const CONFIG_TEMPLATE: &str = "{\n  \"host\": \"http://localhost:11434\",\n  \"model\": \"gemma4:26b\",\n  \"mcp\": {},\n  \"permissions\": {\"bash_deny\": [], \"bash_allow\": []}\n}\n";
 
 fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     match arg {
@@ -861,11 +918,13 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
             }
             let config = loaded.config;
             agent.ctx().set_deny(&config.permissions.bash_deny);
-            agent.ctx().set_approval(config.permissions.approve);
+            agent.ctx().set_allow(&config.permissions.bash_allow);
+            agent.ctx().set_approval(config.permissions.approve_effective());
             cx.config_path = loaded.paths.last().cloned();
             let msg = format!(
-                "config reloaded — approval {}, {} user deny pattern(s) (host/model/MCP changes need a restart)",
-                if config.permissions.approve { "ON" } else { "off" },
+                "config reloaded — approval {}, {} allowed / {} user deny pattern(s) (host/model/MCP changes need a restart)",
+                if config.permissions.approve_effective() { "ON" } else { "off" },
+                config.permissions.bash_allow.len(),
                 config.permissions.bash_deny.len(),
             );
             let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));

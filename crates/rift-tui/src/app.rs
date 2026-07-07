@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rift_core::{Agent, AgentEvent, AskRequest, PlanItem, SessionStore, Skill, TurnStats};
-use rift_ollama::{Message, Role};
+use rift_ollama::{ChatOptions, ChatRequest, Message, Role, StreamDelta};
 use tokio::sync::oneshot;
 
 use crate::commands::{self, CmdCx, PickerItem, UiEffect};
@@ -681,6 +681,68 @@ fn line_end(s: &str, i: usize) -> usize {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn btw_without_provider_reports_cleanly() {
+        // A ctx with no sub-agent handle (fresh, no frontend install) must
+        // produce a friendly error effect, not hang or panic.
+        let (fx, mut rx) = mpsc::unbounded_channel();
+        let ctx = rift_core::ToolCtx::new(std::env::temp_dir());
+        spawn_btw(fx, ctx, std::env::temp_dir().join("no-such-session.json"), vec![], "hi?".into());
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap() {
+            UiEffect::Btw { ok, reply, .. } => {
+                assert!(!ok);
+                assert!(reply.contains("no provider"));
+            }
+            _ => panic!("expected Btw effect"),
+        }
+    }
+
+    /// Live test against a local OpenAI-compatible server — run manually:
+    /// `RIFT_BTW_TEST_URL=http://host:8000/v1 RIFT_BTW_TEST_MODEL=<model> cargo test btw_live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn btw_live_side_question() {
+        let url = std::env::var("RIFT_BTW_TEST_URL").expect("set RIFT_BTW_TEST_URL");
+        let model = std::env::var("RIFT_BTW_TEST_MODEL").expect("set RIFT_BTW_TEST_MODEL");
+        let ctx = rift_core::ToolCtx::new(std::env::temp_dir());
+        ctx.set_subagent(rift_core::SubAgentHandle {
+            client: std::sync::Arc::new(rift_openai::OpenAiClient::new(&url, None)),
+            cfg: rift_core::AgentConfig { model, ..Default::default() },
+        });
+        // A session snapshot the side question should see through.
+        let session = std::env::temp_dir().join("rift-btw-test-session.json");
+        let saved = rift_core::SavedSession {
+            model: "test".into(),
+            saved_at: 0,
+            cwd: ".".into(),
+            messages: vec![
+                Message::system("You are a coding agent."),
+                Message::user("The secret project codename is ZEPHYR-9."),
+                Message {
+                    role: Role::Assistant,
+                    content: "Noted — the codename is ZEPHYR-9.".into(),
+                    thinking: None,
+                    tool_calls: vec![],
+                    tool_name: None,
+                    tool_call_id: None,
+                    provider_data: None,
+                },
+            ],
+        };
+        std::fs::write(&session, serde_json::to_string(&saved).unwrap()).unwrap();
+
+        let (fx, mut rx) = mpsc::unbounded_channel();
+        spawn_btw(fx, ctx, session, vec![], "btw, what was the codename again? Reply with just it.".into());
+        match tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.unwrap().unwrap() {
+            UiEffect::Btw { ok, reply, .. } => {
+                println!("btw reply: {reply}");
+                assert!(ok, "side question failed: {reply}");
+                assert!(reply.to_uppercase().contains("ZEPHYR"), "answer ignored conversation context: {reply}");
+            }
+            _ => panic!("expected Btw effect"),
+        }
+    }
+
     #[test]
     fn sanitize_strips_ansi_and_controls_expands_tabs() {
         assert_eq!(sanitize_for_pane("\x1b[1;32m✓\x1b[0m ok"), "✓ ok");
@@ -962,6 +1024,11 @@ struct App {
     /// Completed-task reports waiting to be fed back to the model as a
     /// [task notification] turn (fires on the next idle tick).
     task_notes: Vec<String>,
+    /// /btw side-question exchanges (question, answer) this session — sent
+    /// as context for follow-up side questions, never into the main history.
+    btw_exchanges: Vec<(String, String)>,
+    /// A side question is in flight (one at a time keeps them coherent).
+    btw_busy: bool,
 }
 
 /// Running per-session counters surfaced by the `/stats` command.
@@ -1022,6 +1089,8 @@ impl App {
             session_stats: SessionStats::default(),
             bg_running: vec![],
             task_notes: vec![],
+            btw_exchanges: vec![],
+            btw_busy: false,
         }
     }
 
@@ -1388,6 +1457,25 @@ impl App {
             }
             UiEffect::Model(name) => self.model = name,
             UiEffect::Plan(items) => self.plan = items,
+            UiEffect::Btw { question, reply, ok } => {
+                self.btw_busy = false;
+                if ok {
+                    self.transcript.push_block(Kind::Thinking, format!("(btw) {}", reply.trim()));
+                    self.btw_exchanges.push((question, reply));
+                    // Keep the side thread bounded — it rides along on every
+                    // follow-up side question.
+                    const BTW_KEEP: usize = 10;
+                    if self.btw_exchanges.len() > BTW_KEEP {
+                        let excess = self.btw_exchanges.len() - BTW_KEEP;
+                        self.btw_exchanges.drain(..excess);
+                    }
+                    if !self.busy {
+                        self.status = "btw: answered — /btw continues the side thread".into();
+                    }
+                } else {
+                    self.transcript.push_block(Kind::Warn, format!("! (btw) {reply}"));
+                }
+            }
             // Handled by the event loop (need stdout/terminal); never reach here.
             UiEffect::Osc52(_) => {}
             UiEffect::EditFile(_) => {}
@@ -1535,6 +1623,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         1 => " · 1 bg task running".into(),
         n => format!(" · {n} bg tasks running"),
     };
+    let bg_note = if app.btw_busy { format!("{bg_note} · btw pending") } else { bg_note };
     let status = Line::from(vec![
         Span::styled(format!(" {} ", app.model), Style::default().fg(t.sel_fg).bg(t.accent)),
         Span::styled(busy_marker, Style::default().fg(if app.busy { t.warn } else { t.ok })),
@@ -1784,6 +1873,98 @@ fn goal_met(reply: &str) -> bool {
     reply.lines().any(|l| l.trim_start().starts_with("GOAL MET"))
 }
 
+/// Run one /btw side question on a UI-side task (modeled on Claude Code's
+/// /btw): it sees the whole conversation but has no tools, its exchange never
+/// enters the main history, and — because it bypasses the agent task entirely
+/// — it works while the agent is mid-turn. Conversation context comes from
+/// the session autosave (history up to the last completed turn).
+fn spawn_btw(
+    fx: mpsc::UnboundedSender<UiEffect>,
+    ctx: rift_core::ToolCtx,
+    session: PathBuf,
+    prior: Vec<(String, String)>,
+    question: String,
+) {
+    tokio::spawn(async move {
+        let Some(handle) = ctx.subagent_handle() else {
+            let _ = fx.send(UiEffect::Btw {
+                question,
+                reply: "no provider is ready yet — send one normal message first".into(),
+                ok: false,
+            });
+            return;
+        };
+        // Snapshot of the main conversation. Empty (fresh session, no turn
+        // saved yet) still works — the question just has no history behind it.
+        let mut messages: Vec<Message> = std::fs::read_to_string(&session)
+            .ok()
+            .and_then(|s| serde_json::from_str::<rift_core::SavedSession>(&s).ok())
+            .map(|s| s.messages)
+            .unwrap_or_default();
+        if messages.first().map(|m| m.role) != Some(Role::System) {
+            messages.insert(0, Message::system("You are a helpful, concise assistant."));
+        }
+        // Old reasoning isn't needed to answer an aside; drop it from the
+        // request (same trim the agent applies to its own requests).
+        for m in &mut messages {
+            m.thinking = None;
+        }
+        // Prior side exchanges make /btw a small conversation of its own.
+        for (q, a) in &prior {
+            messages.push(Message::user(format!("[side question] {q}")));
+            messages.push(Message {
+                role: Role::Assistant,
+                content: a.clone(),
+                thinking: None,
+                tool_calls: vec![],
+                tool_name: None,
+                tool_call_id: None,
+                provider_data: None,
+            });
+        }
+        messages.push(Message::user(format!(
+            "[side question — an aside from the user, NOT part of the main task; this exchange \
+             is not kept in the conversation] {question}\n\nAnswer directly and concisely from \
+             what you already know in this conversation. You have NO tools for this answer — \
+             never emit tool calls; if you would need to look something up, say what you'd check \
+             instead. If the question is unrelated to the project, simply answer it."
+        )));
+        let req = ChatRequest {
+            model: handle.cfg.model.clone(),
+            messages,
+            tools: vec![],
+            stream: true,
+            think: handle.cfg.think,
+            keep_alive: Some("10m".into()),
+            options: Some(ChatOptions {
+                num_ctx: Some(handle.cfg.num_ctx),
+                temperature: handle.cfg.temperature,
+                num_predict: None,
+            }),
+        };
+        // Buffered, not streamed into the transcript: the main turn may be
+        // streaming there at the same time, and two interleaved streams would
+        // garble both. The answer lands as one block.
+        let mut streamed = String::new();
+        let mut on_delta = |d: StreamDelta| {
+            if let StreamDelta::Content(c) = d {
+                streamed.push_str(&c);
+            }
+        };
+        match handle.client.chat_stream(&req, &mut on_delta).await {
+            Ok(out) => {
+                let reply = if out.message.content.trim().is_empty() { streamed } else { out.message.content };
+                let reply =
+                    if reply.trim().is_empty() { "(the model sent no answer)".to_string() } else { reply };
+                let _ = fx.send(UiEffect::Btw { question, reply, ok: true });
+            }
+            Err(e) => {
+                let _ = fx.send(UiEffect::Btw { question, reply: format!("side question failed: {e:#}"), ok: false });
+            }
+        }
+    });
+}
+
 /// `30s` / `5m` / `2h` / bare seconds → Duration.
 fn parse_interval(tok: &str) -> Option<Duration> {
     let (num, unit) = match tok.chars().last()? {
@@ -1932,6 +2113,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     // Background-task events must reach the UI outside any turn — give the
     // registry its own clone of the event channel before the agent moves.
     agent.ctx().bg().set_notify(ev_tx.clone());
+    // UI-side ToolCtx handle: /btw side questions read the current provider
+    // and model from it (kept fresh by run_turn) without touching the agent.
+    let ui_ctx = agent.ctx().clone();
     let agent_task = tokio::spawn(async move {
         let mut agent = agent;
         let mut cx = CmdCx { store, cwd: cwd.clone(), mcp, config_path, host, providers };
@@ -2369,6 +2553,45 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                     let _ = tx.send(answer);
                                 }
                                 app.status = "answer sent".into();
+                            }
+                        } else if app.input.trim() == "/btw" || app.input.trim().starts_with("/btw ") {
+                            // Side question (Claude Code's /btw): sees the
+                            // conversation, has no tools, never joins the main
+                            // history — and is deliberately handled BEFORE the
+                            // busy gate, so it works while the agent is working.
+                            let raw = std::mem::take(&mut app.input);
+                            app.cursor = 0;
+                            app.history.push(raw.clone());
+                            app.history_idx = None;
+                            let arg = raw.trim().strip_prefix("/btw").map(str::trim).unwrap_or_default().to_string();
+                            if arg.is_empty() {
+                                app.transcript.push_block(
+                                    Kind::Info,
+                                    "usage: /btw <question> — quick side question: sees the conversation, no tools, \
+                                     never enters the history, works while the agent is busy · /btw clear resets the side thread"
+                                        .into(),
+                                );
+                            } else if matches!(arg.as_str(), "clear" | "x") {
+                                let n = app.btw_exchanges.len();
+                                app.btw_exchanges.clear();
+                                app.transcript
+                                    .push_block(Kind::Info, format!("(btw) side thread cleared ({n} exchange(s))"));
+                            } else if app.btw_busy {
+                                app.transcript
+                                    .push_block(Kind::Warn, "! a side question is already pending — wait for its answer".into());
+                            } else {
+                                app.btw_busy = true;
+                                app.transcript.push_block(Kind::Thinking, format!("(btw) you: {arg}"));
+                                if !app.busy {
+                                    app.status = "btw: asking…".into();
+                                }
+                                spawn_btw(
+                                    fx_ui.clone(),
+                                    ui_ctx.clone(),
+                                    restart_session.clone(),
+                                    app.btw_exchanges.clone(),
+                                    arg,
+                                );
                             }
                         } else if app.busy {
                             app.status = "agent is running — Esc to cancel first".into();

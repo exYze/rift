@@ -324,16 +324,24 @@ async fn main() -> Result<()> {
 
     // Elicitation: in interactive mode the model gets an ask_user tool wired
     // to the TUI; headless runs stay non-interactive (no tool registered).
-    let approve = cli.approve || config.permissions.approve;
+    // Approval defaults ON (the Claude Code model): interactive sessions ask
+    // before write/edit/bash, with per-command "always allow" tracking.
+    // `"approve": false` in the user config or /yolo opts out; --approve and
+    // a project `"approve": true` force it on.
+    let approve = cli.approve || config.permissions.approve_effective();
     let mut ctx = ToolCtx::with_extra_deny(&cwd, &config.permissions.bash_deny).with_approval(approve);
+    ctx.set_allow(&config.permissions.bash_allow);
     let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
     if interactive {
         ctx = ctx.with_interaction(ask_tx);
         registry.register(Box::new(AskUserTool));
         if approve {
-            eprintln!("approval mode: write/edit/bash will ask before running");
+            eprintln!(
+                "approval: write/edit/bash ask first ({} allowed pattern(s) skip the prompt; /yolo stops asking)",
+                config.permissions.bash_allow.len()
+            );
         }
-    } else if approve {
+    } else if cli.approve || config.permissions.approve == Some(true) {
         eprintln!("note: approval mode needs the interactive TUI; running headless without it");
     }
 

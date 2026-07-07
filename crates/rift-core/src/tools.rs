@@ -69,6 +69,10 @@ pub struct PlanItem {
 pub struct ToolCtx {
     pub cwd: PathBuf,
     deny: std::sync::Arc<std::sync::Mutex<(globset::GlobSet, Vec<String>)>>,
+    /// Pre-approved command patterns (user config `permissions.bash_allow`,
+    /// grown by the "always allow" approval choice) — matching commands skip
+    /// the approval prompt. The deny list always wins over allow.
+    allow: std::sync::Arc<std::sync::Mutex<(globset::GlobSet, Vec<String>)>>,
     journal: std::sync::Arc<std::sync::Mutex<Vec<EditRecord>>>,
     turn: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ask: Option<tokio::sync::mpsc::UnboundedSender<AskRequest>>,
@@ -87,13 +91,35 @@ pub struct ToolCtx {
 }
 
 fn build_deny_set(extra: &[String]) -> globset::GlobSet {
+    let all: Vec<String> =
+        BASH_DENY_BUILTIN.iter().copied().map(str::to_string).chain(extra.iter().cloned()).collect();
+    build_glob_set(&all)
+}
+
+fn build_glob_set(patterns: &[String]) -> globset::GlobSet {
     let mut builder = globset::GlobSetBuilder::new();
-    for pat in BASH_DENY_BUILTIN.iter().copied().map(str::to_string).chain(extra.iter().cloned()) {
-        if let Ok(glob) = globset::GlobBuilder::new(&pat).literal_separator(false).build() {
+    for pat in patterns {
+        if let Ok(glob) = globset::GlobBuilder::new(pat).literal_separator(false).build() {
             builder.add(glob);
         }
     }
     builder.build().unwrap_or_else(|_| globset::GlobSet::empty())
+}
+
+/// The "always allow" pattern offered for a command: program + subcommand
+/// when the second token looks like one (`git push …` → `git push *`),
+/// otherwise just the program (`python x.py` → `python *`). Deliberately
+/// prefix-shaped — narrow enough to mean something, broad enough to stop
+/// re-prompting on every flag variation.
+fn allow_pattern_for(command: &str) -> String {
+    let mut it = command.split_whitespace();
+    match (it.next(), it.next()) {
+        (Some(a), Some(b)) if !b.starts_with('-') && !b.contains(['/', '\\', '.', '=']) => {
+            format!("{a} {b} *")
+        }
+        (Some(a), _) => format!("{a} *"),
+        _ => "*".into(),
+    }
 }
 
 impl ToolCtx {
@@ -106,6 +132,7 @@ impl ToolCtx {
         Self {
             cwd: cwd.into(),
             deny: std::sync::Arc::new(std::sync::Mutex::new((build_deny_set(extra_deny), extra_deny.to_vec()))),
+            allow: std::sync::Arc::new(std::sync::Mutex::new((globset::GlobSet::empty(), vec![]))),
             journal: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
             turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ask: None,
@@ -152,6 +179,7 @@ impl ToolCtx {
         ToolCtx {
             cwd: self.cwd.clone(),
             deny: self.deny.clone(),
+            allow: self.allow.clone(),
             journal: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
             turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ask: self.ask.clone(),
@@ -184,6 +212,100 @@ impl ToolCtx {
     pub fn set_deny(&self, extra: &[String]) {
         if let Ok(mut d) = self.deny.lock() {
             *d = (build_deny_set(extra), extra.to_vec());
+        }
+    }
+
+    /// Replace the pre-approved command patterns (startup, /config reload).
+    pub fn set_allow(&self, patterns: &[String]) {
+        if let Ok(mut a) = self.allow.lock() {
+            *a = (build_glob_set(patterns), patterns.to_vec());
+        }
+    }
+
+    /// Add one pattern at runtime (the "always allow" approval choice).
+    pub fn add_allow_pattern(&self, pattern: &str) {
+        if let Ok(mut a) = self.allow.lock() {
+            if !a.1.iter().any(|p| p == pattern) {
+                a.1.push(pattern.to_string());
+                a.0 = build_glob_set(&a.1);
+            }
+        }
+    }
+
+    /// The active allow patterns (for /permissions).
+    pub fn user_allow_patterns(&self) -> Vec<String> {
+        self.allow.lock().map(|a| a.1.clone()).unwrap_or_default()
+    }
+
+    /// Is every chained segment of `command` pre-approved? Segment-wise like
+    /// the deny check, but requiring ALL segments to match — `git status &&
+    /// curl evil` must still prompt when only `git status` is allowed.
+    /// (Deny is checked separately and always wins.)
+    fn bash_allowed(&self, command: &str) -> bool {
+        let Ok(allow) = self.allow.lock() else { return false };
+        if allow.1.is_empty() {
+            return false;
+        }
+        let mut any = false;
+        for seg in command
+            .split(['&', '|', ';', '\n', '(', ')', '`'])
+            .map(|seg| seg.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|seg| !seg.is_empty())
+        {
+            any = true;
+            // "git push *" should also cover the bare "git push".
+            let bare_ok = allow.1.iter().any(|p| p.strip_suffix(" *") == Some(seg.as_str()));
+            if !allow.0.is_match(&seg) && !bare_ok {
+                return false;
+            }
+        }
+        any
+    }
+
+    /// Approval gate for bash, with Claude Code-style allow tracking: an
+    /// allow-listed command runs silently; otherwise the prompt offers a
+    /// persistent "always allow '<pattern>'" (saved to the user config)
+    /// alongside once/session/deny.
+    pub(crate) async fn check_bash_approval(&self, command: &str) -> Result<()> {
+        if !self.approval_enabled() {
+            return Ok(());
+        }
+        if self.approved_kinds.lock().map(|k| k.contains("bash")).unwrap_or(false) {
+            return Ok(());
+        }
+        if self.bash_allowed(command) {
+            return Ok(());
+        }
+        // Approval requires an interactive user; without one the mode is moot.
+        let Some(ask) = &self.ask else { return Ok(()) };
+        let pattern = allow_pattern_for(command);
+        let preview: String = command.chars().take(120).collect();
+        let always = format!("always allow '{pattern}'");
+        let session = "allow all bash this session".to_string();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let _ = ask.send(AskRequest {
+            question: format!("Allow bash: {preview}"),
+            choices: vec!["allow once".into(), always.clone(), session.clone(), "deny".into()],
+            reply: reply_tx,
+        });
+        match reply_rx.await.as_deref() {
+            Ok("allow once") => Ok(()),
+            Ok(a) if a == always => {
+                self.add_allow_pattern(&pattern);
+                // Persistence failure must not fail the approved command —
+                // the in-memory allow already covers this session.
+                let _ = crate::config::append_user_bash_allow(&pattern);
+                Ok(())
+            }
+            Ok(a) if a == session => {
+                if let Ok(mut kinds) = self.approved_kinds.lock() {
+                    kinds.insert("bash".to_string());
+                }
+                Ok(())
+            }
+            _ => bail!(
+                "the user DENIED this bash action. Do not retry it; ask them how to proceed or choose another approach."
+            ),
         }
     }
 
@@ -810,8 +932,7 @@ impl Tool for BashTool {
         if ctx.bash_denied(command) {
             bail!("command blocked by permission policy: {command}");
         }
-        let preview: String = command.chars().take(120).collect();
-        ctx.check_approval("bash", &preview).await?;
+        ctx.check_bash_approval(command).await?;
         if args.get("run_in_background").and_then(|v| v.as_bool()).unwrap_or(false) {
             return bash_background(command, ctx);
         }
@@ -1547,6 +1668,54 @@ mod tests {
         assert!(report.contains("bg-hello"));
         let list = TaskTool.execute(&Map::new(), &ctx).await.unwrap();
         assert!(list.contains("#1"));
+    }
+
+    #[test]
+    fn allow_patterns_gate_the_prompt() {
+        let ctx = ToolCtx::new("/tmp");
+        ctx.set_allow(&["git status *".to_string(), "cargo *".to_string()]);
+        assert!(ctx.bash_allowed("git status --short"));
+        assert!(ctx.bash_allowed("git status")); // "x *" covers the bare form
+        assert!(ctx.bash_allowed("cargo build --release"));
+        assert!(!ctx.bash_allowed("git push origin main"));
+        // Chained commands: every segment must be allowed.
+        assert!(ctx.bash_allowed("cargo build && cargo test"));
+        assert!(!ctx.bash_allowed("git status && curl evil.example"));
+        // Empty allow list allows nothing (and an empty command is nothing).
+        let bare = ToolCtx::new("/tmp");
+        assert!(!bare.bash_allowed("ls"));
+        assert!(!ctx.bash_allowed("  "));
+        // Runtime growth (the "always allow" choice).
+        ctx.add_allow_pattern("git push *");
+        assert!(ctx.bash_allowed("git push origin main"));
+        assert_eq!(ctx.user_allow_patterns().len(), 3);
+    }
+
+    #[test]
+    fn allow_pattern_shapes() {
+        assert_eq!(allow_pattern_for("git push origin main"), "git push *");
+        assert_eq!(allow_pattern_for("cargo test"), "cargo test *");
+        assert_eq!(allow_pattern_for("ls -la"), "ls *"); // flag ≠ subcommand
+        assert_eq!(allow_pattern_for("python script.py"), "python *"); // path-ish arg
+        assert_eq!(allow_pattern_for("make"), "make *");
+        assert_eq!(allow_pattern_for("FOO=1 make"), "FOO=1 make *"); // env prefix keeps the program
+    }
+
+    #[tokio::test]
+    async fn approval_skipped_for_allowed_commands_only() {
+        // Approval on, with an interactive channel that would DENY anything
+        // that asks: allowed commands must run without asking at all.
+        let ctx = ToolCtx::new("/tmp").with_approval(true);
+        let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
+        let ctx = ctx.with_interaction(ask_tx);
+        ctx.set_allow(&["echo *".to_string()]);
+        tokio::spawn(async move {
+            while let Some(req) = ask_rx.recv().await {
+                let _ = req.reply.send("deny".into());
+            }
+        });
+        assert!(ctx.check_bash_approval("echo hello").await.is_ok());
+        assert!(ctx.check_bash_approval("rm file").await.is_err()); // asked, denied
     }
 
     #[test]

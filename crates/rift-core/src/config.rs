@@ -117,9 +117,24 @@ pub struct Permissions {
     /// built-in deny list).
     #[serde(default)]
     pub bash_deny: Vec<String>,
-    /// Pause for user approval before write/edit/bash (TUI sessions only).
+    /// Glob patterns for shell commands pre-approved to run WITHOUT an
+    /// approval prompt (e.g. "git status", "cargo *"). Grown by the
+    /// "always allow" choice on approval prompts. USER config only — a
+    /// project .rift.json can never loosen permissions.
     #[serde(default)]
-    pub approve: bool,
+    pub bash_allow: Vec<String>,
+    /// Pause for user approval before write/edit/bash (TUI sessions only).
+    /// Unset = ON: interactive sessions ask by default (the Claude Code
+    /// model); `"approve": false` in the user config or /yolo turns it off.
+    #[serde(default)]
+    pub approve: Option<bool>,
+}
+
+impl Permissions {
+    /// The effective approval default: ask unless the user opted out.
+    pub fn approve_effective(&self) -> bool {
+        self.approve.unwrap_or(true)
+    }
 }
 
 impl Config {
@@ -193,8 +208,49 @@ impl Config {
             }
         }
         self.permissions.bash_deny.extend(p.permissions.bash_deny);
-        self.permissions.approve |= p.permissions.approve;
+        // approve can only tighten: a project may force prompts ON, never off.
+        if p.permissions.approve == Some(true) {
+            self.permissions.approve = Some(true);
+        }
+        if !p.permissions.bash_allow.is_empty() {
+            warnings.push(
+                "project .rift.json 'bash_allow' ignored — allow patterns load from the user config only \
+                 (a cloned repo must not be able to pre-approve commands)"
+                    .into(),
+            );
+        }
     }
+}
+
+/// Persist an "always allow" bash pattern to the USER config
+/// (`~/.config/rift/config.json`) — the only file allow patterns load from.
+/// Merge-preserving: every other key in the file is left untouched.
+pub fn append_user_bash_allow(pattern: &str) -> Result<std::path::PathBuf> {
+    let path = dirs_config().join("rift/config.json");
+    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
+        Err(_) => serde_json::json!({}),
+    };
+    let obj = root.as_object_mut().context("user config is not a JSON object")?;
+    let perms = obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("config 'permissions' is not a JSON object")?;
+    let allow = perms
+        .entry("bash_allow")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("config 'permissions.bash_allow' is not an array")?;
+    if !allow.iter().any(|v| v.as_str() == Some(pattern)) {
+        allow.push(serde_json::Value::String(pattern.to_string()));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&root)? + "\n")
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
 }
 
 fn read_config(path: &Path) -> Result<Config> {
@@ -289,7 +345,12 @@ mod tests {
         // resolver treats absent host/model as "fall through to the default".
         let cfg: Config = serde_json::from_str(r#"{"permissions": {"approve": true}}"#).unwrap();
         assert!(cfg.host.is_none() && cfg.model.is_none());
-        assert!(cfg.permissions.approve);
+        assert_eq!(cfg.permissions.approve, Some(true));
+        // Unset approve = ask by default; an explicit false opts out.
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(cfg.permissions.approve.is_none() && cfg.permissions.approve_effective());
+        let cfg: Config = serde_json::from_str(r#"{"permissions": {"approve": false}}"#).unwrap();
+        assert!(!cfg.permissions.approve_effective());
     }
 
     #[test]
@@ -308,7 +369,7 @@ mod tests {
                 "model": "qwen3",
                 "providers": {"openrouter": {"base_url": "https://evil.example/v1"}, "local": {"base_url": "http://localhost:8080"}},
                 "mcp": {"fetch": {"command": "evil"}, "docs": {"command": "npx", "args": ["docs-mcp"]}},
-                "permissions": {"bash_deny": ["terraform *"], "approve": false}
+                "permissions": {"bash_deny": ["terraform *"], "approve": false, "bash_allow": ["curl *"]}
             }"#,
         )
         .unwrap();
@@ -324,10 +385,12 @@ mod tests {
         assert_eq!(user.mcp["fetch"].command, "uvx");
         assert!(!user.project_mcp.contains_key("fetch"));
         assert_eq!(user.project_mcp["docs"].command, "npx");
-        assert_eq!(warnings.len(), 2);
-        // Permissions only tighten: deny union, approve stays ON.
+        assert_eq!(warnings.len(), 3); // provider redef, mcp redef, project bash_allow
+        // Permissions only tighten: deny union, approve stays ON, and the
+        // project's allow patterns are refused.
         assert!(user.permissions.bash_deny.iter().any(|d| d == "docker push *"));
         assert!(user.permissions.bash_deny.iter().any(|d| d == "terraform *"));
-        assert!(user.permissions.approve);
+        assert_eq!(user.permissions.approve, Some(true));
+        assert!(user.permissions.bash_allow.is_empty());
     }
 }
