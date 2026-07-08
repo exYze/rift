@@ -3,6 +3,29 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.6.0 — 2026-07-07
+
+- **VS Code sidebar chat**: a full chat UI backed by a new `rift --serve`
+  JSON-lines protocol over stdio — streaming replies, tool activity,
+  inline approval prompts (diff preview + allow/deny), the plan checklist,
+  and new/continue session controls. Lives in its own activity-bar
+  container, so it drags to the secondary sidebar and sits beside the
+  editor. In-chat **model dropdown** discovers every model rift can reach
+  (default host plus configured providers, as `provider/model`) and
+  switches mid-conversation via `--continue`; a ⚙ settings panel edits the
+  binary path, server URL, and reasoning-effort (dropdown, not a raw flag),
+  with a button to open rift's own config for providers/permissions
+- **`rift --serve`**: editor-integration mode — one JSON event per line on
+  stdout, one command per line on stdin, approvals and `ask_user`
+  questions surfaced as `ask` events answered by id. The safety model is
+  identical to the TUI (approval on by default)
+- **Harden the bash deny list against expansion tricks**: `bash_denied`
+  now folds whitespace-producing expansions (`${IFS}`, `$IFS`, `$@`, `$*`)
+  to spaces and splits on `$` before matching, so `rm${IFS}-rf${IFS}/` and
+  `sudo${IFS}whoami` no longer slip past the built-in patterns. Remains
+  best-effort (approval mode is the real gate), but the documented bypass
+  is closed
+
 ## v1.5.3 — 2026-07-07
 
 - **VS Code extension** (`vscode/`): rift in VS Code's integrated terminal

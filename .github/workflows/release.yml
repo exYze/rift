@@ -103,6 +103,27 @@ jobs:
           files: dist/*
           generate_release_notes: true
 
+  # Publish the extension to the VS Code Marketplace. No-ops (successfully)
+  # until the VSCE_PAT secret exists — an Azure DevOps PAT with
+  # Marketplace→Manage scope for the exYze publisher.
+  marketplace:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: publish to marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "VSCE_PAT not set — skipping marketplace publish"
+            exit 0
+          fi
+          cd vscode && npx --yes @vscode/vsce publish -p "$VSCE_PAT"
+
   # Regenerate the Homebrew formula from the just-published checksums and
   # push it to exYze/homebrew-tap. No-ops (successfully) until the
   # TAP_PUSH_TOKEN secret exists — a fine-grained PAT with contents:write

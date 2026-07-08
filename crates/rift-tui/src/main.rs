@@ -3,6 +3,7 @@ mod clipboard;
 mod commands;
 mod highlight;
 mod pricing;
+mod serve;
 mod swarm_ui;
 mod theme;
 mod update;
@@ -124,6 +125,10 @@ struct Cli {
     /// machine-readable result object to stdout (progress goes to stderr)
     #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     output_format: String,
+    /// Editor-integration server: JSON events on stdout, JSON commands on
+    /// stdin, one object per line (used by the VS Code extension's chat)
+    #[arg(long)]
+    serve: bool,
     /// Max agent-loop iterations per turn [default: 25, or `max_iterations` in config]
     #[arg(long)]
     max_iterations: Option<usize>,
@@ -273,7 +278,9 @@ async fn main() -> Result<()> {
     // In the interactive TUI this is non-fatal — open anyway and let the user
     // recover with /host and /model. Headless (-p) runs still bail, since there
     // is no interactive way to fix the server/model there.
-    let interactive = cli.prompt.is_none();
+    // --serve is machine-driven: no terminal prompts (stdin belongs to the
+    // protocol), but questions/approvals still flow — as JSON ask events.
+    let interactive = cli.prompt.is_none() && !cli.serve;
     let show = match client.show(&model).await {
         Ok(s) => Some(s),
         Err(e) if interactive => {
@@ -392,7 +399,7 @@ async fn main() -> Result<()> {
     }
     ctx.set_search_url(config.search_url.clone());
     let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
-    if interactive {
+    if interactive || cli.serve {
         ctx = ctx.with_interaction(ask_tx);
         registry.register(Box::new(AskUserTool));
         if approve {
@@ -539,6 +546,10 @@ async fn main() -> Result<()> {
             &theme::DARK
         }),
     };
+
+    if cli.serve {
+        return serve::run_serve(agent, store, ask_rx, model_addr, resumed_messages).await;
+    }
 
     match cli.prompt {
         Some(mut prompt) => {

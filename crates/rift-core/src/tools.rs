@@ -534,13 +534,22 @@ impl ToolCtx {
 
     fn bash_denied(&self, command: &str) -> bool {
         let Ok(deny) = self.deny.lock() else { return false };
+        // Expansions the shell turns into whitespace at run time would let a
+        // denied command hide from the literal match — `rm${IFS}-rf${IFS}/`
+        // reads as three harmless tokens here but runs as `rm -rf /`. Fold the
+        // common whitespace-producing forms to a space first so each segment
+        // reads the way the shell will execute it.
+        let expanded =
+            command.replace("${IFS}", " ").replace("$IFS", " ").replace("$@", " ").replace("$*", " ");
         // Match every chained segment, not just the whole string — otherwise
         // `true && sudo …` or `echo x; rm -rf /` sails past patterns anchored
         // at the start. Splitting on subshell/backtick chars too errs on the
-        // side of denying. Still best-effort (quoting can evade it); approval
-        // mode is the real gate.
-        command
-            .split(['&', '|', ';', '\n', '(', ')', '`'])
+        // side of denying. `$` splits as well, so a residual expansion that
+        // folds to nothing (`sudo${undefined}whoami`) leaves the denied token
+        // standing alone instead of glued to the rest. Still best-effort
+        // (heavy quoting can evade it); approval mode is the real gate.
+        expanded
+            .split(['&', '|', ';', '\n', '(', ')', '`', '$'])
             .map(|seg| seg.split_whitespace().collect::<Vec<_>>().join(" "))
             .any(|seg| !seg.is_empty() && deny.0.is_match(&seg))
     }
@@ -2439,6 +2448,24 @@ mod tests {
         assert!(ctx.bash_denied("(sudo rm x)"));
         assert!(ctx.bash_denied("echo `sudo id`"));
         assert!(!ctx.bash_denied("echo safe && ls -la"));
+    }
+
+    #[test]
+    fn bash_deny_catches_variable_expansion_tricks() {
+        // Shell expansions that fold to whitespace (or nothing) must not let a
+        // denied command slip past the literal match. Every variant below runs
+        // as a denied command once the shell expands it.
+        let ctx = ToolCtx::with_extra_deny("/tmp", &[]);
+        assert!(ctx.bash_denied("sudo${IFS}whoami"));
+        assert!(ctx.bash_denied("sudo$@ whoami"));
+        assert!(ctx.bash_denied("sudo${undefined}whoami"));
+        assert!(ctx.bash_denied("rm${IFS}-rf${IFS}/"));
+        assert!(ctx.bash_denied("dd${IFS}if=/dev/zero${IFS}of=/dev/sda"));
+        assert!(ctx.bash_denied("sudo$IFS whoami"));
+        // A `$` in an otherwise-harmless command stays allowed (no over-block).
+        assert!(!ctx.bash_denied("echo $HOME"));
+        assert!(!ctx.bash_denied("echo ${PATH}"));
+        assert!(!ctx.bash_denied("git commit -m \"fix $bug\""));
     }
 
     #[test]

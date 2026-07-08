@@ -1,37 +1,86 @@
-// Rift for VS Code — runs the real rift TUI in the integrated terminal, so
-// the full feature set (approval prompts, sessions, skills, MCP, sub-agents,
-// swarm, /commands) works exactly as it does standalone. The extension adds
-// the editor-side glue: launch commands, keybindings, and @file injection.
+// Rift for VS Code — a sidebar chat (webview) backed by `rift --serve`, a
+// JSON-lines protocol over stdio, plus the original integrated-terminal
+// launcher. The chat view lives in its own activity-bar container, so VS
+// Code lets you drag it to the secondary sidebar and keep the editor,
+// explorer, and chat visible at once.
 const vscode = require('vscode');
-
-/** The terminal hosting rift, if we launched one and it is still alive. */
-let riftTerminal = null;
-/** Set while the terminal is younger than STARTUP_MS — sendText issued
- *  before the TUI enters raw mode would be eaten by the shell prompt. */
-let launchedAt = 0;
-const STARTUP_MS = 1500;
+const cp = require('child_process');
+const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 function config() {
   return vscode.workspace.getConfiguration('rift');
 }
 
-/** Shell-quote one argument (POSIX-ish; PowerShell accepts the same for
- *  simple flag values). Only quotes when needed so the command stays legible. */
-function quote(arg) {
-  return /^[A-Za-z0-9_@%+=:,.\/-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+/** rift's own user config (~/.config/rift/config.json, honoring
+ *  XDG_CONFIG_HOME the way rift does) — read for defaults and the provider
+ *  map so model discovery covers every server rift can reach. */
+function riftConfigPath() {
+  const base =
+    process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.length
+      ? process.env.XDG_CONFIG_HOME
+      : path.join(os.homedir(), '.config');
+  return path.join(base, 'rift', 'config.json');
 }
 
-/** Build the rift command line from settings plus per-launch flags. */
-function riftCommand(flags) {
-  const cfg = config();
-  const parts = [quote(cfg.get('executablePath') || 'rift')];
-  const host = cfg.get('host');
-  if (host) parts.push('--host', quote(host));
-  const model = cfg.get('model');
-  if (model) parts.push('--model', quote(model));
-  for (const extra of cfg.get('extraArgs') || []) parts.push(quote(extra));
-  parts.push(...flags);
-  return parts.join(' ');
+function readRiftConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(riftConfigPath(), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+async function fetchJson(url, headers = {}) {
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(4000) });
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json();
+}
+
+/** Every model rift can currently reach: the default host's list (Ollama
+ *  /api/tags, or /v1/models for OpenAI-style hosts like vLLM), plus each
+ *  configured provider's /v1/models as "provider/model" entries — the same
+ *  prefix routing rift itself uses. Unreachable servers are skipped. */
+async function discoverModels() {
+  const rc = readRiftConfig();
+  const models = [];
+  const host = (config().get('host') || rc.host || 'http://localhost:11434').replace(/\/+$/, '');
+  try {
+    if (host.endsWith('/v1')) {
+      const d = await fetchJson(`${host}/models`);
+      for (const m of d.data || []) models.push(m.id);
+    } else {
+      const d = await fetchJson(`${host}/api/tags`);
+      for (const m of d.models || []) models.push(m.name);
+    }
+  } catch {
+    /* default host down — provider entries below may still work */
+  }
+  for (const [name, p] of Object.entries(rc.providers || {})) {
+    if (!p || !p.base_url) continue;
+    try {
+      const base = p.base_url.replace(/\/+$/, '');
+      const key = p.api_key || (p.api_key_env ? process.env[p.api_key_env] : undefined);
+      let ids = [];
+      if (p.kind === 'anthropic') {
+        const d = await fetchJson(`${base}/v1/models`, {
+          'x-api-key': key || '',
+          'anthropic-version': '2023-06-01',
+        });
+        ids = (d.data || []).map((m) => m.id);
+      } else {
+        const url = base.endsWith('/v1') ? `${base}/models` : `${base}/v1/models`;
+        const d = await fetchJson(url, key ? { Authorization: `Bearer ${key}` } : {});
+        ids = (d.data || []).map((m) => m.id);
+      }
+      for (const id of ids) models.push(`${name}/${id}`);
+    } catch {
+      /* provider unreachable — skip */
+    }
+  }
+  return models;
 }
 
 function workspaceRoot() {
@@ -39,10 +88,341 @@ function workspaceRoot() {
   return folders && folders.length > 0 ? folders[0].uri : undefined;
 }
 
-/** Reuse the live rift terminal, or launch a new one with the given flags.
- *  `fresh` forces a new terminal (new/continued sessions must not type into
- *  an already-running rift). */
-function openRift(flags = [], fresh = false) {
+/** Config-driven argv for launching rift (shared by chat server + terminal). */
+function riftArgs() {
+  const cfg = config();
+  const args = [];
+  const host = cfg.get('host');
+  if (host) args.push('--host', host);
+  const model = cfg.get('model');
+  if (model) args.push('--model', model);
+  const effort = cfg.get('effort');
+  if (effort) args.push('--effort', effort);
+  args.push(...(cfg.get('extraArgs') || []));
+  return args;
+}
+
+// ── Sidebar chat ────────────────────────────────────────────────────────────
+
+class RiftChatProvider {
+  constructor(context) {
+    this.context = context;
+    this.view = null;
+    this.proc = null;
+    this.busy = false;
+    this.model = '';
+    /** Replay log so the transcript survives the view being disposed (e.g.
+     *  when dragged between primary and secondary sidebars). */
+    this.log = [];
+    this.stderrTail = [];
+    this.stdoutBuf = '';
+  }
+
+  resolveWebviewView(view) {
+    this.view = view;
+    view.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')],
+    };
+    view.webview.html = this.html(view.webview);
+    view.webview.onDidReceiveMessage((m) => this.onWebviewMessage(m));
+    view.onDidDispose(() => {
+      if (this.view === view) this.view = null;
+    });
+  }
+
+  html(webview) {
+    const media = (f) =>
+      webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', f));
+    const nonce = crypto.randomBytes(16).toString('base64');
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+<link rel="stylesheet" href="${media('chat.css')}">
+</head>
+<body>
+  <div id="header">
+    <span id="status">rift</span>
+    <span id="header-buttons">
+      <button id="btn-new" title="New session">＋</button>
+      <button id="btn-continue" title="Continue last session">↻</button>
+    </span>
+  </div>
+  <div id="messages"></div>
+  <div id="settings" class="hidden">
+    <label>rift binary <input id="set-bin" placeholder="rift"></label>
+    <label>server URL <input id="set-host" placeholder="http://localhost:11434 (Ollama) or http://host:8000/v1 (vLLM)"></label>
+    <label>reasoning effort
+      <select id="set-effort">
+        <option value="">model default</option>
+        <option value="minimal">minimal</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+        <option value="xhigh">xhigh</option>
+        <option value="max">max</option>
+      </select>
+    </label>
+    <label>extra args <input id="set-args" placeholder="--num-ctx 65536"></label>
+    <div class="row">
+      <button id="set-save">Save</button>
+      <button id="set-config" class="secondary" title="Providers (vLLM, cloud APIs), permissions, hooks and more live in rift's own config">Edit rift config file…</button>
+      <button id="set-close" class="secondary">Close</button>
+    </div>
+  </div>
+  <div id="composer">
+    <textarea id="input" rows="1"
+      placeholder="Ask rift… (@file attaches, Enter sends, Shift+Enter newline)"></textarea>
+    <button id="btn-send" title="Send">➤</button>
+    <button id="btn-stop" title="Stop this turn" class="hidden">■</button>
+  </div>
+  <div id="footer">
+    <select id="model-select" title="Model — switching keeps the conversation"></select>
+    <span>
+      <button id="btn-refresh" title="Refresh model list">⟳</button>
+      <button id="btn-settings" title="Settings">⚙</button>
+    </span>
+  </div>
+  <script nonce="${nonce}" src="${media('chat.js')}"></script>
+</body>
+</html>`;
+  }
+
+  post(msg, record = true) {
+    if (record) this.log.push(msg);
+    if (this.view) this.view.webview.postMessage(msg);
+  }
+
+  postStatus() {
+    const text = this.proc
+      ? `${this.model || 'starting…'}${this.busy ? ' · working' : ''}`
+      : 'not running — send a message to start';
+    // Status is derived state, not history: never recorded for replay.
+    if (this.view) {
+      this.view.webview.postMessage({ type: 'status', text, running: !!this.proc, busy: this.busy });
+    }
+  }
+
+  ensureServer(extraArgs = []) {
+    if (this.proc) return;
+    const cfg = config();
+    const bin = cfg.get('executablePath') || 'rift';
+    const cwdUri = workspaceRoot();
+    let proc;
+    try {
+      proc = cp.spawn(bin, ['--serve', ...riftArgs(), ...extraArgs], {
+        cwd: cwdUri ? cwdUri.fsPath : undefined,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      this.post({ type: 'rift', ev: { event: 'warning', text: `failed to launch ${bin}: ${e.message}` } });
+      return;
+    }
+    this.proc = proc;
+    this.stderrTail = [];
+    this.stdoutBuf = '';
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (chunk) => {
+      this.stdoutBuf += chunk;
+      let nl;
+      while ((nl = this.stdoutBuf.indexOf('\n')) >= 0) {
+        const line = this.stdoutBuf.slice(0, nl);
+        this.stdoutBuf = this.stdoutBuf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let ev;
+        try {
+          ev = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        this.onServerEvent(ev);
+      }
+    });
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (chunk) => {
+      for (const l of chunk.split('\n')) {
+        if (l.trim()) this.stderrTail.push(l);
+      }
+      this.stderrTail = this.stderrTail.slice(-15);
+    });
+    proc.on('error', (e) => {
+      this.proc = null;
+      this.busy = false;
+      this.post({
+        type: 'rift',
+        ev: { event: 'warning', text: `could not start '${bin}': ${e.message} — set rift.executablePath` },
+      });
+      this.postStatus();
+    });
+    proc.on('exit', (code) => {
+      this.proc = null;
+      this.busy = false;
+      if (code !== 0 && code != null) {
+        const tail = this.stderrTail.slice(-4).join('\n');
+        this.post({ type: 'rift', ev: { event: 'warning', text: `rift exited (code ${code})${tail ? '\n' + tail : ''}` } });
+      }
+      this.postStatus();
+    });
+    this.postStatus();
+  }
+
+  onServerEvent(ev) {
+    if (ev.event === 'ready') {
+      this.model = ev.model;
+    } else if (ev.event === 'done') {
+      this.busy = false;
+    }
+    // Thinking/content deltas are high-volume; replaying them is what makes
+    // the transcript reappear intact, so they are recorded like the rest.
+    this.post({ type: 'rift', ev });
+    this.postStatus();
+  }
+
+  write(cmd) {
+    if (this.proc && this.proc.stdin.writable) {
+      this.proc.stdin.write(JSON.stringify(cmd) + '\n');
+    }
+  }
+
+  onWebviewMessage(m) {
+    switch (m.type) {
+      case 'ready': {
+        // Fresh webview (first open, or re-created after a sidebar move):
+        // replay everything it missed.
+        for (const msg of this.log) this.view?.webview.postMessage(msg);
+        this.postStatus();
+        this.postSettings();
+        this.postModels();
+        break;
+      }
+      case 'send': {
+        this.ensureServer();
+        this.post({ type: 'userEcho', text: m.text });
+        this.busy = true;
+        this.write({ cmd: 'prompt', text: m.text });
+        this.postStatus();
+        break;
+      }
+      case 'answer':
+        this.write({ cmd: 'answer', id: m.id, text: m.text });
+        break;
+      case 'cancel':
+        this.write({ cmd: 'cancel' });
+        break;
+      case 'newSession':
+        this.restart([]);
+        break;
+      case 'continueSession':
+        this.restart(['--continue']);
+        break;
+      case 'refreshModels':
+        this.postModels();
+        break;
+      case 'setModel': {
+        config()
+          .update('model', m.model || undefined, vscode.ConfigurationTarget.Global)
+          .then(() => {
+            // Respawn resuming the same session: the conversation continues
+            // on the newly selected model (rift recomposes the system prompt).
+            if (this.proc) this.restart(['--continue']);
+            this.postSettings();
+          });
+        break;
+      }
+      case 'saveSettings': {
+        const cfg = config();
+        const args = (m.extraArgs || '').trim();
+        Promise.all([
+          cfg.update('executablePath', m.executablePath || undefined, vscode.ConfigurationTarget.Global),
+          cfg.update('host', m.host || undefined, vscode.ConfigurationTarget.Global),
+          cfg.update('effort', m.effort || undefined, vscode.ConfigurationTarget.Global),
+          cfg.update('extraArgs', args ? args.split(/\s+/) : undefined, vscode.ConfigurationTarget.Global),
+        ]).then(() => {
+          if (this.proc) this.restart(['--continue']);
+          this.postSettings();
+          this.postModels();
+        });
+        break;
+      }
+      case 'openConfig': {
+        const p = riftConfigPath();
+        if (!fs.existsSync(p)) {
+          fs.mkdirSync(path.dirname(p), { recursive: true });
+          fs.writeFileSync(
+            p,
+            JSON.stringify(
+              { providers: { vllm: { base_url: 'http://your-vllm-host:8000/v1' } } },
+              null,
+              2
+            ) + '\n'
+          );
+        }
+        vscode.window.showTextDocument(vscode.Uri.file(p));
+        break;
+      }
+    }
+  }
+
+  postSettings() {
+    const cfg = config();
+    if (this.view) {
+      this.view.webview.postMessage({
+        type: 'settings',
+        executablePath: cfg.get('executablePath') || '',
+        host: cfg.get('host') || '',
+        model: cfg.get('model') || '',
+        effort: cfg.get('effort') || '',
+        extraArgs: (cfg.get('extraArgs') || []).join(' '),
+      });
+    }
+  }
+
+  postModels() {
+    discoverModels().then((models) => {
+      if (this.view) {
+        this.view.webview.postMessage({
+          type: 'models',
+          models,
+          current: config().get('model') || '',
+        });
+      }
+    });
+  }
+
+  restart(extraArgs) {
+    if (this.proc) {
+      this.proc.kill();
+      this.proc = null;
+    }
+    this.busy = false;
+    this.log = [];
+    this.post({ type: 'reset' }, false);
+    this.ensureServer(extraArgs);
+  }
+
+  /** Append text to the chat input (Add File/Selection to Prompt). */
+  insert(text) {
+    this.post({ type: 'insert', text }, false);
+  }
+
+  dispose() {
+    if (this.proc) this.proc.kill();
+    this.proc = null;
+  }
+}
+
+// ── Integrated-terminal launcher (the original integration) ────────────────
+
+let riftTerminal = null;
+
+function quote(arg) {
+  return /^[A-Za-z0-9_@%+=:,.\/-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+function openRiftTerminal(flags = [], fresh = false) {
   if (riftTerminal && !fresh) {
     riftTerminal.show();
     return riftTerminal;
@@ -51,59 +431,58 @@ function openRift(flags = [], fresh = false) {
     riftTerminal.dispose();
     riftTerminal = null;
   }
+  const bin = config().get('executablePath') || 'rift';
+  const command = [bin, ...riftArgs(), ...flags].map(quote).join(' ');
   const term = vscode.window.createTerminal({ name: 'rift', cwd: workspaceRoot() });
-  term.sendText(riftCommand(flags), true);
+  term.sendText(command, true);
   term.show();
   riftTerminal = term;
-  launchedAt = Date.now();
   return term;
 }
 
-/** Type text into rift's input (no submit), waiting out TUI startup first. */
-function typeIntoRift(text) {
-  const term = openRift();
-  const wait = Math.max(0, launchedAt + STARTUP_MS - Date.now());
-  setTimeout(() => term.sendText(text, false), wait);
-}
+// ── Activation ──────────────────────────────────────────────────────────────
 
-/** Workspace-relative path for @-mentions; falls back to the full path for
- *  files outside the workspace. */
 function mentionPath(uri) {
   return vscode.workspace.asRelativePath(uri, false);
 }
 
 function activate(context) {
-  // A terminal closed by the user (or a rift /quit) must not be reused.
+  const chat = new RiftChatProvider(context);
   context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('rift.chatView', chat, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    chat,
     vscode.window.onDidCloseTerminal((t) => {
       if (t === riftTerminal) riftTerminal = null;
     })
   );
 
+  const addToChat = (text) => {
+    vscode.commands.executeCommand('rift.chatView.focus').then(() => chat.insert(text));
+  };
+
   context.subscriptions.push(
+    vscode.commands.registerCommand('rift.openChat', () => {
+      vscode.commands.executeCommand('rift.chatView.focus');
+    }),
     vscode.commands.registerCommand('rift.open', () => {
-      openRift();
+      openRiftTerminal();
     }),
-
     vscode.commands.registerCommand('rift.newSession', () => {
-      openRift([], true);
+      openRiftTerminal([], true);
     }),
-
     vscode.commands.registerCommand('rift.continueSession', () => {
-      openRift(['--continue'], true);
+      openRiftTerminal(['--continue'], true);
     }),
-
-    // Explorer context menu passes the clicked uri; from the palette or
-    // editor context menu, fall back to the active editor's file.
     vscode.commands.registerCommand('rift.addFileToPrompt', (uri) => {
       const target = uri || vscode.window.activeTextEditor?.document.uri;
       if (!target) {
         vscode.window.showWarningMessage('rift: no file to add — open a file first');
         return;
       }
-      typeIntoRift(`@${mentionPath(target)} `);
+      addToChat(`@${mentionPath(target)} `);
     }),
-
     vscode.commands.registerCommand('rift.addSelectionToPrompt', () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
@@ -112,21 +491,16 @@ function activate(context) {
       }
       const rel = mentionPath(editor.document.uri);
       const sel = editor.selection;
-      if (sel.isEmpty) {
-        typeIntoRift(`@${rel} `);
-      } else {
-        // The mention attaches the file; the line range rides along as plain
-        // text so the model knows where to look.
-        typeIntoRift(`@${rel} (lines ${sel.start.line + 1}-${sel.end.line + 1}) `);
-      }
+      addToChat(
+        sel.isEmpty ? `@${rel} ` : `@${rel} (lines ${sel.start.line + 1}-${sel.end.line + 1}) `
+      );
     })
   );
 
-  // One-click entry point in the status bar.
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.text = '$(terminal) rift';
-  status.tooltip = 'Open rift (reuses the running session if there is one)';
-  status.command = 'rift.open';
+  status.tooltip = 'Open the rift chat sidebar';
+  status.command = 'rift.openChat';
   status.show();
   context.subscriptions.push(status);
 }

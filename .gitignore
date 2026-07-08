@@ -12,3 +12,5 @@ bench/swebench/
 logs/
 # Packaged VS Code extension — built from vscode/ with vsce, not committed.
 *.vsix
+# macOS Finder metadata.
+.DS_Store
