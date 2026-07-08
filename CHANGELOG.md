@@ -3,6 +3,26 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.6.1 — 2026-07-07
+
+- **@-mention file picker in the VS Code chat**: typing `@` opens a popup of
+  workspace files and folders (keyboard navigation, live filtering, picking
+  a folder drills into it), fed by the extension host with junk directories
+  excluded — no more typing paths by hand
+- **Readable tool output in the VS Code chat**: a tool call's start and
+  result now fold into a single row (`✓ bash command=… → 100`), and clicking
+  it expands the full arguments and output in a scrollable block. Thinking
+  blocks auto-scroll while streaming (no more mid-line clipping), click to
+  expand, and thinking after a tool call starts a new block below it instead
+  of appending above out of order
+- **Undo from the chat**: new `{"cmd":"undo"}` in the `--serve` protocol
+  reverting the last turn's write/edit changes via the same journal as the
+  TUI's `/undo`, surfaced as an ↶ button in the chat header (bash-made
+  changes stay untracked, same as the TUI)
+- **install.sh: remove the old binary before installing** — overwriting it
+  in place kept the old inode, and macOS SIGKILLs binaries whose cached
+  code signature no longer matches
+
 ## v1.6.0 — 2026-07-07
 
 - **VS Code sidebar chat**: a full chat UI backed by a new `rift --serve`

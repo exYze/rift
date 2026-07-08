@@ -4,7 +4,7 @@
 //! human-readable diagnostics. The process exits when stdin closes.
 //!
 //! Commands:  {"cmd":"prompt","text":…} | {"cmd":"answer","id":…,"text":…}
-//!            | {"cmd":"cancel"}
+//!            | {"cmd":"cancel"} | {"cmd":"undo"}
 //! Events:    ready, history, iteration, thinking, content, tool_start,
 //!            tool_result, info, warning, plan, task_started, task_finished,
 //!            ask (answer it by id), done (always ends a turn).
@@ -59,6 +59,14 @@ fn event_json(ev: &AgentEvent) -> Value {
     }
 }
 
+/// Work items for the agent task. Undo runs there (not on the select loop)
+/// because the agent owns its `ToolCtx`, and routing through the same queue
+/// keeps it serialized with turns.
+enum ServeCmd {
+    Prompt(String, CancellationToken),
+    Undo,
+}
+
 pub async fn run_serve(
     mut agent: Agent,
     store: SessionStore,
@@ -67,7 +75,7 @@ pub async fn run_serve(
     resumed: Vec<rift_ollama::Message>,
 ) -> Result<()> {
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<(String, CancellationToken)>();
+    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<ServeCmd>();
     // Background-task events surface through the same channel, between turns.
     agent.ctx().bg().set_notify(ev_tx.clone());
     let cwd = std::env::current_dir()?.display().to_string();
@@ -78,16 +86,39 @@ pub async fn run_serve(
     let turn_ev = ev_tx.clone();
     let cwd_save = cwd.clone();
     let agent_task = tokio::spawn(async move {
-        while let Some((prompt, cancel)) = prompt_rx.recv().await {
-            if let Err(e) = agent.run_turn(&prompt, &turn_ev, &cancel).await {
-                let _ = turn_ev.send(AgentEvent::Warning(format!("error: {e:#}")));
-                let _ = turn_ev.send(AgentEvent::Done(TurnStats::default()));
+        while let Some(cmd) = prompt_rx.recv().await {
+            match cmd {
+                ServeCmd::Prompt(prompt, cancel) => {
+                    if let Err(e) = agent.run_turn(&prompt, &turn_ev, &cancel).await {
+                        let _ = turn_ev.send(AgentEvent::Warning(format!("error: {e:#}")));
+                        let _ = turn_ev.send(AgentEvent::Done(TurnStats::default()));
+                    }
+                    if let Err(e) = store.save(&agent.cfg.model, &cwd_save, &agent.messages) {
+                        let _ = turn_ev.send(AgentEvent::Warning(format!("session save failed: {e:#}")));
+                    }
+                    // Compact while the consumer renders the reply, not mid-turn.
+                    agent.idle_compact(&turn_ev).await;
+                }
+                // Same semantics as the TUI's /undo: revert the write/edit
+                // journal's most recent turn; conversation stays intact.
+                ServeCmd::Undo => {
+                    let ev = match agent.ctx().undo_last_turn() {
+                        Ok(restored) if restored.is_empty() => AgentEvent::Warning(
+                            "nothing to undo (only write/edit tool changes are tracked)".into(),
+                        ),
+                        Ok(restored) => {
+                            let mut out = String::from("restored to pre-turn state:\n");
+                            for p in &restored {
+                                out.push_str(&format!("  {}\n", p.display()));
+                            }
+                            out.push_str("(note: changes made via bash are not tracked)");
+                            AgentEvent::Info(out)
+                        }
+                        Err(e) => AgentEvent::Warning(format!("undo failed: {e:#}")),
+                    };
+                    let _ = turn_ev.send(ev);
+                }
             }
-            if let Err(e) = store.save(&agent.cfg.model, &cwd_save, &agent.messages) {
-                let _ = turn_ev.send(AgentEvent::Warning(format!("session save failed: {e:#}")));
-            }
-            // Compact while the consumer renders the reply, not mid-turn.
-            agent.idle_compact(&turn_ev).await;
         }
     });
     drop(ev_tx);
@@ -176,7 +207,7 @@ pub async fn run_serve(
                         let cancel = CancellationToken::new();
                         current_cancel = Some(cancel.clone());
                         busy = true;
-                        let _ = prompt_tx.send((text, cancel));
+                        let _ = prompt_tx.send(ServeCmd::Prompt(text, cancel));
                     }
                     Some("answer") => {
                         let id = v["id"].as_u64().unwrap_or(0);
@@ -189,7 +220,16 @@ pub async fn run_serve(
                             c.cancel();
                         }
                     }
-                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/cancel)"})),
+                    Some("undo") => {
+                        // Mid-turn undo would race the agent's own writes;
+                        // the TUI has the same restriction (input is modal).
+                        if busy {
+                            emit(json!({"event": "warning", "text": "turn in progress — cancel it or wait before undoing"}));
+                            continue;
+                        }
+                        let _ = prompt_tx.send(ServeCmd::Undo);
+                    }
+                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/cancel/undo)"})),
                 }
             }
         }

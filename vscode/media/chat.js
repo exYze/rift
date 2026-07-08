@@ -16,6 +16,8 @@
   let thinkingEl = null;
   /** The plan checklist element, updated in place across the session. */
   let planEl = null;
+  /** Tool row awaiting its result — tool_result folds into the same row. */
+  let pendingTool = null;
 
   function esc(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -85,6 +87,26 @@
     assistantEl = null;
     assistantRaw = '';
     thinkingEl = null;
+    pendingTool = null;
+  }
+
+  /** One tool call = one row: an ellipsized head line that folds the result
+   *  in when it arrives, and a click-to-expand body with full args/output. */
+  function toolRow(name, summary, full) {
+    const el = document.createElement('div');
+    el.className = 'tool';
+    const head = document.createElement('div');
+    head.className = 'tool-head';
+    head.title = 'click to expand';
+    head.textContent = `→ ${name} ${summary}`;
+    const body = document.createElement('div');
+    body.className = 'tool-body hidden';
+    body.textContent = full;
+    head.addEventListener('click', () => body.classList.toggle('hidden'));
+    el.appendChild(head);
+    el.appendChild(body);
+    add(el);
+    return { el, head, body, name, summary };
   }
 
   function userBubble(text) {
@@ -205,27 +227,54 @@
         if (!thinkingEl) {
           thinkingEl = document.createElement('div');
           thinkingEl.className = 'thinking';
+          thinkingEl.title = 'click to expand';
+          thinkingEl.addEventListener('click', function () {
+            this.classList.toggle('expanded');
+          });
           add(thinkingEl);
         }
         const stick = atBottom();
         thinkingEl.textContent += ev.text;
+        // Keep the newest reasoning visible inside the capped block —
+        // without this the tail hides below the fold, clipped mid-line.
+        thinkingEl.scrollTop = thinkingEl.scrollHeight;
         if (stick) messages.scrollTop = messages.scrollHeight;
         break;
       }
       case 'tool_start': {
         assistantEl = null;
         assistantRaw = '';
-        let args = ev.args;
+        // Thinking that follows a tool call starts a fresh block *below*
+        // the tool row instead of appending above it out of order.
+        thinkingEl = null;
+        let summary = ev.args;
+        let full = ev.args;
         try {
-          const o = JSON.parse(args);
-          args = Object.entries(o).map(([k, v]) => `${k}=${String(v).slice(0, 60)}`).join(' ');
+          const o = JSON.parse(ev.args);
+          summary = Object.entries(o).map(([k, v]) => `${k}=${String(v).slice(0, 60)}`).join(' ');
+          full = Object.entries(o).map(([k, v]) => `${k} = ${v}`).join('\n');
         } catch { /* show raw */ }
-        line('tool', `→ ${ev.name} ${args}`);
+        pendingTool = toolRow(ev.name, summary, full);
         break;
       }
-      case 'tool_result':
-        line(ev.ok ? 'tool' : 'tool err', `${ev.ok ? '✓' : '✗'} ${ev.name} ${ev.preview || ''}`);
+      case 'tool_result': {
+        const preview = (ev.preview || '').replace(/\s+$/, '');
+        const first = preview.split('\n')[0].slice(0, 80);
+        if (pendingTool && pendingTool.name === ev.name) {
+          const t = pendingTool;
+          pendingTool = null;
+          t.el.classList.toggle('err', !ev.ok);
+          t.head.textContent =
+            `${ev.ok ? '✓' : '✗'} ${ev.name} ${t.summary}${first ? ' → ' + first : ''}`;
+          if (preview) t.body.textContent += '\n── result ──\n' + preview;
+        } else {
+          // Result with no open start row (e.g. background task): own row.
+          const t = toolRow(ev.name, first, preview);
+          t.el.classList.toggle('err', !ev.ok);
+          t.head.textContent = `${ev.ok ? '✓' : '✗'} ${ev.name} ${first}`;
+        }
         break;
+      }
       case 'ask':
         askCard(ev);
         break;
@@ -257,6 +306,99 @@
       }
     }
   }
+
+  // ── @-mention file completion ─────────────────────────────────────────────
+  // Typing "@" (at the start or after whitespace) opens a popup of workspace
+  // paths from the extension host, filtered live as the token grows.
+  const mentionPopup = document.getElementById('mention-popup');
+  /** Active token: start = index of the '@' in the input value. */
+  let mention = null;
+  let mentionItems = [];
+  let mentionSel = 0;
+  let mentionToken = 0;
+  let mentionTimer = null;
+
+  function mentionContext() {
+    const pos = input.selectionStart;
+    const m = input.value.slice(0, pos).match(/(?:^|\s)@([^\s@]*)$/);
+    return m ? { start: pos - m[1].length - 1, query: m[1] } : null;
+  }
+
+  function closeMention() {
+    mention = null;
+    mentionItems = [];
+    mentionPopup.innerHTML = '';
+    mentionPopup.classList.add('hidden');
+  }
+
+  function updateMention() {
+    const ctx = mentionContext();
+    if (!ctx) return closeMention();
+    mention = ctx;
+    const token = ++mentionToken;
+    clearTimeout(mentionTimer);
+    mentionTimer = setTimeout(
+      () => vscode.postMessage({ type: 'queryFiles', query: ctx.query, token }),
+      60
+    );
+  }
+
+  function renderMention() {
+    mentionPopup.innerHTML = '';
+    if (!mention || !mentionItems.length) {
+      mentionPopup.classList.add('hidden');
+      return;
+    }
+    mentionItems.forEach((it, i) => {
+      const row = document.createElement('div');
+      row.className = 'mention-item' + (i === mentionSel ? ' selected' : '');
+      const slash = it.path.lastIndexOf('/');
+      const name = document.createElement('span');
+      name.className = 'mi-name';
+      name.textContent = it.path.slice(slash + 1) + (it.dir ? '/' : '');
+      row.appendChild(name);
+      if (slash > 0) {
+        const dir = document.createElement('span');
+        dir.className = 'mi-dir';
+        dir.textContent = it.path.slice(0, slash);
+        row.appendChild(dir);
+      }
+      // mousedown (not click) so the textarea never loses focus.
+      row.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        pickMention(i);
+      });
+      row.addEventListener('mousemove', () => {
+        if (mentionSel !== i) {
+          mentionSel = i;
+          renderMention();
+        }
+      });
+      mentionPopup.appendChild(row);
+    });
+    mentionPopup.classList.remove('hidden');
+    const sel = mentionPopup.children[mentionSel];
+    if (sel) sel.scrollIntoView({ block: 'nearest' });
+  }
+
+  function pickMention(i) {
+    const it = mentionItems[i];
+    if (!it || !mention) return;
+    const end = input.selectionStart;
+    const text = '@' + it.path + (it.dir ? '/' : ' ');
+    input.value = input.value.slice(0, mention.start) + text + input.value.slice(end);
+    const caret = mention.start + text.length;
+    input.setSelectionRange(caret, caret);
+    input.focus();
+    autosize();
+    // Picking a folder keeps the popup open to drill into it; a file closes it.
+    if (it.dir) updateMention();
+    else closeMention();
+  }
+
+  mentionPopup.addEventListener('mousedown', (e) => e.preventDefault());
+  input.addEventListener('blur', closeMention);
+  input.addEventListener('click', updateMention);
 
   const modelSelect = document.getElementById('model-select');
   const settingsPanel = document.getElementById('settings');
@@ -295,10 +437,18 @@
       input.value += m.text;
       input.focus();
       autosize();
+      updateMention();
     } else if (m.type === 'reset') {
       messages.innerHTML = '';
       closeTurnBlocks();
       planEl = null;
+    } else if (m.type === 'files') {
+      // Stale responses (an older keystroke's query) are dropped by token.
+      if (m.token === mentionToken && mention) {
+        mentionItems = m.results;
+        mentionSel = 0;
+        renderMention();
+      }
     } else if (m.type === 'models') {
       renderModels(m.models, m.current);
     } else if (m.type === 'settings') {
@@ -313,6 +463,7 @@
   function send() {
     const text = input.value.trim();
     if (!text) return;
+    closeMention();
     vscode.postMessage({ type: 'send', text });
     input.value = '';
     autosize();
@@ -324,14 +475,37 @@
   }
 
   input.addEventListener('keydown', (e) => {
+    if (mention && mentionItems.length && !mentionPopup.classList.contains('hidden')) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const n = mentionItems.length;
+        mentionSel = (mentionSel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        renderMention();
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        pickMention(mentionSel);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeMention();
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       send();
     }
   });
-  input.addEventListener('input', autosize);
+  input.addEventListener('input', () => {
+    autosize();
+    updateMention();
+  });
   btnSend.addEventListener('click', send);
   btnStop.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
+  document.getElementById('btn-undo').addEventListener('click', () => vscode.postMessage({ type: 'undo' }));
   document.getElementById('btn-new').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
   document.getElementById('btn-continue').addEventListener('click', () => vscode.postMessage({ type: 'continueSession' }));
 

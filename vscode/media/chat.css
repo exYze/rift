@@ -90,15 +90,34 @@ body { display: flex; flex-direction: column; }
   white-space: pre-wrap;
   border-left: 2px solid var(--vscode-panel-border, rgba(128,128,128,.4));
   padding-left: 8px;
+  cursor: pointer;
 }
+.thinking.expanded { max-height: none; }
 
 .tool {
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 0.85em;
   opacity: 0.7;
+}
+.tool .tool-head {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.tool .tool-head:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.15));
+}
+.tool .tool-body {
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--vscode-textCodeBlock-background, rgba(128,128,128,.15));
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-top: 2px;
 }
 .tool.err { color: var(--vscode-errorForeground, #f66); opacity: 0.95; }
 
@@ -164,12 +183,50 @@ body { display: flex; flex-direction: column; }
 .plan .done { opacity: 0.55; text-decoration: line-through; }
 
 #composer {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 4px;
   padding: 6px 8px;
   border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25));
   flex: 0 0 auto;
+}
+
+#mention-popup {
+  position: absolute;
+  bottom: 100%;
+  left: 8px;
+  right: 8px;
+  margin-bottom: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+  background: var(--vscode-editorWidget-background, var(--vscode-input-background));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, rgba(128,128,128,.35)));
+  border-radius: 6px;
+  box-shadow: 0 -4px 12px rgba(0,0,0,.25);
+  z-index: 10;
+}
+.mention-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  font-size: 0.9em;
+}
+.mention-item .mi-name { flex: 0 0 auto; }
+.mention-item .mi-dir {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.55;
+  font-size: 0.88em;
+}
+.mention-item.selected {
+  background: var(--vscode-list-activeSelectionBackground, rgba(0,127,212,.35));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
 }
 #input {
   flex: 1 1 auto;

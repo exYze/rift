@@ -54,6 +54,10 @@ main() {
     trap 'rm -rf "$tmp"' EXIT
     curl -fsSL "$url" | tar xz -C "$tmp"
     chmod +x "$tmp/rift"
+    # Remove any previous binary first: overwriting it in place (which mv
+    # does when $tmp is on another filesystem) keeps the old inode, and
+    # macOS kills binaries whose cached code signature no longer matches.
+    rm -f "$install_dir/rift"
     mv "$tmp/rift" "$install_dir/rift"
 
     echo "installed $("$install_dir/rift" --version) to $install_dir/rift"

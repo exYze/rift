@@ -147,6 +147,7 @@ class RiftChatProvider {
   <div id="header">
     <span id="status">rift</span>
     <span id="header-buttons">
+      <button id="btn-undo" title="Undo last turn's file edits (bash changes not tracked)">↶</button>
       <button id="btn-new" title="New session">＋</button>
       <button id="btn-continue" title="Continue last session">↻</button>
     </span>
@@ -174,6 +175,7 @@ class RiftChatProvider {
     </div>
   </div>
   <div id="composer">
+    <div id="mention-popup" class="hidden"></div>
     <textarea id="input" rows="1"
       placeholder="Ask rift… (@file attaches, Enter sends, Shift+Enter newline)"></textarea>
     <button id="btn-send" title="Send">➤</button>
@@ -312,6 +314,10 @@ class RiftChatProvider {
       case 'cancel':
         this.write({ cmd: 'cancel' });
         break;
+      case 'undo':
+        if (this.proc) this.write({ cmd: 'undo' });
+        else this.post({ type: 'rift', ev: { event: 'warning', text: 'nothing to undo — rift is not running' } });
+        break;
       case 'newSession':
         this.restart([]);
         break;
@@ -320,6 +326,9 @@ class RiftChatProvider {
         break;
       case 'refreshModels':
         this.postModels();
+        break;
+      case 'queryFiles':
+        this.postFiles(m.query, m.token);
         break;
       case 'setModel': {
         config()
@@ -376,6 +385,64 @@ class RiftChatProvider {
         model: cfg.get('model') || '',
         effort: cfg.get('effort') || '',
         extraArgs: (cfg.get('extraArgs') || []).join(' '),
+      });
+    }
+  }
+
+  /** Workspace paths for @-mention completion: every file findFiles returns
+   *  plus each ancestor directory, cached briefly so a burst of keystrokes
+   *  runs one scan. */
+  async fileIndex() {
+    const now = Date.now();
+    if (this.fileEntries && now - this.fileEntriesAt < 15000) return this.fileEntries;
+    const exclude =
+      '**/{node_modules,.git,target,dist,build,out,.next,__pycache__,.venv,venv,vendor}/**';
+    let uris = [];
+    try {
+      uris = await vscode.workspace.findFiles('**/*', exclude, 5000);
+    } catch {
+      /* no workspace open */
+    }
+    const dirs = new Set();
+    const entries = [];
+    for (const u of uris) {
+      const rel = vscode.workspace.asRelativePath(u, false);
+      entries.push({ path: rel, dir: false });
+      for (let i = rel.lastIndexOf('/'); i > 0; i = rel.lastIndexOf('/', i - 1)) {
+        dirs.add(rel.slice(0, i));
+      }
+    }
+    for (const d of dirs) entries.push({ path: d, dir: true });
+    this.fileEntries = entries;
+    this.fileEntriesAt = now;
+    return entries;
+  }
+
+  async postFiles(query, token) {
+    const entries = await this.fileIndex();
+    const q = (query || '').toLowerCase();
+    const scored = [];
+    for (const e of entries) {
+      const p = e.path.toLowerCase();
+      const base = p.slice(p.lastIndexOf('/') + 1);
+      let s = 0;
+      if (!q) s = 1;
+      else if (base === q) s = 6;
+      else if (base.startsWith(q)) s = 5;
+      else if (base.includes(q)) s = 4;
+      else if (p.startsWith(q)) s = 3;
+      else if (p.includes(q)) s = 2;
+      if (s) scored.push({ e, s, depth: e.path.split('/').length });
+    }
+    scored.sort(
+      (a, b) =>
+        b.s - a.s || a.depth - b.depth || b.e.dir - a.e.dir || a.e.path.localeCompare(b.e.path)
+    );
+    if (this.view) {
+      this.view.webview.postMessage({
+        type: 'files',
+        token,
+        results: scored.slice(0, 50).map(({ e }) => e),
       });
     }
   }
