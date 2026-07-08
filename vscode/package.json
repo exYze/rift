@@ -2,7 +2,7 @@
   "name": "rift-vscode",
   "displayName": "Rift",
   "description": "Rift — a fast terminal coding agent for local Ollama models, integrated into VS Code",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "publisher": "exYze",
   "license": "MIT",
   "repository": {
@@ -131,13 +131,20 @@
           "default": "",
           "description": "Reasoning effort for thinking models, passed as --effort (empty = the model's own default)."
         },
-        "rift.extraArgs": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra command-line arguments appended to every rift launch (e.g. [\"--effort\", \"high\"])."
+        "rift.numCtx": {
+          "type": ["number", "null"],
+          "default": null,
+          "description": "Context window to request per call, passed as --num-ctx (empty = rift's default, 32768)."
+        },
+        "rift.temperature": {
+          "type": ["number", "null"],
+          "default": null,
+          "description": "Sampling temperature, passed as --temp (empty = rift's default, 0.2; low keeps tool calling reliable)."
+        },
+        "rift.maxIterations": {
+          "type": ["number", "null"],
+          "default": null,
+          "description": "Max agent-loop iterations per turn, passed as --max-iterations (empty = rift's default, 25)."
         }
       }
     }

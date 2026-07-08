@@ -3,6 +3,21 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.6.3 — 2026-07-07
+
+- **Instant hover tooltips in the VS Code chat**: every control shows a
+  styled, theme-aware hover box immediately (native `title` tooltips were
+  delayed and easy to miss on small icon buttons), with fuller descriptions
+  of what each button actually does; icon buttons got bigger hit areas
+- **Full-view settings panel**: the ⚙ settings are now an overlay covering
+  the chat with one labeled field per option — binary path, server URL,
+  context window (`--num-ctx`), temperature (`--temp`), max iterations
+  (`--max-iterations`), reasoning effort — each with an explanatory
+  tooltip. New VS Code settings: `rift.numCtx`, `rift.temperature`,
+  `rift.maxIterations`
+- **Removed `rift.extraArgs`**: the raw pass-through is superseded by the
+  dedicated fields above
+
 ## v1.6.2 — 2026-07-07
 
 - **Syntax highlighting in the VS Code chat**: fenced code blocks render

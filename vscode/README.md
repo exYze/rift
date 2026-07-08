@@ -47,8 +47,9 @@ under the input lists every model rift can currently reach — the default
 host's models (Ollama or an OpenAI-style server like vLLM) plus every
 provider configured in rift's own config, as `provider/model` entries.
 Switching models restarts the session with `--continue`, so the
-conversation carries over. The **⚙ gear** opens a settings panel for the
-binary path, server URL, and extra args; "Edit rift config file…" opens
+conversation carries over. The **⚙ gear** opens a full-view settings panel with
+a field per option — binary path, server URL, context window, temperature,
+max iterations, reasoning effort; "Edit rift config file…" opens
 `~/.config/rift/config.json` for everything else (providers, permissions,
 hooks).
 
@@ -60,7 +61,9 @@ The same values are exposed as VS Code settings:
 | `rift.host` | *(empty)* | Server URL, passed as `--host` (Ollama, or `…/v1` for vLLM/LM Studio) |
 | `rift.model` | *(empty)* | Model, passed as `--model` (supports `provider/model` prefixes) |
 | `rift.effort` | *(empty)* | Reasoning effort for thinking models (`minimal`…`max`), passed as `--effort` |
-| `rift.extraArgs` | `[]` | Extra CLI args on every launch |
+| `rift.numCtx` | *(empty)* | Context window per call, passed as `--num-ctx` |
+| `rift.temperature` | *(empty)* | Sampling temperature, passed as `--temp` |
+| `rift.maxIterations` | *(empty)* | Max agent-loop iterations per turn, passed as `--max-iterations` |
 
 Empty settings defer to rift's own defaults and `.rift.json` config, so an
 existing rift setup needs no configuration here at all.

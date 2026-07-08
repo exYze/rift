@@ -50,8 +50,8 @@
       '<div class="codeblock">' +
       `<div class="cb-bar"><span class="cb-lang">${esc(lang || '')}</span>` +
       '<span class="cb-actions">' +
-      '<button class="cb-copy" title="Copy to clipboard">copy</button>' +
-      '<button class="cb-insert" title="Insert at cursor (replaces selection)">insert</button>' +
+      '<button class="cb-copy" data-tip="Copy this code to the clipboard">copy</button>' +
+      '<button class="cb-insert" data-tip="Insert this code at the cursor in the active editor (replaces the selection, if any)">insert</button>' +
       '</span></div>' +
       `<pre><code class="hljs">${html}</code></pre></div>`
     );
@@ -162,7 +162,7 @@
     el.className = 'tool';
     const head = document.createElement('div');
     head.className = 'tool-head';
-    head.title = 'click to expand';
+    head.setAttribute('data-tip', 'Tool call — click to show the full command and output');
     head.textContent = `→ ${name} ${summary}`;
     const body = document.createElement('div');
     body.className = 'tool-body hidden';
@@ -292,7 +292,7 @@
         if (!thinkingEl) {
           thinkingEl = document.createElement('div');
           thinkingEl.className = 'thinking';
-          thinkingEl.title = 'click to expand';
+          thinkingEl.setAttribute('data-tip', "The model's reasoning — click to expand or collapse");
           thinkingEl.addEventListener('click', function () {
             this.classList.toggle('expanded');
           });
@@ -470,7 +470,9 @@
   const setBin = document.getElementById('set-bin');
   const setHost = document.getElementById('set-host');
   const setEffort = document.getElementById('set-effort');
-  const setArgs = document.getElementById('set-args');
+  const setNumCtx = document.getElementById('set-numctx');
+  const setTemp = document.getElementById('set-temp');
+  const setIters = document.getElementById('set-iters');
 
   function renderModels(models, current) {
     modelSelect.innerHTML = '';
@@ -520,7 +522,9 @@
       setBin.value = m.executablePath;
       setHost.value = m.host;
       setEffort.value = m.effort || '';
-      setArgs.value = m.extraArgs;
+      setNumCtx.value = m.numCtx;
+      setTemp.value = m.temperature;
+      setIters.value = m.maxIterations;
       if (m.model !== undefined && modelSelect.options.length) modelSelect.value = m.model;
     }
   });
@@ -592,13 +596,50 @@
       executablePath: setBin.value.trim(),
       host: setHost.value.trim(),
       effort: setEffort.value,
-      extraArgs: setArgs.value.trim(),
+      numCtx: setNumCtx.value.trim(),
+      temperature: setTemp.value.trim(),
+      maxIterations: setIters.value.trim(),
     });
     settingsPanel.classList.add('hidden');
   });
   document.getElementById('set-config').addEventListener('click', () => {
     vscode.postMessage({ type: 'openConfig' });
   });
+
+  // ── Tooltips ───────────────────────────────────────────────────────────────
+  // One floating box for every [data-tip] element, shown instantly on hover
+  // (native title tooltips are delayed and easy to miss on small buttons).
+  const tip = document.createElement('div');
+  tip.id = 'tooltip';
+  tip.className = 'hidden';
+  document.body.appendChild(tip);
+  let tipTarget = null;
+
+  function hideTip() {
+    tipTarget = null;
+    tip.classList.add('hidden');
+  }
+
+  document.addEventListener('mouseover', (e) => {
+    const t = e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (t === tipTarget) return;
+    if (!t) return hideTip();
+    tipTarget = t;
+    tip.textContent = t.getAttribute('data-tip');
+    tip.classList.remove('hidden');
+    // Position after content is set so measurements are real: centered
+    // above the element, clamped to the viewport, flipped below if needed.
+    const r = t.getBoundingClientRect();
+    const x = Math.max(4, Math.min(r.left + r.width / 2 - tip.offsetWidth / 2, window.innerWidth - tip.offsetWidth - 4));
+    let y = r.top - tip.offsetHeight - 6;
+    if (y < 4) y = r.bottom + 6;
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+  });
+  // A click usually changes state (send, expand, undo) — stale tips linger
+  // over the new state, so drop them; scrolling moves the anchor away.
+  document.addEventListener('mousedown', hideTip);
+  messages.addEventListener('scroll', hideTip);
 
   vscode.postMessage({ type: 'ready' });
 })();

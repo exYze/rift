@@ -98,7 +98,12 @@ function riftArgs() {
   if (model) args.push('--model', model);
   const effort = cfg.get('effort');
   if (effort) args.push('--effort', effort);
-  args.push(...(cfg.get('extraArgs') || []));
+  const numCtx = cfg.get('numCtx');
+  if (typeof numCtx === 'number') args.push('--num-ctx', String(numCtx));
+  const temp = cfg.get('temperature');
+  if (typeof temp === 'number') args.push('--temp', String(temp));
+  const iters = cfg.get('maxIterations');
+  if (typeof iters === 'number') args.push('--max-iterations', String(iters));
   return args;
 }
 
@@ -147,16 +152,34 @@ class RiftChatProvider {
   <div id="header">
     <span id="status">rift</span>
     <span id="header-buttons">
-      <button id="btn-undo" title="Undo last turn's file edits (bash changes not tracked)">↶</button>
-      <button id="btn-new" title="New session">＋</button>
-      <button id="btn-continue" title="Continue last session">↻</button>
+      <button id="btn-undo" data-tip="Undo — revert the file edits from the last turn (changes made via bash are not tracked)">↶</button>
+      <button id="btn-new" data-tip="New session — clear this conversation and start fresh">＋</button>
+      <button id="btn-continue" data-tip="Continue — restart rift and resume your last saved session">↻</button>
     </span>
   </div>
   <div id="messages"></div>
   <div id="settings" class="hidden">
-    <label>rift binary <input id="set-bin" placeholder="rift"></label>
-    <label>server URL <input id="set-host" placeholder="http://localhost:11434 (Ollama) or http://host:8000/v1 (vLLM)"></label>
-    <label>reasoning effort
+    <div id="settings-head">
+      <span>Settings</span>
+      <button id="set-close" data-tip="Close without saving">✕</button>
+    </div>
+    <label data-tip="Path to the rift executable — leave empty if 'rift' is on your PATH">
+      <span>rift binary</span><input id="set-bin" placeholder="rift">
+    </label>
+    <label data-tip="The model server rift talks to: an Ollama URL, or an OpenAI-style one ending in /v1 (vLLM). Empty = rift's own config">
+      <span>server URL</span><input id="set-host" placeholder="http://localhost:11434 or http://host:8000/v1">
+    </label>
+    <label data-tip="Tokens of context requested per call (--num-ctx). On Ollama this sizes the server's KV cache">
+      <span>context window</span><input id="set-numctx" type="number" min="1024" step="1024" placeholder="32768">
+    </label>
+    <label data-tip="Sampling temperature (--temp). Low values keep tool calling reliable">
+      <span>temperature</span><input id="set-temp" type="number" min="0" max="2" step="0.1" placeholder="0.2">
+    </label>
+    <label data-tip="Max agent-loop iterations (tool calls) per turn (--max-iterations)">
+      <span>max iterations</span><input id="set-iters" type="number" min="1" placeholder="25">
+    </label>
+    <label data-tip="How much thinking models reason before answering (--effort)">
+      <span>reasoning effort</span>
       <select id="set-effort">
         <option value="">model default</option>
         <option value="minimal">minimal</option>
@@ -167,25 +190,24 @@ class RiftChatProvider {
         <option value="max">max</option>
       </select>
     </label>
-    <label>extra args <input id="set-args" placeholder="--num-ctx 65536"></label>
     <div class="row">
-      <button id="set-save">Save</button>
-      <button id="set-config" class="secondary" title="Providers (vLLM, cloud APIs), permissions, hooks and more live in rift's own config">Edit rift config file…</button>
-      <button id="set-close" class="secondary">Close</button>
+      <button id="set-save" data-tip="Save — applies immediately; a running session restarts and resumes">Save</button>
+      <button id="set-config" class="secondary" data-tip="Providers (vLLM, cloud APIs), permissions, hooks and more live in rift's own config">Edit rift config file…</button>
     </div>
+    <p class="settings-note">Empty fields fall back to rift's own config file, then its built-in defaults.</p>
   </div>
   <div id="composer">
     <div id="mention-popup" class="hidden"></div>
     <textarea id="input" rows="1"
       placeholder="Ask rift… (@file attaches, Enter sends, Shift+Enter newline)"></textarea>
-    <button id="btn-send" title="Send">➤</button>
-    <button id="btn-stop" title="Stop this turn" class="hidden">■</button>
+    <button id="btn-send" data-tip="Send message (Enter)">➤</button>
+    <button id="btn-stop" data-tip="Stop — cancel the turn in progress" class="hidden">■</button>
   </div>
   <div id="footer">
-    <select id="model-select" title="Model — switching keeps the conversation"></select>
+    <select id="model-select" data-tip="Model — switching keeps the current conversation"></select>
     <span>
-      <button id="btn-refresh" title="Refresh model list">⟳</button>
-      <button id="btn-settings" title="Settings">⚙</button>
+      <button id="btn-refresh" data-tip="Refresh the model list from your servers">⟳</button>
+      <button id="btn-settings" data-tip="Settings — binary path, server URL, reasoning effort">⚙</button>
     </span>
   </div>
   <script nonce="${nonce}" src="${media('highlight.min.js')}"></script>
@@ -357,12 +379,19 @@ class RiftChatProvider {
       }
       case 'saveSettings': {
         const cfg = config();
-        const args = (m.extraArgs || '').trim();
+        // Number fields arrive as input strings; empty/garbage clears back
+        // to rift's own default.
+        const num = (v) => {
+          const n = Number(v);
+          return v !== '' && v != null && isFinite(n) ? n : undefined;
+        };
         Promise.all([
           cfg.update('executablePath', m.executablePath || undefined, vscode.ConfigurationTarget.Global),
           cfg.update('host', m.host || undefined, vscode.ConfigurationTarget.Global),
           cfg.update('effort', m.effort || undefined, vscode.ConfigurationTarget.Global),
-          cfg.update('extraArgs', args ? args.split(/\s+/) : undefined, vscode.ConfigurationTarget.Global),
+          cfg.update('numCtx', num(m.numCtx), vscode.ConfigurationTarget.Global),
+          cfg.update('temperature', num(m.temperature), vscode.ConfigurationTarget.Global),
+          cfg.update('maxIterations', num(m.maxIterations), vscode.ConfigurationTarget.Global),
         ]).then(() => {
           if (this.proc) this.restart(['--continue']);
           this.postSettings();
@@ -398,7 +427,9 @@ class RiftChatProvider {
         host: cfg.get('host') || '',
         model: cfg.get('model') || '',
         effort: cfg.get('effort') || '',
-        extraArgs: (cfg.get('extraArgs') || []).join(' '),
+        numCtx: cfg.get('numCtx') ?? '',
+        temperature: cfg.get('temperature') ?? '',
+        maxIterations: cfg.get('maxIterations') ?? '',
       });
     }
   }

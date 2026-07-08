@@ -31,8 +31,8 @@ body { display: flex; flex-direction: column; }
   color: var(--vscode-foreground);
   border: none;
   cursor: pointer;
-  font-size: 1em;
-  padding: 2px 6px;
+  font-size: 1.05em;
+  padding: 4px 8px;
   border-radius: 4px;
 }
 #header button:hover, #composer button:hover {
@@ -330,7 +330,7 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
   color: var(--vscode-foreground);
   border: none;
   cursor: pointer;
-  padding: 2px 5px;
+  padding: 4px 7px;
   border-radius: 4px;
 }
 #footer button:hover {
@@ -338,20 +338,47 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
 }
 
 #settings {
-  flex: 0 0 auto;
-  border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25));
-  padding: 8px;
+  /* Covers the whole chat view: settings are modal, not a squeezed-in strip. */
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background, #1e1e1e));
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
+  overflow-y: auto;
   font-size: 0.9em;
 }
-#settings label {
+#settings-head {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  opacity: 0.9;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25));
 }
+#settings-head button {
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: none;
+  cursor: pointer;
+  font-size: 1em;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+#settings-head button:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.2));
+}
+#settings label {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.95;
+}
+#settings label > span { opacity: 0.85; }
+.settings-note { margin: 2px 0 0; opacity: 0.55; font-size: 0.9em; }
 #settings input, #settings select {
   background: var(--vscode-input-background);
   color: var(--vscode-input-foreground);
@@ -372,6 +399,21 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
 #settings button.secondary {
   background: var(--vscode-button-secondaryBackground, rgba(128,128,128,.25));
   color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+#tooltip {
+  position: fixed;
+  z-index: 100;
+  max-width: 260px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background, #252526));
+  color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorHoverWidget-border, rgba(128,128,128,.35));
+  box-shadow: 0 2px 8px rgba(0,0,0,.25);
+  font-size: 0.85em;
+  line-height: 1.4;
+  pointer-events: none;
 }
 
 .hidden { display: none !important; }
