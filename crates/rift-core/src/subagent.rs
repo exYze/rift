@@ -297,8 +297,8 @@ fn final_text(agent: &Agent) -> Option<String> {
         .map(|m| m.content.trim().to_string())
 }
 
-/// Mirror a child's tool activity into the frontend's activity log as tagged
-/// Info lines. Content/thinking streams are skipped — N concurrent children
+/// Mirror a child's tool activity into the frontend as tagged sub-agent
+/// events. Content/thinking streams are skipped — N concurrent children
 /// streaming prose would drown the log.
 fn spawn_forwarder(
     mut rx: mpsc::UnboundedReceiver<AgentEvent>,
@@ -307,21 +307,31 @@ fn spawn_forwarder(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            let line = match ev {
+            let fwd = match ev {
                 AgentEvent::ToolStart { name, args } => {
                     let args: String = args.chars().take(80).collect();
-                    Some(format!("[{tag}] → {name} {args}"))
+                    AgentEvent::SubAgentActivity {
+                        tag: tag.clone(),
+                        text: format!("→ {name} {args}"),
+                        warn: false,
+                    }
                 }
-                AgentEvent::ToolResult { name, ok, .. } => {
-                    Some(format!("[{tag}] {} {name}", if ok { '✓' } else { '✗' }))
+                AgentEvent::ToolResult { name, ok, .. } => AgentEvent::SubAgentActivity {
+                    tag: tag.clone(),
+                    text: format!("{} {name}", if ok { '✓' } else { '✗' }),
+                    warn: false,
+                },
+                AgentEvent::Warning(w) => AgentEvent::SubAgentActivity {
+                    tag: tag.clone(),
+                    text: format!("! {w}"),
+                    warn: true,
+                },
+                AgentEvent::Done(s) => {
+                    AgentEvent::SubAgentFinished { tag: tag.clone(), steps: s.iterations }
                 }
-                AgentEvent::Warning(w) => Some(format!("[{tag}] ! {w}")),
-                AgentEvent::Done(s) => Some(format!("[{tag}] finished — {} step(s)", s.iterations)),
-                _ => None,
+                _ => continue,
             };
-            if let Some(l) = line {
-                reg.emit(AgentEvent::Info(l));
-            }
+            reg.emit(fwd);
         }
     })
 }
@@ -342,7 +352,11 @@ async fn run_foreground(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskS
                 Err(e) => return (label, format!("ERROR: {e:#}")),
             };
             let tag = format!("agent {}", i + 1);
-            reg.emit(AgentEvent::Info(format!("⧉ {tag} started ({}): {label}", agent.cfg.model)));
+            reg.emit(AgentEvent::SubAgentStarted {
+                tag: tag.clone(),
+                model: agent.cfg.model.clone(),
+                label: label.clone(),
+            });
             let (tx, rx) = mpsc::unbounded_channel();
             let fwd = spawn_forwarder(rx, reg.clone(), tag);
             let res = agent.run_turn(&prompt, &tx, &CancellationToken::new()).await;
@@ -576,6 +590,52 @@ mod tests {
         }))
         .unwrap();
         assert!(parse_tasks(&too_many).is_err());
+    }
+
+    #[tokio::test]
+    async fn forwarder_translates_child_events_to_tagged_subagent_events() {
+        let reg = crate::tasks::BgTasks::default();
+        let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+        reg.set_notify(notify_tx);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let fwd = spawn_forwarder(rx, reg, "agent 1".into());
+        tx.send(AgentEvent::ToolStart { name: "read".into(), args: "path=x".into() }).unwrap();
+        tx.send(AgentEvent::ToolResult { name: "read".into(), ok: true, preview: String::new() })
+            .unwrap();
+        tx.send(AgentEvent::Warning("slow".into())).unwrap();
+        // Content/thinking must NOT forward — N children streaming prose
+        // would drown the frontend.
+        tx.send(AgentEvent::Content("prose".into())).unwrap();
+        tx.send(AgentEvent::Done(crate::TurnStats { iterations: 3, ..Default::default() }))
+            .unwrap();
+        drop(tx);
+        fwd.await.unwrap();
+
+        match notify_rx.try_recv().unwrap() {
+            AgentEvent::SubAgentActivity { tag, text, warn } => {
+                assert_eq!(tag, "agent 1");
+                assert_eq!(text, "→ read path=x");
+                assert!(!warn);
+            }
+            other => panic!("expected activity, got {other:?}"),
+        }
+        matches!(notify_rx.try_recv().unwrap(), AgentEvent::SubAgentActivity { .. });
+        match notify_rx.try_recv().unwrap() {
+            AgentEvent::SubAgentActivity { text, warn, .. } => {
+                assert_eq!(text, "! slow");
+                assert!(warn);
+            }
+            other => panic!("expected warning activity, got {other:?}"),
+        }
+        match notify_rx.try_recv().unwrap() {
+            AgentEvent::SubAgentFinished { tag, steps } => {
+                assert_eq!(tag, "agent 1");
+                assert_eq!(steps, 3);
+            }
+            other => panic!("expected finished, got {other:?}"),
+        }
+        assert!(notify_rx.try_recv().is_err(), "content must not be forwarded");
     }
 
     #[tokio::test]

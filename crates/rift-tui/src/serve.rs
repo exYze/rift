@@ -6,7 +6,8 @@
 //! Commands:  {"cmd":"prompt","text":…} | {"cmd":"answer","id":…,"text":…}
 //!            | {"cmd":"cancel"} | {"cmd":"undo"}
 //! Events:    ready, history, iteration, thinking, content, tool_start,
-//!            tool_result, info, warning, plan, task_started, task_finished,
+//!            tool_result, info, warning, plan, subagent_started, subagent,
+//!            subagent_finished, task_started, task_finished,
 //!            ask (answer it by id), done (always ends a turn).
 
 use anyhow::Result;
@@ -37,6 +38,15 @@ fn event_json(ev: &AgentEvent) -> Value {
         }
         AgentEvent::Info(t) => json!({"event": "info", "text": t}),
         AgentEvent::Warning(t) => json!({"event": "warning", "text": t}),
+        AgentEvent::SubAgentStarted { tag, model, label } => {
+            json!({"event": "subagent_started", "tag": tag, "model": model, "label": label})
+        }
+        AgentEvent::SubAgentActivity { tag, text, warn } => {
+            json!({"event": "subagent", "tag": tag, "text": text, "warn": warn})
+        }
+        AgentEvent::SubAgentFinished { tag, steps } => {
+            json!({"event": "subagent_finished", "tag": tag, "steps": steps})
+        }
         AgentEvent::Plan(items) => json!({
             "event": "plan",
             "items": items.iter().map(|p| json!({"text": p.text, "done": p.done})).collect::<Vec<_>>(),

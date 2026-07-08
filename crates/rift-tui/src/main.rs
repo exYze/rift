@@ -842,6 +842,15 @@ async fn run_headless(
                     println!("\x1b[36m{mark} {name}\x1b[0m {preview}");
                 }
                 AgentEvent::Info(i) => eprintln!("\x1b[2m· {i}\x1b[0m"),
+                AgentEvent::SubAgentStarted { tag, model, label } => {
+                    eprintln!("\x1b[2m· ⧉ {tag} started ({model}): {label}\x1b[0m");
+                }
+                AgentEvent::SubAgentActivity { tag, text, .. } => {
+                    eprintln!("\x1b[2m· [{tag}] {text}\x1b[0m");
+                }
+                AgentEvent::SubAgentFinished { tag, steps } => {
+                    eprintln!("\x1b[2m· [{tag}] finished — {steps} step(s)\x1b[0m");
+                }
                 AgentEvent::Plan(items) => {
                     for (i, item) in items.iter().enumerate() {
                         eprintln!("\x1b[2m  {} {}. {}\x1b[0m", if item.done { "[x]" } else { "[ ]" }, i + 1, item.text);

@@ -1496,6 +1496,17 @@ impl App {
                 }
                 self.log.push_block(Kind::Info, format!("· {i}"));
             }
+            // Sub-agent activity renders as the same tagged activity-log
+            // lines it always has; the structure exists for --serve.
+            AgentEvent::SubAgentStarted { tag, model, label } => {
+                self.log.push_block(Kind::Info, format!("· ⧉ {tag} started ({model}): {label}"));
+            }
+            AgentEvent::SubAgentActivity { tag, text, .. } => {
+                self.log.push_block(Kind::Info, format!("· [{tag}] {text}"));
+            }
+            AgentEvent::SubAgentFinished { tag, steps } => {
+                self.log.push_block(Kind::Info, format!("· [{tag}] finished — {steps} step(s)"));
+            }
             AgentEvent::Plan(items) => self.plan = items,
             AgentEvent::TaskStarted { id, label } => {
                 self.bg_running.push((id, label.clone()));

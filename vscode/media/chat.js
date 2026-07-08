@@ -18,6 +18,10 @@
   let planEl = null;
   /** Tool row awaiting its result — tool_result folds into the same row. */
   let pendingTool = null;
+  /** Sub-agent lanes by tag ("agent 1", "task #3") — one card per agent. */
+  const agentLanes = new Map();
+  /** Last status text from the extension; agent count is appended locally. */
+  let baseStatus = 'rift';
 
   function esc(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -153,6 +157,61 @@
     assistantRaw = '';
     thinkingEl = null;
     pendingTool = null;
+  }
+
+  function renderStatus() {
+    let active = 0;
+    for (const lane of agentLanes.values()) if (!lane.done) active++;
+    statusEl.textContent = baseStatus + (active ? ` · ⧉ ${active} running` : '');
+  }
+
+  /** One card per sub-agent/background task: a status head plus its own
+   *  scrolling activity feed, so parallel agents don't interleave. */
+  function agentLane(tag, icon, model, label) {
+    const el = document.createElement('div');
+    el.className = 'agent-lane';
+    const head = document.createElement('div');
+    head.className = 'lane-head';
+    head.setAttribute(
+      'data-tip',
+      'rift delegated this work to a separate agent running in parallel — click to show/hide its activity'
+    );
+    const status = document.createElement('span');
+    status.className = 'lane-status running';
+    status.textContent = '◐';
+    const title = document.createElement('span');
+    title.className = 'lane-title';
+    title.textContent = `${icon} ${tag}${model ? ' · ' + model : ''}${label ? ' — ' + label : ''}`;
+    head.appendChild(status);
+    head.appendChild(title);
+    const body = document.createElement('div');
+    body.className = 'lane-body';
+    head.addEventListener('click', () => body.classList.toggle('hidden'));
+    el.appendChild(head);
+    el.appendChild(body);
+    add(el);
+    const lane = { el, body, status, tag, done: false };
+    agentLanes.set(tag, lane);
+    renderStatus();
+    return lane;
+  }
+
+  function laneLine(lane, text, warn) {
+    const stick = atBottom();
+    const l = document.createElement('div');
+    if (warn) l.className = 'warn';
+    l.textContent = text;
+    lane.body.appendChild(l);
+    lane.body.scrollTop = lane.body.scrollHeight;
+    if (stick) messages.scrollTop = messages.scrollHeight;
+  }
+
+  function finishLane(lane, mark, ok) {
+    lane.done = true;
+    lane.status.textContent = mark;
+    lane.status.classList.remove('running');
+    lane.status.classList.add(ok ? 'ok' : 'err');
+    renderStatus();
   }
 
   /** One tool call = one row: an ellipsized head line that folds the result
@@ -352,14 +411,45 @@
       case 'warning':
         line('line-warn', '! ' + ev.text);
         break;
+      case 'subagent_started':
+        agentLane(ev.tag, '⧉', ev.model, ev.label);
+        break;
+      case 'subagent': {
+        // Activity for an unknown tag (e.g. session resumed mid-task)
+        // still gets a lane so nothing is silently dropped.
+        const lane = agentLanes.get(ev.tag) || agentLane(ev.tag, '⧉', '', '');
+        laneLine(lane, ev.text, ev.warn);
+        break;
+      }
+      case 'subagent_finished': {
+        const lane = agentLanes.get(ev.tag);
+        if (lane) {
+          laneLine(lane, `finished — ${ev.steps} step(s)`);
+          finishLane(lane, '✓', true);
+        }
+        break;
+      }
       case 'task_started':
-        line('line-info', `⚙ background #${ev.id} started: ${ev.label}`);
+        agentLane(`task #${ev.id}`, '⚙', '', ev.label);
         break;
-      case 'task_finished':
-        line('line-info', `⚙ background #${ev.id} ${ev.ok ? '✓' : '✗'} ${ev.label}`);
+      case 'task_finished': {
+        const lane = agentLanes.get(`task #${ev.id}`);
+        if (lane) {
+          if (ev.preview) laneLine(lane, ev.preview, !ev.ok);
+          finishLane(lane, ev.ok ? '✓' : '✗', ev.ok);
+        } else {
+          line('line-info', `⚙ background #${ev.id} ${ev.ok ? '✓' : '✗'} ${ev.label}`);
+        }
         break;
+      }
       case 'done': {
         closeTurnBlocks();
+        // A cancelled turn drops its foreground agents without a finished
+        // event — close their lanes so nothing spins forever. Background
+        // task lanes live across turns and are left alone.
+        for (const lane of agentLanes.values()) {
+          if (!lane.done && !lane.tag.startsWith('task #')) finishLane(lane, '◼', false);
+        }
         const s = ev.stats || {};
         if (s.output_tokens) {
           line(
@@ -497,7 +587,8 @@
     if (m.type === 'rift') onRiftEvent(m.ev);
     else if (m.type === 'userEcho') userBubble(m.text);
     else if (m.type === 'status') {
-      statusEl.textContent = m.text;
+      baseStatus = m.text;
+      renderStatus();
       btnStop.classList.toggle('hidden', !m.busy);
       btnSend.classList.toggle('hidden', m.busy);
     } else if (m.type === 'insert') {
@@ -509,6 +600,8 @@
       messages.innerHTML = '';
       closeTurnBlocks();
       planEl = null;
+      agentLanes.clear();
+      renderStatus();
     } else if (m.type === 'files') {
       // Stale responses (an older keystroke's query) are dropped by token.
       if (m.token === mentionToken && mention) {

@@ -96,6 +96,17 @@ pub enum AgentEvent {
     Warning(String),
     /// The model updated its task checklist (the `plan` tool).
     Plan(Vec<crate::tools::PlanItem>),
+    /// A delegated sub-agent (the `task` tool) started. `tag` names its
+    /// lane for frontends that group per-agent activity ("agent 1" for
+    /// foreground fan-outs; background agents announce via TaskStarted and
+    /// carry a "task #id" tag on their activity instead).
+    SubAgentStarted { tag: String, model: String, label: String },
+    /// One preformatted line of a sub-agent's activity (tool calls,
+    /// warnings) — content/thinking streams are not forwarded.
+    SubAgentActivity { tag: String, text: String, warn: bool },
+    /// A sub-agent's turn ended; its report goes to the parent agent (or
+    /// the task output buffer), not through this event.
+    SubAgentFinished { tag: String, steps: usize },
     /// A background task (bash run_in_background / background sub-agent)
     /// started. Flows through the session-wide notify channel, so it can
     /// arrive outside any turn.

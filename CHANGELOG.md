@@ -3,6 +3,20 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.6.4 — 2026-07-07
+
+- **Multi-agent visibility in the VS Code chat**: when rift fans work out to
+  sub-agents (the `agent` tool) or background tasks, the chat shows a live
+  card per agent — pulsing status, model, task label, and the agent's own
+  scrolling activity feed — instead of flat interleaved log lines, plus a
+  running-agent count in the header status (`⧉ 2 running`). Cancelled turns
+  sweep their agent lanes closed
+- **Structured sub-agent events**: new `AgentEvent::SubAgentStarted /
+  SubAgentActivity / SubAgentFinished` variants replace preformatted Info
+  strings, emitted over `--serve` as `subagent_started` / `subagent` /
+  `subagent_finished`. The TUI, swarm UI, and headless output render
+  byte-identical lines to before
+
 ## v1.6.3 — 2026-07-07
 
 - **Instant hover tooltips in the VS Code chat**: every control shows a

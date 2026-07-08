@@ -246,6 +246,48 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
 }
 .plan .done { opacity: 0.55; text-decoration: line-through; }
 
+.agent-lane {
+  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.3));
+  border-left: 3px solid var(--vscode-charts-purple, #b180d7);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.9em;
+}
+.lane-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  min-width: 0;
+}
+.lane-status { flex: 0 0 auto; }
+.lane-status.running {
+  color: var(--vscode-charts-purple, #b180d7);
+  animation: lane-pulse 1.2s ease-in-out infinite;
+}
+.lane-status.ok { color: var(--vscode-gitDecoration-addedResourceForeground, #4a4); }
+.lane-status.err { color: var(--vscode-errorForeground, #f66); }
+@keyframes lane-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.lane-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lane-body {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+  opacity: 0.7;
+  max-height: 9em;
+  overflow-y: auto;
+  margin-top: 2px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.lane-body .warn { color: var(--vscode-editorWarning-foreground, #cca700); }
+
 #composer {
   position: relative;
   display: flex;

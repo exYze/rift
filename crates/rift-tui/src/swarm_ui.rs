@@ -81,6 +81,15 @@ impl SwarmApp {
                 );
             }
             AgentEvent::Info(i) => c.log.push_line(Kind::Info, format!("· {i}")),
+            AgentEvent::SubAgentStarted { tag, model, label } => {
+                c.log.push_line(Kind::Info, format!("· ⧉ {tag} started ({model}): {label}"));
+            }
+            AgentEvent::SubAgentActivity { tag, text, .. } => {
+                c.log.push_line(Kind::Info, format!("· [{tag}] {text}"));
+            }
+            AgentEvent::SubAgentFinished { tag, steps } => {
+                c.log.push_line(Kind::Info, format!("· [{tag}] finished — {steps} step(s)"));
+            }
             AgentEvent::Plan(items) => {
                 let done = items.iter().filter(|p| p.done).count();
                 c.log.push_line(Kind::Info, format!("· plan updated ({done}/{} done)", items.len()));
