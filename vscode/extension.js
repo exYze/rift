@@ -188,6 +188,7 @@ class RiftChatProvider {
       <button id="btn-settings" title="Settings">⚙</button>
     </span>
   </div>
+  <script nonce="${nonce}" src="${media('highlight.min.js')}"></script>
   <script nonce="${nonce}" src="${media('chat.js')}"></script>
 </body>
 </html>`;
@@ -318,6 +319,19 @@ class RiftChatProvider {
         if (this.proc) this.write({ cmd: 'undo' });
         else this.post({ type: 'rift', ev: { event: 'warning', text: 'nothing to undo — rift is not running' } });
         break;
+      case 'insertCode': {
+        // The webview has focus when the button is clicked, so
+        // activeTextEditor may be undefined — fall back to any visible one.
+        const editor = vscode.window.activeTextEditor || vscode.window.visibleTextEditors[0];
+        if (!editor) {
+          vscode.window.showWarningMessage('rift: no open editor to insert into');
+          break;
+        }
+        editor.edit((b) => {
+          for (const sel of editor.selections) b.replace(sel, m.code);
+        });
+        break;
+      }
       case 'newSession':
         this.restart([]);
         break;

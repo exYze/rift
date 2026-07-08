@@ -3,6 +3,20 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.6.2 — 2026-07-07
+
+- **Syntax highlighting in the VS Code chat**: fenced code blocks render
+  with highlight.js (vendored, pinned 11.11.1 — webview CSP allows no CDNs),
+  matching VS Code's default dark/light token colors and following the
+  active theme. Labeled fences highlight directly; unlabeled ones
+  auto-detect against a shortlist of common languages
+- **Code block buttons**: hovering a block shows **copy** and **insert** —
+  insert places the code at the cursor in the active editor, replacing the
+  selection if there is one
+- **CI: bump actions to their Node 24 majors** — checkout@v7, setup-node@v6,
+  upload-artifact@v7, download-artifact@v8, action-gh-release@v3 — clearing
+  the Node 20 deprecation warnings
+
 ## v1.6.1 — 2026-07-07
 
 - **@-mention file picker in the VS Code chat**: typing `@` opens a popup of

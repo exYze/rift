@@ -27,7 +27,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: install rust target
         run: rustup update stable && rustup target add ${{ matrix.target }}
@@ -60,7 +60,7 @@ jobs:
           Compress-Archive -Path "target/${{ matrix.target }}/release/rift.exe" -DestinationPath "rift-${{ matrix.target }}.zip"
           Copy-Item "target/${{ matrix.target }}/release/rift.exe" "rift-${{ matrix.target }}.exe"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rift-${{ matrix.target }}
           path: |
@@ -74,13 +74,13 @@ jobs:
     name: package vscode extension
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
       - name: package
         run: cd vscode && npx --yes @vscode/vsce package --out ../rift-vscode.vsix
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rift-vscode
           path: rift-vscode.vsix
@@ -90,7 +90,7 @@ jobs:
     needs: [build, vsix]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -98,7 +98,7 @@ jobs:
       - name: checksums
         run: cd dist && sha256sum * > checksums.txt
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
@@ -110,8 +110,8 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
       - name: publish to marketplace
@@ -132,7 +132,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: update tap formula
         env:
           TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}

@@ -23,11 +23,47 @@
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  // Languages highlightAuto may guess from — keeps unlabeled fences fast.
+  const AUTO_LANGS = [
+    'javascript', 'typescript', 'python', 'rust', 'go', 'bash', 'json',
+    'yaml', 'html', 'xml', 'css', 'c', 'cpp', 'java', 'sql', 'diff',
+  ];
+
+  /** One fenced block: highlighted (when hljs knows the language) with a
+   *  copy / insert-at-cursor button bar. Buttons are wired by delegation on
+   *  #messages — streaming re-renders would drop per-element listeners. */
+  function codeBlock(code, lang) {
+    const hl = window.hljs;
+    let html;
+    try {
+      if (hl && lang && hl.getLanguage(lang)) {
+        html = hl.highlight(code, { language: lang }).value;
+      } else if (hl && code.length < 10000) {
+        html = hl.highlightAuto(code, AUTO_LANGS).value;
+      } else {
+        html = esc(code);
+      }
+    } catch {
+      html = esc(code);
+    }
+    return (
+      '<div class="codeblock">' +
+      `<div class="cb-bar"><span class="cb-lang">${esc(lang || '')}</span>` +
+      '<span class="cb-actions">' +
+      '<button class="cb-copy" title="Copy to clipboard">copy</button>' +
+      '<button class="cb-insert" title="Insert at cursor (replaces selection)">insert</button>' +
+      '</span></div>' +
+      `<pre><code class="hljs">${html}</code></pre></div>`
+    );
+  }
+
   // Minimal markdown: fenced code, inline code, bold, headings, bullets.
   function md(text) {
     const out = [];
     const lines = text.split('\n');
     let inFence = false;
+    let fenceLang = '';
+    let fenceBuf = [];
     let para = [];
     const flush = () => {
       if (para.length) {
@@ -35,15 +71,25 @@
         para = [];
       }
     };
+    const closeFence = () => {
+      out.push(codeBlock(fenceBuf.join('\n'), fenceLang));
+      fenceBuf = [];
+      fenceLang = '';
+    };
     for (const raw of lines) {
-      if (raw.trimStart().startsWith('```')) {
-        flush();
-        out.push(inFence ? '</code></pre>' : '<pre><code>');
+      const t = raw.trimStart();
+      if (t.startsWith('```')) {
+        if (inFence) {
+          closeFence();
+        } else {
+          flush();
+          fenceLang = t.slice(3).trim().toLowerCase();
+        }
         inFence = !inFence;
         continue;
       }
       if (inFence) {
-        out.push(esc(raw) + '\n');
+        fenceBuf.push(raw);
         continue;
       }
       let line = esc(raw);
@@ -63,9 +109,28 @@
       }
     }
     flush();
-    if (inFence) out.push('</code></pre>');
+    if (inFence) closeFence(); // still streaming — render what's arrived
     return out.join('').replace(/<\/ul><ul>/g, '');
   }
+
+  // Code block buttons, delegated: innerHTML re-renders during streaming
+  // would silently drop listeners attached to the buttons themselves.
+  messages.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const block = btn.closest('.codeblock');
+    if (!block) return;
+    // textContent of the highlighted markup is the original code.
+    const code = block.querySelector('pre code').textContent;
+    if (btn.classList.contains('cb-copy')) {
+      navigator.clipboard.writeText(code).then(() => {
+        btn.textContent = 'copied ✓';
+        setTimeout(() => (btn.textContent = 'copy'), 1200);
+      });
+    } else if (btn.classList.contains('cb-insert')) {
+      vscode.postMessage({ type: 'insertCode', code });
+    }
+  });
 
   function atBottom() {
     return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 40;
