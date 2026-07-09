@@ -772,8 +772,18 @@ mod tests {
         for e in ["vim", "vi", "nvim", "nano", "hx", "emacs", "micro", "some-unknown-editor"] {
             assert!(!editor_is_gui(e), "{e} must use the TTY handover");
         }
-        assert!(editor_is_gui(r"C:\Program Files\Notepad++\notepad++.exe"));
-        assert!(!editor_is_gui(r"C:\tools\vim\vim.exe"));
+        // Full paths classify by basename — using each platform's own
+        // separator (backslash is not a path separator on Unix).
+        #[cfg(windows)]
+        {
+            assert!(editor_is_gui(r"C:\Program Files\Notepad++\notepad++.exe"));
+            assert!(!editor_is_gui(r"C:\tools\vim\vim.exe"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(editor_is_gui("/usr/bin/gedit"));
+            assert!(!editor_is_gui("/usr/local/bin/nvim"));
+        }
     }
 
     #[test]
