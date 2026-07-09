@@ -760,6 +760,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gui_editors_recognized_terminal_editors_left_to_handover() {
+        // GUI editors keep the TUI up with the modal; recognizing these is
+        // what fixes the notepad "blank terminal" bug.
+        for e in ["notepad", "code", "code -w", "cursor", "subl", "gedit", "zed", "notepad++"] {
+            assert!(editor_is_gui(e), "{e} should be treated as a GUI editor");
+        }
+        // Terminal editors (and anything unknown) MUST fall to the TTY
+        // handover — misclassifying one as GUI leaves it fighting the TUI
+        // for the console. Full paths and .exe suffixes still classify.
+        for e in ["vim", "vi", "nvim", "nano", "hx", "emacs", "micro", "some-unknown-editor"] {
+            assert!(!editor_is_gui(e), "{e} must use the TTY handover");
+        }
+        // Full paths classify by basename — using each platform's own
+        // separator (backslash is not a path separator on Unix).
+        #[cfg(windows)]
+        {
+            assert!(editor_is_gui(r"C:\Program Files\Notepad++\notepad++.exe"));
+            assert!(!editor_is_gui(r"C:\tools\vim\vim.exe"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(editor_is_gui("/usr/bin/gedit"));
+            assert!(!editor_is_gui("/usr/local/bin/nvim"));
+        }
+    }
+
+    #[test]
     fn logo_scales_to_width_and_always_fits() {
         // Every variant must fit the width it was asked for; the pixel grid
         // rows must agree on width or the letters shear.
@@ -1180,6 +1207,12 @@ struct App {
     /// status bar gauge; refreshed by AgentEvent::Context after every
     /// turn/command and at startup.
     ctx_gauge: Option<(u64, u64)>,
+    /// While a GUI editor (notepad, VS Code…) holds the config open in its
+    /// own window, the TUI stays up but dimmed behind a modal telling the
+    /// user to close the file. `Some((editor, path))` = that modal is shown;
+    /// the event loop watches the editor process and reloads on close.
+    /// Terminal editors (vim/nano) don't set this — they take the whole TTY.
+    editing_file: Option<(String, String)>,
     /// Completed-task reports waiting to be fed back to the model as a
     /// [task notification] turn (fires on the next idle tick).
     task_notes: Vec<String>,
@@ -1251,6 +1284,7 @@ impl App {
             session_stats: SessionStats::default(),
             bg_running: vec![],
             ctx_gauge: None,
+            editing_file: None,
             task_notes: vec![],
             pending_paste: vec![],
             btw_exchanges: vec![],
@@ -1722,6 +1756,87 @@ fn input_height(input: &str) -> u16 {
     lines + 2 // borders
 }
 
+/// The configured editor: `$EDITOR`, `$VISUAL`, else the platform default
+/// (notepad on Windows, vi elsewhere). May carry flags, e.g. "code -w".
+fn resolve_editor() -> String {
+    std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")).unwrap_or_else(|_| {
+        if cfg!(windows) { "notepad".into() } else { "vi".into() }
+    })
+}
+
+/// Does this editor open in its own window (so the TUI should stay up and
+/// wait) rather than needing the terminal handed to it? Recognized GUI
+/// editors get the dimmed "close the file" modal; everything else — vim,
+/// nano, emacs -nw, or anything unknown — keeps the safe TTY handover, so a
+/// terminal editor is never left fighting the TUI for the same console.
+fn editor_is_gui(editor: &str) -> bool {
+    let stem = |s: &str| {
+        std::path::Path::new(s)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(s)
+            .to_ascii_lowercase()
+    };
+    // Two candidates cover both shapes an EDITOR takes: the whole string
+    // (an unquoted spaced path like `C:\Program Files\…\notepad++.exe` →
+    // "notepad++") and its first token (a program with trailing flags like
+    // `code -w` → "code"). Either matching the GUI set is enough.
+    let editor = editor.trim().trim_matches(['"', '\'']);
+    let whole = stem(editor);
+    let first = stem(editor.split_whitespace().next().unwrap_or(editor));
+    let is_gui = |base: &str| {
+        matches!(
+            base,
+            "notepad"
+            | "notepad++"
+            | "notepad2"
+            | "wordpad"
+            | "write"
+            | "code"
+            | "code-insiders"
+            | "codium"
+            | "vscodium"
+            | "cursor"
+            | "windsurf"
+            | "zed"
+            | "subl"
+            | "sublime_text"
+            | "atom"
+            | "gedit"
+            | "kate"
+            | "gvim"
+            | "mousepad"
+            | "notepadqq"
+            | "textedit"
+        )
+    };
+    is_gui(&whole) || is_gui(&first)
+}
+
+/// Launch a GUI editor on `path` without blocking, returning its handle so
+/// the event loop can watch for the window closing. Direct spawn first (std
+/// handles spaced paths and .cmd/.bat on Windows); fall back to a shell only
+/// when that fails, e.g. `EDITOR` embeds flags like "code -w".
+fn spawn_gui_editor(editor: &str, path: &std::path::Path) -> std::io::Result<std::process::Child> {
+    std::process::Command::new(editor).arg(path).spawn().or_else(|_| {
+        #[cfg(windows)]
+        {
+            let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+            std::process::Command::new(shell)
+                .arg("/C")
+                .arg(format!("{editor} \"{}\"", path.display()))
+                .spawn()
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{editor} '{}'", path.display()))
+                .spawn()
+        }
+    })
+}
+
 /// " 13k/32k" — compact token counts for the status-bar context gauge.
 fn fmt_ctx_detail(used: u64, limit: u64) -> String {
     format!(" {}/{}", fmt_k(used), fmt_k(limit))
@@ -2047,6 +2162,50 @@ fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    // Config-editing modal: a GUI editor holds the file open in its own
+    // window. Dim the whole frame and show a centered "close the file"
+    // notice so the TUI stays visibly present (not blanked) while it waits.
+    if let Some((editor, path)) = &app.editing_file {
+        // Dim everything behind the modal without restyling each span: a
+        // full-frame DIM overlay reads as "greyed out / inactive".
+        frame.render_widget(
+            Block::new().style(Style::default().add_modifier(Modifier::DIM)),
+            frame.area(),
+        );
+        let body = vec![
+            Line::from(Span::styled(
+                "⚙  Editing config",
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(path.clone(), Style::default().fg(t.muted))),
+            Line::raw(""),
+            Line::from(Span::styled(
+                format!("Open in {editor}. Save and close the file to reload."),
+                Style::default().fg(t.fg.unwrap_or(Color::Reset)),
+            )),
+            Line::from(Span::styled(
+                "The rift window is waiting — it resumes on its own.",
+                Style::default().fg(t.muted),
+            )),
+        ];
+        let width = frame.area().width.saturating_sub(8).clamp(40, 76);
+        let height = (body.len() as u16 + 2).min(frame.area().height);
+        let area = Rect {
+            x: (frame.area().width.saturating_sub(width)) / 2,
+            y: (frame.area().height.saturating_sub(height)) / 2,
+            width,
+            height,
+        };
+        let block = Block::bordered()
+            .title(" close the file to continue ")
+            .border_style(Style::default().fg(t.warn));
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(body).alignment(ratatui::layout::Alignment::Center), inner);
     }
 }
 
@@ -2568,7 +2727,40 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     let result = (|| -> Result<()> {
         let mut needs_redraw = true;
         let mut last_tick = Instant::now();
+        // A GUI config editor we're waiting on (see UiEffect::EditFile). While
+        // Some, the modal is up and input is frozen.
+        let mut editing_child: Option<std::process::Child> = None;
         loop {
+            // Watch a GUI editor: when its window closes, drop the modal and
+            // reload the config, exactly as the terminal-editor path does.
+            if let Some(child) = editing_child.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        editing_child = None;
+                        app.editing_file = None;
+                        if status.success() {
+                            let _ = prompt_tx.send(UiMsg::Command(
+                                "/config reload".into(),
+                                CancellationToken::new(),
+                            ));
+                        } else {
+                            app.transcript.push_block(
+                                Kind::Warn,
+                                "! editor exited with an error; config not reloaded".into(),
+                            );
+                        }
+                        needs_redraw = true;
+                    }
+                    Err(e) => {
+                        editing_child = None;
+                        app.editing_file = None;
+                        app.transcript
+                            .push_block(Kind::Warn, format!("! lost track of the editor process: {e}"));
+                        needs_redraw = true;
+                    }
+                    Ok(None) => {} // still open
+                }
+            }
             while let Ok(ev) = ev_rx.try_recv() {
                 app.handle_agent_event(ev);
                 needs_redraw = true;
@@ -2586,57 +2778,71 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     let _ = out.write_all(crate::clipboard::osc52(&text).as_bytes());
                     let _ = out.flush();
                 } else if let UiEffect::EditFile(path) = fx {
-                    // Hand the terminal to $EDITOR, then take it back.
-                    let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
-                    ratatui::restore();
-                    let status = {
-                        #[cfg(windows)]
-                        let editor = std::env::var("EDITOR")
-                            .or_else(|_| std::env::var("VISUAL"))
-                            .unwrap_or_else(|_| "notepad".into());
-                        #[cfg(not(windows))]
-                        let editor = std::env::var("EDITOR")
-                            .or_else(|_| std::env::var("VISUAL"))
-                            .unwrap_or_else(|_| "vi".into());
-                        // Direct spawn first: std handles spaced paths (and .cmd/.bat
-                        // on Windows) without shell-quoting pitfalls. Fall back to a
-                        // shell only when the spawn itself fails, e.g. EDITOR embeds
-                        // flags like "code -w".
-                        std::process::Command::new(&editor).arg(&path).status().or_else(|_| {
-                            #[cfg(windows)]
-                            {
-                                let shell = std::env::var("COMSPEC")
-                                    .unwrap_or_else(|_| "cmd.exe".into());
-                                std::process::Command::new(shell)
-                                    .arg("/C")
-                                    .arg(format!("{editor} \"{}\"", path.display()))
-                                    .status()
+                    let editor = resolve_editor();
+                    if editor_is_gui(&editor) {
+                        // GUI editor: it opens in its own window, so keep the
+                        // TUI up (dimmed behind a modal) and watch the process
+                        // instead of blanking the terminal and blocking on it.
+                        match spawn_gui_editor(&editor, &path) {
+                            Ok(child) => {
+                                let label =
+                                    editor.split_whitespace().next().unwrap_or(&editor).to_string();
+                                app.editing_file = Some((label, path.display().to_string()));
+                                editing_child = Some(child);
                             }
-                            #[cfg(not(windows))]
-                            {
-                                std::process::Command::new("sh")
-                                    .arg("-c")
-                                    .arg(format!("{editor} '{}'", path.display()))
-                                    .status()
-                            }
-                        })
-                    };
-                    terminal = ratatui::init();
-                    let _ = execute!(stdout(), EnableBracketedPaste);
-                    if app.mouse_capture {
-                        let _ = execute!(stdout(), EnableMouseCapture);
-                    }
-                    app.transcript.dirty = true;
-                    app.log.dirty = true;
-                    app.diff.dirty = true;
-                    match status {
-                        Ok(s) if s.success() => {
-                            let _ = prompt_tx
-                                .send(UiMsg::Command("/config reload".into(), CancellationToken::new()));
+                            Err(e) => app.transcript.push_block(
+                                Kind::Warn,
+                                format!("! could not launch editor '{editor}': {e}"),
+                            ),
                         }
-                        _ => app
-                            .transcript
-                            .push_block(Kind::Warn, "! editor exited with an error; config not reloaded".into()),
+                    } else {
+                        // Terminal editor (vim/nano/…): hand it the whole TTY,
+                        // then take it back — it can't share the console.
+                        let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
+                        ratatui::restore();
+                        // Direct spawn first: std handles spaced paths (and
+                        // .cmd/.bat on Windows) without shell-quoting pitfalls.
+                        // Fall back to a shell only when that fails, e.g.
+                        // EDITOR embeds flags like "vim -p".
+                        let status =
+                            std::process::Command::new(&editor).arg(&path).status().or_else(|_| {
+                                #[cfg(windows)]
+                                {
+                                    let shell =
+                                        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+                                    std::process::Command::new(shell)
+                                        .arg("/C")
+                                        .arg(format!("{editor} \"{}\"", path.display()))
+                                        .status()
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    std::process::Command::new("sh")
+                                        .arg("-c")
+                                        .arg(format!("{editor} '{}'", path.display()))
+                                        .status()
+                                }
+                            });
+                        terminal = ratatui::init();
+                        let _ = execute!(stdout(), EnableBracketedPaste);
+                        if app.mouse_capture {
+                            let _ = execute!(stdout(), EnableMouseCapture);
+                        }
+                        app.transcript.dirty = true;
+                        app.log.dirty = true;
+                        app.diff.dirty = true;
+                        match status {
+                            Ok(s) if s.success() => {
+                                let _ = prompt_tx.send(UiMsg::Command(
+                                    "/config reload".into(),
+                                    CancellationToken::new(),
+                                ));
+                            }
+                            _ => app.transcript.push_block(
+                                Kind::Warn,
+                                "! editor exited with an error; config not reloaded".into(),
+                            ),
+                        }
                     }
                 } else if let UiEffect::Host(url) = fx {
                     // /host switched servers: keep the restart target current.
@@ -2690,7 +2896,11 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     last_tick = Instant::now();
                     needs_redraw = true;
                 }
-                if !app.busy && app.picker.is_none() && app.answering.is_none() {
+                if !app.busy
+                    && app.picker.is_none()
+                    && app.answering.is_none()
+                    && app.editing_file.is_none()
+                {
                     // Background tasks finished while the agent was busy (or
                     // idle): feed their reports back as ONE notification turn
                     // so the model can react — the Claude Code-style flow.
@@ -2748,7 +2958,16 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
             }
             // Only state-changing events trigger a redraw — mouse capture
             // floods us with Moved events, and redrawing on each pegs a core.
-            match event::read()? {
+            let input_event = event::read()?;
+            // While a GUI editor holds the config open, the TUI is frozen
+            // behind the modal — swallow input, only recentering on resize.
+            if app.editing_file.is_some() {
+                if matches!(input_event, Event::Resize(..)) {
+                    needs_redraw = true;
+                }
+                continue;
+            }
+            match input_event {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     needs_redraw = true;
                     let palette = app.palette();
