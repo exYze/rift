@@ -24,8 +24,32 @@ body { display: flex; flex-direction: column; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Take the free space so the ctx pill sits against the buttons. */
+  flex: 1 1 auto;
 }
 #header-buttons { flex: 0 0 auto; }
+/* Context-window gauge pill: green → amber → red as the window fills. */
+#ctx {
+  flex: 0 0 auto;
+  font-size: 0.75em;
+  padding: 1px 7px;
+  margin: 0 6px;
+  border-radius: 8px;
+  white-space: nowrap;
+  cursor: default;
+}
+.ctx-low {
+  color: var(--vscode-testing-iconPassed, #2ea043);
+  background: color-mix(in srgb, var(--vscode-testing-iconPassed, #2ea043) 14%, transparent);
+}
+.ctx-mid {
+  color: var(--vscode-editorWarning-foreground, #d29922);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #d29922) 14%, transparent);
+}
+.ctx-high {
+  color: var(--vscode-editorError-foreground, #f85149);
+  background: color-mix(in srgb, var(--vscode-editorError-foreground, #f85149) 16%, transparent);
+}
 #header button, #composer button {
   background: transparent;
   color: var(--vscode-foreground);

@@ -33,7 +33,9 @@ Click the Rift icon in the activity bar (or `Ctrl+Cmd+R` / `Ctrl+Alt+R`, or
 the `rift` status-bar button) to open the chat view — a full conversation UI
 backed by `rift --serve`, with streaming replies, tool-call activity,
 inline **approval prompts** (diff preview + allow/deny buttons), the model's
-plan checklist, and session controls (new / continue-last).
+plan checklist, a **context-window gauge** in the header (how full the
+model's `num_ctx` is, green → amber → red, with token counts on hover),
+and session controls (new / continue-last).
 
 Drag the view into the **secondary sidebar** (View → Appearance → Secondary
 Side Bar, then drag the Rift icon there) to keep the chat, your file, and

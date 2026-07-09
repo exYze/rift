@@ -866,6 +866,8 @@ async fn run_headless(
                     let mark = if ok { "✓" } else { "✗" };
                     eprintln!("\x1b[2m⚙ background task #{id} {mark} finished: {label}\x1b[0m");
                 }
+                // Headless runs one turn and exits — no gauge to keep fresh.
+                AgentEvent::Context { .. } => {}
                 AgentEvent::Done(stats) => {
                     if in_thinking {
                         eprintln!("\x1b[0m");

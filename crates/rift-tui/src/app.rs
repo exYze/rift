@@ -1176,6 +1176,10 @@ struct App {
     /// Background tasks currently running (id, label) — drives the status
     /// bar count; maintained from TaskStarted/TaskFinished events.
     bg_running: Vec<(u64, String)>,
+    /// Context-window occupancy (estimated used tokens, num_ctx) — the
+    /// status bar gauge; refreshed by AgentEvent::Context after every
+    /// turn/command and at startup.
+    ctx_gauge: Option<(u64, u64)>,
     /// Completed-task reports waiting to be fed back to the model as a
     /// [task notification] turn (fires on the next idle tick).
     task_notes: Vec<String>,
@@ -1246,6 +1250,7 @@ impl App {
             last_prompt: None,
             session_stats: SessionStats::default(),
             bg_running: vec![],
+            ctx_gauge: None,
             task_notes: vec![],
             pending_paste: vec![],
             btw_exchanges: vec![],
@@ -1508,6 +1513,9 @@ impl App {
                 self.log.push_block(Kind::Info, format!("· [{tag}] finished — {steps} step(s)"));
             }
             AgentEvent::Plan(items) => self.plan = items,
+            AgentEvent::Context { used, limit } => {
+                self.ctx_gauge = (limit > 0).then_some((used, limit));
+            }
             AgentEvent::TaskStarted { id, label } => {
                 self.bg_running.push((id, label.clone()));
                 self.transcript.push_block(Kind::Info, format!("⚙ background task #{id} started: {label}"));
@@ -1714,6 +1722,21 @@ fn input_height(input: &str) -> u16 {
     lines + 2 // borders
 }
 
+/// " 13k/32k" — compact token counts for the status-bar context gauge.
+fn fmt_ctx_detail(used: u64, limit: u64) -> String {
+    format!(" {}/{}", fmt_k(used), fmt_k(limit))
+}
+
+fn fmt_k(n: u64) -> String {
+    if n >= 10_000 {
+        format!("{}k", n / 1000)
+    } else if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 fn draw(frame: &mut Frame, app: &mut App) {
     // Themes with their own background/text paint the whole frame first;
     // widgets then draw over it (unstyled cells keep this fg/bg, styled
@@ -1861,9 +1884,25 @@ fn draw(frame: &mut Frame, app: &mut App) {
         n => format!(" · {n} bg tasks running"),
     };
     let bg_note = if app.btw_busy { format!("{bg_note} · btw pending") } else { bg_note };
+    // Context gauge: estimated fill of the working num_ctx, colored by how
+    // close the next request is to the window (compaction kicks in near the
+    // top, so red is "compaction imminent", not "about to fail").
+    let (ctx_note, ctx_color) = match app.ctx_gauge {
+        Some((used, limit)) => {
+            let pct = (used.saturating_mul(100) / limit).min(999);
+            let color = match pct {
+                0..=59 => t.ok,
+                60..=84 => t.warn,
+                _ => t.error,
+            };
+            (format!("ctx {pct}%{} · ", fmt_ctx_detail(used, limit)), color)
+        }
+        None => (String::new(), t.muted),
+    };
     let status = Line::from(vec![
         Span::styled(format!(" {} ", app.model), Style::default().fg(t.sel_fg).bg(t.accent)),
         Span::styled(busy_marker, Style::default().fg(if app.busy { t.warn } else { t.ok })),
+        Span::styled(ctx_note, Style::default().fg(ctx_color)),
         Span::styled(format!("{}{elapsed_note}", app.status), Style::default().fg(t.muted)),
         Span::styled(bg_note, Style::default().fg(t.warn)),
         Span::styled(scroll_note, Style::default().fg(t.warn)),
@@ -2479,6 +2518,10 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
         let mut cx =
             CmdCx { store, cwd: cwd.clone(), mcp, config_path, host, providers, model_addr };
         let cwd_str = cwd.display().to_string();
+        // Seed the context gauge so a resumed session shows its fill level
+        // before the first turn.
+        let (used, limit) = agent.context_usage();
+        let _ = ev_tx.send(AgentEvent::Context { used, limit });
         while let Some(msg) = prompt_rx.recv().await {
             match msg {
                 UiMsg::Prompt(prompt, images, cancel) => {
@@ -2500,6 +2543,10 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     commands::run_command(&line, &mut agent, &mut cx, &fx_tx, &cancel).await;
                 }
             }
+            // Refresh the context gauge after every turn AND every command —
+            // /clear, /compact, /rewind, /sessions and /model all move it.
+            let (used, limit) = agent.context_usage();
+            let _ = ev_tx.send(AgentEvent::Context { used, limit });
         }
     });
 

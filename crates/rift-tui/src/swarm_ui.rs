@@ -109,6 +109,9 @@ impl SwarmApp {
                 c.stats = Some(stats);
                 c.log.push_line(Kind::Info, "· finished — capturing diff…".into());
             }
+            // Candidates run one turn from empty history; a fill gauge says
+            // nothing useful in the race view.
+            AgentEvent::Context { .. } => {}
         }
     }
 
