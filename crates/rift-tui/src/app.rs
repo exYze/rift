@@ -787,6 +787,25 @@ mod tests {
     }
 
     #[test]
+    fn default_editor_prefers_terminal_over_notepad() {
+        // The whole point of the probe: any terminal editor on PATH beats
+        // notepad, and `edit` (in-box on Windows 11) wins when present.
+        let all = pick_terminal_editor(|_| true);
+        assert_eq!(all.as_deref(), Some("edit"));
+        let vim_only = pick_terminal_editor(|name| name == "vim");
+        assert_eq!(vim_only.as_deref(), Some("vim"));
+        // Notepad is strictly a last resort — never picked by the probe
+        // itself, only by `default_editor` when the probe comes up empty.
+        assert_eq!(pick_terminal_editor(|_| false), None);
+        // Everything the probe can return must take the TTY handover, not
+        // the GUI modal — otherwise the "fix" reintroduces the popup.
+        for name in ["edit", "nano", "vim", "nvim", "vi", "hx", "micro"] {
+            let picked = pick_terminal_editor(|n| n == name).unwrap();
+            assert!(!editor_is_gui(&picked), "{picked} must not classify as GUI");
+        }
+    }
+
+    #[test]
     fn logo_scales_to_width_and_always_fits() {
         // Every variant must fit the width it was asked for; the pixel grid
         // rows must agree on width or the letters shear.
@@ -1757,10 +1776,60 @@ fn input_height(input: &str) -> u16 {
 }
 
 /// The configured editor: `$EDITOR`, `$VISUAL`, else the platform default
-/// (notepad on Windows, vi elsewhere). May carry flags, e.g. "code -w".
+/// (a terminal editor — see `default_editor`). May carry flags, e.g.
+/// "code -w".
 fn resolve_editor() -> String {
-    std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")).unwrap_or_else(|_| {
-        if cfg!(windows) { "notepad".into() } else { "vi".into() }
+    std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| default_editor())
+}
+
+/// The fallback when neither `$EDITOR` nor `$VISUAL` is set: an editor that
+/// opens *in* the terminal, so `/config edit` stays in the console instead
+/// of popping the file open in a notepad window. Unix always has vi. On
+/// Windows nothing terminal-based is guaranteed, so probe PATH — `edit`
+/// (Microsoft's terminal editor, in-box on Windows 11) first, then common
+/// installs — and only fall back to notepad when none is found.
+fn default_editor() -> String {
+    if cfg!(windows) {
+        pick_terminal_editor(on_path).unwrap_or_else(|| "notepad".into())
+    } else {
+        "vi".into()
+    }
+}
+
+/// First of the known terminal editors that `available` reports present,
+/// in preference order.
+fn pick_terminal_editor(available: impl Fn(&str) -> bool) -> Option<String> {
+    ["edit", "nano", "vim", "nvim", "vi", "hx", "micro"]
+        .into_iter()
+        .find(|name| available(name))
+        .map(str::to_string)
+}
+
+/// Is `name` resolvable as a program on PATH? On Windows each `PATHEXT`
+/// extension is tried, matching what CreateProcess would launch.
+fn on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else { return false };
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(str::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    std::env::split_paths(&path).any(|dir| {
+        if dir.as_os_str().is_empty() {
+            return false;
+        }
+        if exts.is_empty() {
+            dir.join(name).is_file()
+        } else {
+            exts.iter().any(|ext| dir.join(format!("{name}{ext}")).is_file())
+        }
     })
 }
 
