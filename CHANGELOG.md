@@ -3,6 +3,30 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.7.1 — 2026-07-08
+
+- **Robust Windows shell quoting**: the bash tool ran commands through
+  `cmd.exe /C` with Rust's default (MSVCRT-targeted) argument quoting, which
+  cmd.exe re-parsed under its own rules and mangled — a `python -c "import
+  x"` argument reached the shell as a broken `"import` and every quoted
+  command failed. The command line is now built with `raw_arg` and `/S`, so
+  cmd strips exactly the outer quote pair and runs everything inside
+  untouched, preserving any quoting for any command shape (foreground,
+  background, and post-edit hooks; composes with the sandbox wrapper)
+- **Stuck-turn guard**: the doom-loop guard refused identical repeats but
+  let the turn grind on to `max_iterations` (25 wasted steps), re-warning on
+  every repeat. A running count of tool calls that failed or were refused
+  without any success between now nudges the model to change tack at 4 and
+  ends the turn cleanly at 7 — catching both an exact-repeat loop and a
+  model varying a broken call slightly, while leaving legitimate iterative
+  debugging alone (a success resets the streak). The repeat warning fires
+  once per signature, not per repeat
+- **Config editing keeps the TUI visible**: `/config edit` no longer blanks
+  the terminal while a GUI editor (notepad, VS Code, …) holds the file in
+  its own window. The TUI stays up, dimmed behind a "close the file to
+  continue" modal, and hot-reloads when the editor window closes. Terminal
+  editors (vim/nano) and anything unrecognized keep the full-TTY handover
+
 ## v1.7.0 — 2026-07-08
 
 - **Granular permission rules**: `permissions.allow` / `ask` / `deny` lists
