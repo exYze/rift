@@ -316,6 +316,52 @@
     add(card);
   }
 
+  /** Pending edit-review cards by id — resolved by editReviewDone. */
+  const reviewCards = new Map();
+
+  /** One proposed write/edit under review: the diff opens in the editor;
+   *  this card summarizes it and offers the same apply/reject actions. */
+  function reviewCard(m) {
+    const card = document.createElement('div');
+    card.className = 'ask';
+    const q = document.createElement('div');
+    q.className = 'question';
+    q.textContent = `✎ review ${m.tool}: ${m.path}`;
+    card.appendChild(q);
+    const meta = document.createElement('div');
+    meta.className = 'line-info';
+    meta.textContent = `${m.hunks} hunk${m.hunks === 1 ? '' : 's'} · +${m.added} −${m.removed} — review the diff in the editor`;
+    card.appendChild(meta);
+    const row = document.createElement('div');
+    row.className = 'choices';
+    const mk = (label, action, secondary, tip) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      if (secondary) b.className = 'secondary';
+      if (tip) b.setAttribute('data-tip', tip);
+      b.addEventListener('click', () => vscode.postMessage({ type: 'reviewAction', id: m.id, action }));
+      row.appendChild(b);
+    };
+    mk('Apply', 'apply', false, 'Write the accepted hunks to the file (all of them, unless you rejected some in the diff view)');
+    mk('Open diff', 'open', true, 'Open the proposal as a native diff — accept or reject individual hunks there');
+    mk('Reject', 'reject', true, 'Apply nothing — the agent is told the edit was denied');
+    card.appendChild(row);
+    add(card);
+    reviewCards.set(m.id, { card, row });
+  }
+
+  function reviewDone(m) {
+    const rc = reviewCards.get(m.id);
+    reviewCards.delete(m.id);
+    if (!rc) return;
+    rc.row.remove();
+    rc.card.classList.add('answered');
+    const done = document.createElement('div');
+    done.className = 'line-info';
+    done.textContent = `→ ${m.verdict}`;
+    rc.card.appendChild(done);
+  }
+
   function renderPlan(items) {
     if (!planEl) {
       planEl = document.createElement('div');
@@ -585,6 +631,8 @@
   window.addEventListener('message', (e) => {
     const m = e.data;
     if (m.type === 'rift') onRiftEvent(m.ev);
+    else if (m.type === 'editReview') reviewCard(m);
+    else if (m.type === 'editReviewDone') reviewDone(m);
     else if (m.type === 'userEcho') userBubble(m.text);
     else if (m.type === 'status') {
       baseStatus = m.text;
@@ -601,6 +649,7 @@
       closeTurnBlocks();
       planEl = null;
       agentLanes.clear();
+      reviewCards.clear();
       renderStatus();
     } else if (m.type === 'files') {
       // Stale responses (an older keystroke's query) are dropped by token.

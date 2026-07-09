@@ -121,7 +121,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/paste` | attach a clipboard image to your next message (vision models) — copy a screenshot, `/paste`, type your question |
 | `/btw <question>` | quick side question (Claude Code-style): it sees the whole conversation but has no tools, the exchange never enters the main history, and it works even while the agent is mid-turn — ask asides (related or not) without polluting context; `/btw clear` resets the side thread |
 | `/plan [clear]` | the agent's task checklist (also pinned live in the activity pane) |
-| `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, deny list + approval state |
+| `/tools` · `/mcp` · `/permissions` | what the model can call, MCP server status, permission rules + approval state. `/permissions add\|remove <allow\|ask\|deny> <Tool(pattern)>` edits the rules live — `Bash(git push *)`, `Edit(src/**)`, `Read(~/.ssh/**)` |
 | `/swarm <task> [--models a,b] [--judge m] [--explore]` | WarpDrive race without leaving the chat — models may span providers; the optional judge scores the diffs and recommends a winner |
 | `/merge <name> [--cleanup]` | apply a swarm candidate's patch |
 | `/undo` | revert the last turn's write/edit changes |
@@ -157,13 +157,27 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
     "smart": "vllm/deepseek-ai/DeepSeek-V4-Flash",
     "fast": "gemma4:26b"
   },
-  "permissions": {"bash_deny": ["docker push *"], "bash_allow": ["git status *", "cargo *"]}
+  "permissions": {
+    "allow": ["Bash(git status *)", "Bash(cargo *)", "Edit(src/**)"],
+    "ask": ["Bash(git push *)"],
+    "deny": ["Read(~/.ssh/**)", "Bash(docker push *)"]
+  }
 }
 ```
 
 The optional `models` map names **model roles** for multi-model workflows: the agent tool accepts `model: "<role>"` (or any full model string) per delegated task, so one session can research/spec/review on a strong model and implement on a cheap one — e.g. ask the session model to plan, then have it delegate implementation tasks with `model: "fast"` and review the reports itself. The system prompt advertises configured roles to the model automatically, `/model`'s picker lists them first, and with no `models` map everything behaves exactly as a single-model setup.
 
-Permissions work like Claude Code's: interactive sessions **ask before `write`/`edit`/`bash` by default**, and each bash prompt offers *allow once* / *always allow `<pattern>`* (persisted to `permissions.bash_allow` in your user config — those commands never prompt again) / *allow all bash this session* / *deny*. Write/edit approval prompts show a **diff-colored preview of the pending change**, so you review what you're allowing. The deny list (built-ins + `bash_deny`) is always enforced, even in YOLO mode. `"approve": false` in the user config or `/yolo` turns prompting off; a project `.rift.json` can only tighten (add denies, force approval on — its `bash_allow` is ignored).
+Permissions work like Claude Code's: interactive sessions **ask before `write`/`edit`/`bash` by default**, and each bash prompt offers *allow once* / *always allow `<pattern>`* (persisted to your user config — those commands never prompt again) / *allow all bash this session* / *deny*. Write/edit approval prompts show a **diff-colored preview of the pending change** and offer a persistent *always allow `Edit(<dir>/**)`* grant scoped to the file's work area. `"approve": false` in the user config or `/yolo` turns prompting off; a project `.rift.json` can only tighten (add deny/ask rules, force approval on — its allow rules are ignored).
+
+### Granular permission rules
+
+Three lists of `Tool(pattern)` rules with precedence **deny > ask > allow > the approval mode**:
+
+- **`deny`** — refused outright, even in YOLO mode, even headless: `Read(~/.ssh/**)` blocks the read-side tools (read/ls/grep/glob/outline — grep and glob skip denied files *inside* their walks), `Edit(prod/**)` blocks file mutations, `Bash(git push --force *)` blocks command families, `Fetch(*://*.internal/*)` blocks URLs.
+- **`ask`** — always prompts, even in YOLO mode: keep `/yolo` fast but gate the few actions that matter (`Bash(git push *)`). In a run with no interactive user, an ask rule denies.
+- **`allow`** — skips the approval prompt when approval mode is on. User config only; grown automatically by the "always allow" choices on prompts.
+
+A bare tool name (`Fetch`) matches every use. `Edit(...)` covers both the edit and write tools; `Read(...)` covers every file-reading tool; `Write(...)` scopes to just writes. Path patterns match relative and absolute paths (`*` stays in one directory, `**` crosses, `~/` expands); bash patterns are flat globs matched against every chained segment — `git status && curl evil` still prompts when only `git status` is allowed. Manage them with `/permissions add|remove <allow|ask|deny> <rule>` or in the config (hot-reloads via `/config edit`). The legacy `bash_allow`/`bash_deny` glob lists still load, folded in as `Bash(...)` rules. The built-in deny list (sudo, rm -rf /, …) is always enforced.
 
 ### Sandbox wrapper
 

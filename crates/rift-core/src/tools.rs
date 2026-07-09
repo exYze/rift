@@ -61,6 +61,28 @@ pub struct AskRequest {
     pub reply: tokio::sync::oneshot::Sender<String>,
 }
 
+/// A proposed file mutation offered to a frontend for interactive diff
+/// review (the VS Code inline diff with per-hunk accept/reject). Installed
+/// via [`ToolCtx::set_edit_review`]; when present it replaces the plain
+/// approval prompt for write/edit.
+pub struct EditReviewRequest {
+    /// Which tool proposed it: "edit" or "write".
+    pub tool: String,
+    pub path: PathBuf,
+    /// Current file content; empty for a new file.
+    pub old: String,
+    /// Proposed content.
+    pub new: String,
+    pub reply: tokio::sync::oneshot::Sender<EditReviewReply>,
+}
+
+pub enum EditReviewReply {
+    /// Write this content — the full proposal, or the reviewer's
+    /// accepted-hunk subset of it.
+    Apply(String),
+    Deny,
+}
+
 /// A compact ±diff between two texts for approval previews: common prefix
 /// and suffix lines are trimmed, the changed middle shows as -old/+new.
 /// Whole-file precision isn't the goal — seeing what you're approving is.
@@ -107,11 +129,10 @@ pub struct PlanItem {
 #[derive(Clone)]
 pub struct ToolCtx {
     pub cwd: PathBuf,
-    deny: std::sync::Arc<std::sync::Mutex<(globset::GlobSet, Vec<String>)>>,
-    /// Pre-approved command patterns (user config `permissions.bash_allow`,
-    /// grown by the "always allow" approval choice) — matching commands skip
-    /// the approval prompt. The deny list always wins over allow.
-    allow: std::sync::Arc<std::sync::Mutex<(globset::GlobSet, Vec<String>)>>,
+    /// Granular permission rules (allow/ask/deny `Tool(pattern)` entries,
+    /// with the built-in bash deny list and the legacy bash_allow/bash_deny
+    /// globs folded in). Deny always wins; see crate::permissions.
+    rules: std::sync::Arc<std::sync::Mutex<crate::permissions::RuleSet>>,
     journal: std::sync::Arc<std::sync::Mutex<Vec<EditRecord>>>,
     turn: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ask: Option<tokio::sync::mpsc::UnboundedSender<AskRequest>>,
@@ -133,24 +154,13 @@ pub struct ToolCtx {
     /// Sandbox wrapper template ({cmd}/{cwd} placeholders) every bash
     /// invocation routes through; None = run directly.
     bash_wrapper: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Interactive diff-review channel (the VS Code inline diff): when
+    /// installed, write/edit proposals route here instead of the plain
+    /// approval prompt. Shared into sub-agent ctxs like `ask`.
+    edit_review:
+        std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<EditReviewRequest>>>>,
     /// SearXNG endpoint for the web_search tool; None = search unavailable.
     search_url: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-}
-
-fn build_deny_set(extra: &[String]) -> globset::GlobSet {
-    let all: Vec<String> =
-        BASH_DENY_BUILTIN.iter().copied().map(str::to_string).chain(extra.iter().cloned()).collect();
-    build_glob_set(&all)
-}
-
-fn build_glob_set(patterns: &[String]) -> globset::GlobSet {
-    let mut builder = globset::GlobSetBuilder::new();
-    for pat in patterns {
-        if let Ok(glob) = globset::GlobBuilder::new(pat).literal_separator(false).build() {
-            builder.add(glob);
-        }
-    }
-    builder.build().unwrap_or_else(|_| globset::GlobSet::empty())
 }
 
 /// The "always allow" pattern offered for a command: program + subcommand
@@ -174,12 +184,13 @@ impl ToolCtx {
         Self::with_extra_deny(cwd, &[])
     }
 
-    /// `extra_deny`: additional glob patterns from user config.
+    /// `extra_deny`: additional bash glob patterns from user config.
     pub fn with_extra_deny(cwd: impl Into<PathBuf>, extra_deny: &[String]) -> Self {
+        let perms = crate::config::Permissions { bash_deny: extra_deny.to_vec(), ..Default::default() };
+        let rules = crate::permissions::RuleSet::compile(&perms, BASH_DENY_BUILTIN, &mut vec![]);
         Self {
             cwd: cwd.into(),
-            deny: std::sync::Arc::new(std::sync::Mutex::new((build_deny_set(extra_deny), extra_deny.to_vec()))),
-            allow: std::sync::Arc::new(std::sync::Mutex::new((globset::GlobSet::empty(), vec![]))),
+            rules: std::sync::Arc::new(std::sync::Mutex::new(rules)),
             journal: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
             turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ask: None,
@@ -190,6 +201,7 @@ impl ToolCtx {
             subagent: std::sync::Arc::new(std::sync::RwLock::new(None)),
             hooks: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
             bash_wrapper: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            edit_review: std::sync::Arc::new(std::sync::Mutex::new(None)),
             search_url: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -277,8 +289,7 @@ impl ToolCtx {
     pub fn subagent_ctx(&self) -> ToolCtx {
         ToolCtx {
             cwd: self.cwd.clone(),
-            deny: self.deny.clone(),
-            allow: self.allow.clone(),
+            rules: self.rules.clone(),
             journal: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
             turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ask: self.ask.clone(),
@@ -290,6 +301,8 @@ impl ToolCtx {
             // Sub-agents edit files too — the same verification applies.
             hooks: self.hooks.clone(),
             bash_wrapper: self.bash_wrapper.clone(),
+            // Sub-agent edits go through the same interactive diff review.
+            edit_review: self.edit_review.clone(),
             // Research sub-agents search too.
             search_url: self.search_url.clone(),
         }
@@ -374,88 +387,173 @@ impl ToolCtx {
         self.approve.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Replace the user deny patterns at runtime (/config reload). The
-    /// built-in list is always merged back in.
-    pub fn set_deny(&self, extra: &[String]) {
-        if let Ok(mut d) = self.deny.lock() {
-            *d = (build_deny_set(extra), extra.to_vec());
+    /// Rebuild the whole rule set from config (startup, /config reload).
+    /// Returned warnings name any malformed rules that were skipped.
+    pub fn set_permissions(&self, perms: &crate::config::Permissions) -> Vec<String> {
+        let mut warnings = vec![];
+        let rules = crate::permissions::RuleSet::compile(perms, BASH_DENY_BUILTIN, &mut warnings);
+        if let Ok(mut r) = self.rules.lock() {
+            *r = rules;
         }
+        warnings
     }
 
-    /// Replace the pre-approved command patterns (startup, /config reload).
-    pub fn set_allow(&self, patterns: &[String]) {
-        if let Ok(mut a) = self.allow.lock() {
-            *a = (build_glob_set(patterns), patterns.to_vec());
-        }
-    }
-
-    /// Add one pattern at runtime (the "always allow" approval choice).
+    /// Add one bash allow pattern at runtime (the "always allow" choice).
     pub fn add_allow_pattern(&self, pattern: &str) {
-        if let Ok(mut a) = self.allow.lock() {
-            if !a.1.iter().any(|p| p == pattern) {
-                a.1.push(pattern.to_string());
-                a.0 = build_glob_set(&a.1);
-            }
+        self.add_allow_rule(&format!("Bash({pattern})"));
+    }
+
+    /// Add one `Tool(pattern)` allow rule at runtime.
+    pub fn add_allow_rule(&self, rule: &str) {
+        if let Ok(mut r) = self.rules.lock() {
+            r.add_allow(rule);
         }
     }
 
-    /// The active allow patterns (for /permissions).
+    /// The active user rules — (allow, ask, deny), built-ins excluded — for
+    /// /permissions.
+    pub fn permission_rules(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+        self.rules.lock().map(|r| r.user_rules()).unwrap_or_default()
+    }
+
+    /// The active allow rules (for /yolo's summary line).
     pub fn user_allow_patterns(&self) -> Vec<String> {
-        self.allow.lock().map(|a| a.1.clone()).unwrap_or_default()
+        self.permission_rules().0
     }
 
-    /// Is every chained segment of `command` pre-approved? Segment-wise like
-    /// the deny check, but requiring ALL segments to match — `git status &&
-    /// curl evil` must still prompt when only `git status` is allowed.
-    /// (Deny is checked separately and always wins.)
-    fn bash_allowed(&self, command: &str) -> bool {
-        let Ok(allow) = self.allow.lock() else { return false };
-        if allow.1.is_empty() {
-            return false;
+    /// What the rules say about a path-taking tool call; None = no rule.
+    fn path_decision(
+        &self,
+        tool: &str,
+        path: &Path,
+    ) -> Option<(crate::permissions::Decision, String)> {
+        let candidates = crate::permissions::path_candidates(path, &self.cwd);
+        self.rules.lock().ok()?.decide(tool, &candidates)
+    }
+
+    /// A copy of the current rules, for blocking walkers (grep/glob) that
+    /// filter files off the async runtime.
+    pub(crate) fn rules_snapshot(&self) -> crate::permissions::RuleSet {
+        self.rules.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    /// Deny-rule enforcement for read-side tools (read/ls/grep/glob/outline)
+    /// — `Read(~/.ssh/**)` blocks before the resource is touched. Allow/ask
+    /// rules don't apply to reads (they never prompt).
+    pub(crate) fn check_read_allowed(&self, tool: &str, path: &Path) -> Result<()> {
+        if let Some((crate::permissions::Decision::Deny, rule)) = self.path_decision(tool, path) {
+            bail!("{} blocked by permission rule '{rule}'", path.display());
         }
-        let mut any = false;
-        for seg in command
-            .split(['&', '|', ';', '\n', '(', ')', '`'])
+        Ok(())
+    }
+
+    /// Deny-rule gate for listing a directory: denied when the directory
+    /// itself OR its arbitrary children are covered — `Read(secrets/**)`
+    /// must refuse `ls secrets`, not just reads inside it.
+    pub(crate) fn check_list_allowed(&self, tool: &str, dir: &Path) -> Result<()> {
+        self.check_read_allowed(tool, dir)?;
+        // A probe child no real rule names specifically: any `dir/**`-shaped
+        // deny matches it, a single-file deny doesn't.
+        if let Some((crate::permissions::Decision::Deny, rule)) =
+            self.path_decision(tool, &dir.join("\u{1}"))
+        {
+            bail!("{} blocked by permission rule '{rule}'", dir.display());
+        }
+        Ok(())
+    }
+
+    /// Deny-rule enforcement for URL tools (fetch/web_fetch). URLs match
+    /// as written and normalized (scheme+host lowercased, default port
+    /// stripped) — `HTTPS://X.INTERNAL:443/a` can't evade `*://*.internal/*`.
+    pub(crate) fn check_url_allowed(&self, tool: &str, url: &str) -> Result<()> {
+        let candidates = crate::permissions::url_candidates(url);
+        let decision = self.rules.lock().ok().and_then(|r| r.decide(tool, &candidates));
+        if let Some((crate::permissions::Decision::Deny, rule)) = decision {
+            bail!("{url} blocked by permission rule '{rule}'");
+        }
+        Ok(())
+    }
+
+    /// The chained segments of a shell command, whitespace-normalized —
+    /// permission checks run per segment so `git status && curl evil` is
+    /// judged as two commands. Deny, ask and allow all read the SAME
+    /// normalization: expansions the shell turns into whitespace at run time
+    /// (`git${IFS}push`) fold to spaces first, and `$` splits a segment, so
+    /// an ask/deny rule can't be evaded the way a literal match could.
+    fn bash_segments(command: &str) -> Vec<String> {
+        let expanded =
+            command.replace("${IFS}", " ").replace("$IFS", " ").replace("$@", " ").replace("$*", " ");
+        expanded
+            .split(['&', '|', ';', '\n', '(', ')', '`', '$'])
             .map(|seg| seg.split_whitespace().collect::<Vec<_>>().join(" "))
             .filter(|seg| !seg.is_empty())
-        {
-            any = true;
-            // "git push *" should also cover the bare "git push".
-            let bare_ok = allow.1.iter().any(|p| p.strip_suffix(" *") == Some(seg.as_str()));
-            if !allow.0.is_match(&seg) && !bare_ok {
-                return false;
-            }
+            .collect()
+    }
+
+    /// Is every chained segment of `command` pre-approved? Requires ALL
+    /// segments to match — `git status && curl evil` must still prompt when
+    /// only `git status` is allowed. (Deny is checked separately and wins.)
+    fn bash_allowed(&self, command: &str) -> bool {
+        let Ok(rules) = self.rules.lock() else { return false };
+        if !rules.has_bash_allow() {
+            return false;
         }
-        any
+        let segments = Self::bash_segments(command);
+        !segments.is_empty() && segments.iter().all(|seg| rules.bash_allow_match(seg))
+    }
+
+    /// The first ask rule any chained segment of `command` matches — a hit
+    /// forces a prompt even when approval mode is off.
+    fn bash_ask_rule(&self, command: &str) -> Option<String> {
+        let rules = self.rules.lock().ok()?;
+        Self::bash_segments(command).iter().find_map(|seg| rules.bash_ask_match(seg))
     }
 
     /// Approval gate for bash, with Claude Code-style allow tracking: an
     /// allow-listed command runs silently; otherwise the prompt offers a
     /// persistent "always allow '<pattern>'" (saved to the user config)
-    /// alongside once/session/deny.
+    /// alongside once/session/deny. An ask rule (`Bash(git push *)` in
+    /// permissions.ask) forces the prompt even in /yolo mode.
     pub(crate) async fn check_bash_approval(&self, command: &str) -> Result<()> {
-        if !self.approval_enabled() {
+        let forced = self.bash_ask_rule(command);
+        if !self.approval_enabled() && forced.is_none() {
             return Ok(());
         }
-        if self.approved_kinds.lock().map(|k| k.contains("bash")).unwrap_or(false) {
-            return Ok(());
+        if forced.is_none() {
+            if self.approved_kinds.lock().map(|k| k.contains("bash")).unwrap_or(false) {
+                return Ok(());
+            }
+            if self.bash_allowed(command) {
+                return Ok(());
+            }
         }
-        if self.bash_allowed(command) {
-            return Ok(());
-        }
-        // Approval requires an interactive user; without one the mode is moot.
-        let Some(ask) = &self.ask else { return Ok(()) };
+        // Approval requires an interactive user; without one the mode is
+        // moot — except an ask rule, which explicitly demands a human.
+        let Some(ask) = &self.ask else {
+            return match forced {
+                Some(rule) => bail!(
+                    "command requires interactive approval (permission rule '{rule}') and no user is attached"
+                ),
+                None => Ok(()),
+            };
+        };
         let pattern = allow_pattern_for(command);
         let preview: String = command.chars().take(120).collect();
         let always = format!("always allow '{pattern}'");
         let session = "allow all bash this session".to_string();
+        // A forced ask prompts every time by design — "always/session"
+        // grants would be overridden by the ask rule anyway, so don't offer
+        // choices that can't stick.
+        let choices = match &forced {
+            Some(_) => vec!["allow once".into(), "deny".into()],
+            None => vec!["allow once".into(), always.clone(), session.clone(), "deny".into()],
+        };
+        let question = match &forced {
+            Some(rule) => format!("Allow bash ('{rule}'): {preview}"),
+            None => format!("Allow bash: {preview}"),
+        };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let _ = ask.send(AskRequest {
-            question: format!("Allow bash: {preview}"),
-            detail: vec![],
-            choices: vec!["allow once".into(), always.clone(), session.clone(), "deny".into()],
-            reply: reply_tx,
-        });
+        let _ = ask.send(AskRequest { question, detail: vec![], choices, reply: reply_tx });
         match reply_rx.await.as_deref() {
             Ok("allow once") => Ok(()),
             Ok(a) if a == always => {
@@ -480,32 +578,140 @@ impl ToolCtx {
     /// Gate a mutating action behind user approval. Returns Err when denied —
     /// the model sees that as a tool error and adjusts course. `detail`
     /// lines (the pending diff) render above the question, diff-colored.
-    async fn check_approval(&self, kind: &str, summary: &str, detail: Vec<String>) -> Result<()> {
-        if !self.approval_enabled() {
+    /// `path` (write/edit) is judged against the permission rules first:
+    /// deny bails, allow skips the prompt, ask forces it even in /yolo.
+    async fn check_approval(
+        &self,
+        kind: &str,
+        path: Option<&Path>,
+        summary: &str,
+        detail: Vec<String>,
+    ) -> Result<()> {
+        use crate::permissions::Decision;
+        let decision = path.and_then(|p| self.path_decision(kind, p));
+        let forced = match &decision {
+            Some((Decision::Deny, rule)) => {
+                bail!("this {kind} was blocked by permission rule '{rule}'")
+            }
+            Some((Decision::Allow, _)) => return Ok(()),
+            Some((Decision::Ask, rule)) => Some(rule.clone()),
+            None => None,
+        };
+        if !self.approval_enabled() && forced.is_none() {
             return Ok(());
         }
-        if self.approved_kinds.lock().map(|k| k.contains(kind)).unwrap_or(false) {
+        if forced.is_none() && self.approved_kinds.lock().map(|k| k.contains(kind)).unwrap_or(false) {
             return Ok(());
         }
-        // Approval requires an interactive user; without one the mode is moot.
-        let Some(ask) = &self.ask else { return Ok(()) };
-        let always = format!("always allow {kind} this session");
+        // Approval requires an interactive user; without one the mode is
+        // moot — except an ask rule, which explicitly demands a human.
+        let Some(ask) = &self.ask else {
+            return match forced {
+                Some(rule) => bail!(
+                    "this {kind} requires interactive approval (permission rule '{rule}') and no user is attached"
+                ),
+                None => Ok(()),
+            };
+        };
+        let session = format!("always allow {kind} this session");
+        // Persistent grant scoped to the file's work area, e.g. Edit(src/**).
+        let persist_rule = path.map(|p| crate::permissions::suggest_edit_rule(p, &self.cwd));
+        let persist = persist_rule.as_ref().map(|r| format!("always allow '{r}'"));
+        let mut choices = vec!["allow".to_string()];
+        if forced.is_none() {
+            choices.push(session.clone());
+            if let Some(p) = &persist {
+                choices.push(p.clone());
+            }
+        }
+        choices.push("deny".into());
+        let question = match &forced {
+            Some(rule) => format!("Allow {kind} ('{rule}'): {summary}"),
+            None => format!("Allow {kind}: {summary}"),
+        };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let _ = ask.send(AskRequest {
-            question: format!("Allow {kind}: {summary}"),
-            detail,
-            choices: vec!["allow".into(), always.clone(), "deny".into()],
-            reply: reply_tx,
-        });
+        let _ = ask.send(AskRequest { question, detail, choices, reply: reply_tx });
         match reply_rx.await.as_deref() {
             Ok("allow") => Ok(()),
-            Ok(a) if a == always => {
+            Ok(a) if a == session => {
                 if let Ok(mut kinds) = self.approved_kinds.lock() {
                     kinds.insert(kind.to_string());
                 }
                 Ok(())
             }
+            Ok(a) if persist.as_deref() == Some(a) => {
+                let rule = persist_rule.unwrap_or_default();
+                self.add_allow_rule(&rule);
+                // Persistence failure must not fail the approved action —
+                // the in-memory allow already covers this session.
+                let _ = crate::config::append_user_permission_rule("allow", &rule);
+                Ok(())
+            }
             _ => bail!("the user DENIED this {kind} action. Do not retry it; ask them how to proceed or choose another approach."),
+        }
+    }
+
+    /// Install the interactive diff-review channel (serve mode / VS Code).
+    pub fn set_edit_review(&self, tx: Option<tokio::sync::mpsc::UnboundedSender<EditReviewRequest>>) {
+        if let Ok(mut r) = self.edit_review.lock() {
+            *r = tx;
+        }
+    }
+
+    /// Gate a write/edit behind interactive diff review when a review
+    /// channel is installed, else the plain approval prompt. Returns the
+    /// content to apply: the proposal, or the reviewer's accepted-hunk
+    /// subset of it. Err = denied/blocked.
+    pub(crate) async fn review_edit(
+        &self,
+        kind: &str,
+        path: &Path,
+        old: &str,
+        new: &str,
+        summary: &str,
+        detail: Vec<String>,
+    ) -> Result<String> {
+        use crate::permissions::Decision;
+        let review_tx = self.edit_review.lock().ok().and_then(|r| r.clone());
+        let Some(review_tx) = review_tx else {
+            self.check_approval(kind, Some(path), summary, detail).await?;
+            return Ok(new.to_string());
+        };
+        // Rules first, same order as the plain gate.
+        let decision = self.path_decision(kind, path);
+        let forced = match &decision {
+            Some((Decision::Deny, rule)) => {
+                bail!("this {kind} was blocked by permission rule '{rule}'")
+            }
+            Some((Decision::Allow, _)) => return Ok(new.to_string()),
+            Some((Decision::Ask, rule)) => Some(rule.clone()),
+            None => None,
+        };
+        if !self.approval_enabled() && forced.is_none() {
+            return Ok(new.to_string());
+        }
+        if forced.is_none() && self.approved_kinds.lock().map(|k| k.contains(kind)).unwrap_or(false) {
+            return Ok(new.to_string());
+        }
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let sent = review_tx.send(EditReviewRequest {
+            tool: kind.to_string(),
+            path: path.to_path_buf(),
+            old: old.to_string(),
+            new: new.to_string(),
+            reply: reply_tx,
+        });
+        if sent.is_err() {
+            // Reviewer went away (extension closed): fall back to the ask
+            // prompt rather than silently applying.
+            self.check_approval(kind, Some(path), summary, detail).await?;
+            return Ok(new.to_string());
+        }
+        match reply_rx.await {
+            Ok(EditReviewReply::Apply(content)) => Ok(content),
+            Ok(EditReviewReply::Deny) | Err(_) => bail!(
+                "the user DENIED this {kind} action in review. Do not retry it; ask them how to proceed or choose another approach."
+            ),
         }
     }
 
@@ -527,31 +733,19 @@ impl ToolCtx {
         self
     }
 
-    /// User-configured deny patterns (without the built-ins).
+    /// User-configured deny rules (without the built-ins).
     pub fn user_deny_patterns(&self) -> Vec<String> {
-        self.deny.lock().map(|d| d.1.clone()).unwrap_or_default()
+        self.permission_rules().2
     }
 
     fn bash_denied(&self, command: &str) -> bool {
-        let Ok(deny) = self.deny.lock() else { return false };
-        // Expansions the shell turns into whitespace at run time would let a
-        // denied command hide from the literal match — `rm${IFS}-rf${IFS}/`
-        // reads as three harmless tokens here but runs as `rm -rf /`. Fold the
-        // common whitespace-producing forms to a space first so each segment
-        // reads the way the shell will execute it.
-        let expanded =
-            command.replace("${IFS}", " ").replace("$IFS", " ").replace("$@", " ").replace("$*", " ");
+        let Ok(rules) = self.rules.lock() else { return false };
         // Match every chained segment, not just the whole string — otherwise
         // `true && sudo …` or `echo x; rm -rf /` sails past patterns anchored
-        // at the start. Splitting on subshell/backtick chars too errs on the
-        // side of denying. `$` splits as well, so a residual expansion that
-        // folds to nothing (`sudo${undefined}whoami`) leaves the denied token
-        // standing alone instead of glued to the rest. Still best-effort
-        // (heavy quoting can evade it); approval mode is the real gate.
-        expanded
-            .split(['&', '|', ';', '\n', '(', ')', '`', '$'])
-            .map(|seg| seg.split_whitespace().collect::<Vec<_>>().join(" "))
-            .any(|seg| !seg.is_empty() && deny.0.is_match(&seg))
+        // at the start (see bash_segments for the shared normalization).
+        // Still best-effort (heavy quoting can evade it); approval mode is
+        // the real gate.
+        Self::bash_segments(command).iter().any(|seg| rules.bash_deny_match(seg).is_some())
     }
 
     /// Mark the start of a new agent turn; edits recorded after this group
@@ -930,6 +1124,7 @@ impl Tool for ReadTool {
     }
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
         let path = ctx.resolve(req_str(args, "path")?);
+        ctx.check_read_allowed("read", &path)?;
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", enoent_hint(&ctx.cwd, &path).await),
@@ -1027,21 +1222,37 @@ impl Tool for WriteTool {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e).with_context(|| format!("cannot snapshot {} for undo", path.display())),
         };
-        let diff = match &prior {
-            None => preview_diff("", content, 40),
-            Some(bytes) if !looks_binary(bytes) => {
-                preview_diff(&String::from_utf8_lossy(bytes), content, 40)
+        let summary = format!("{} ({} bytes)", path.display(), content.len());
+        // Binary prior: no line diff to review — plain approval prompt.
+        let content = match &prior {
+            Some(bytes) if looks_binary(bytes) => {
+                ctx.check_approval(
+                    "write",
+                    Some(&path),
+                    &summary,
+                    vec!["(overwriting a binary file)".into()],
+                )
+                .await?;
+                content.to_string()
             }
-            Some(_) => vec!["(overwriting a binary file)".into()],
+            _ => {
+                let old = prior.as_ref().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+                let diff = preview_diff(&old, content, 40);
+                // Interactive review may return a hunk-filtered subset.
+                ctx.review_edit("write", &path, &old, content, &summary, diff).await?
+            }
         };
-        ctx.check_approval("write", &format!("{} ({} bytes)", path.display(), content.len()), diff)
-            .await?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         ctx.record_edit(path.clone(), prior);
-        tokio::fs::write(&path, content).await.with_context(|| format!("cannot write {}", path.display()))?;
+        tokio::fs::write(&path, &content).await.with_context(|| format!("cannot write {}", path.display()))?;
         let mut result = format!("Wrote {} bytes to {}", content.len(), path.display());
+        if content != req_str(args, "content")? {
+            result.push_str(
+                "\nNOTE: the user accepted only part of your proposal in review — re-read the file to see what was applied.",
+            );
+        }
         if let Some(report) = ctx.run_post_edit_hooks(&path).await {
             result.push_str(&report);
         }
@@ -1114,11 +1325,26 @@ impl Tool for EditTool {
             bail!("old_string occurs {count} times in {}; include more surrounding context to make it unique, or set replace_all", path.display());
         }
         let updated = if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) };
-        ctx.check_approval("edit", &path.display().to_string(), preview_diff(&text, &updated, 40)).await?;
+        // Interactive review may return a hunk-filtered subset of the change.
+        let applied = ctx
+            .review_edit(
+                "edit",
+                &path,
+                &text,
+                &updated,
+                &path.display().to_string(),
+                preview_diff(&text, &updated, 40),
+            )
+            .await?;
         ctx.record_edit(path.clone(), Some(text.clone().into_bytes()));
-        tokio::fs::write(&path, &updated).await?;
+        tokio::fs::write(&path, &applied).await?;
         let mut result =
             format!("Edited {} ({} replacement{})", path.display(), count, if count == 1 { "" } else { "s" });
+        if applied != updated {
+            result.push_str(
+                "\nNOTE: the user accepted only part of your proposal in review — re-read the file to see what was applied.",
+            );
+        }
         if let Some(report) = ctx.run_post_edit_hooks(&path).await {
             result.push_str(&report);
         }
@@ -1479,12 +1705,31 @@ impl Tool for FetchTool {
         })
     }
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
-        let _ = ctx;
         let url = req_str(args, "url")?;
         if !url.starts_with("http://") && !url.starts_with("https://") {
             bail!("only http(s) URLs are supported");
         }
-        let client = rift_provider::http_client();
+        ctx.check_url_allowed("fetch", url)?;
+        // Deny rules must hold across redirects too — a permitted URL 302ing
+        // to a denied one is the classic bypass. Same timeouts as the shared
+        // client, plus a per-hop permission check.
+        let rules = ctx.rules_snapshot();
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() > 10 {
+                    return attempt.error("too many redirects");
+                }
+                let hop = attempt.url().to_string();
+                let candidates = crate::permissions::url_candidates(&hop);
+                if let Some((crate::permissions::Decision::Deny, rule)) = rules.decide("fetch", &candidates) {
+                    return attempt.error(format!("redirect to {hop} blocked by permission rule '{rule}'"));
+                }
+                attempt.follow()
+            }))
+            .build()
+            .unwrap_or_else(|_| rift_provider::http_client());
         let resp = tokio::time::timeout(
             Duration::from_secs(FETCH_TIMEOUT_SECS),
             client.get(url).header("user-agent", concat!("rift/", env!("CARGO_PKG_VERSION"))).send(),
@@ -1856,9 +2101,15 @@ impl Tool for LsTool {
     }
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
         let path = ctx.resolve(args.get("path").and_then(|v| v.as_str()).unwrap_or("."));
+        ctx.check_list_allowed("ls", &path)?;
+        let rules = ctx.rules_snapshot();
         let mut rd = tokio::fs::read_dir(&path).await.with_context(|| format!("cannot list {}", path.display()))?;
         let mut entries = Vec::new();
         while let Some(e) = rd.next_entry().await? {
+            // Individually denied entries stay out of the listing too.
+            if rules.read_denied("ls", &path.join(e.file_name()), &ctx.cwd) {
+                continue;
+            }
             let name = e.file_name().to_string_lossy().to_string();
             let is_dir = e.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
             entries.push(if is_dir { format!("{name}/") } else { name });
@@ -1896,7 +2147,9 @@ impl Tool for GrepTool {
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
         let pattern = req_str(args, "pattern")?.to_string();
         let root = ctx.resolve(args.get("path").and_then(|v| v.as_str()).unwrap_or("."));
+        ctx.check_list_allowed("grep", &root)?;
         let cwd = ctx.cwd.clone();
+        let rules = ctx.rules_snapshot();
         // File walking + regex matching is blocking work.
         tokio::task::spawn_blocking(move || {
             let re = regex::Regex::new(&pattern).map_err(|e| anyhow!("invalid regex: {e}"))?;
@@ -1904,6 +2157,10 @@ impl Tool for GrepTool {
             let walker = ignore::WalkBuilder::new(&root).hidden(true).build();
             'outer: for entry in walker.flatten() {
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
+                    continue;
+                }
+                // Deny rules (`Read(secrets/**)`) hold inside the walk too.
+                if rules.read_denied("grep", entry.path(), &cwd) {
                     continue;
                 }
                 let Ok(bytes) = std::fs::read(entry.path()) else { continue };
@@ -1955,6 +2212,7 @@ impl Tool for OutlineTool {
     }
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
         let path = ctx.resolve(req_str(args, "path")?);
+        ctx.check_read_allowed("outline", &path)?;
         let source = tokio::fs::read_to_string(&path)
             .await
             .with_context(|| format!("cannot read {}", path.display()))?;
@@ -2113,6 +2371,9 @@ impl Tool for GlobTool {
     async fn execute(&self, args: &Map<String, Value>, ctx: &ToolCtx) -> Result<String> {
         let pattern = req_str(args, "pattern")?.to_string();
         let root = ctx.resolve(args.get("path").and_then(|v| v.as_str()).unwrap_or("."));
+        ctx.check_list_allowed("glob", &root)?;
+        let cwd = ctx.cwd.clone();
+        let rules = ctx.rules_snapshot();
         tokio::task::spawn_blocking(move || {
             let glob = globset::GlobBuilder::new(&pattern)
                 .literal_separator(false)
@@ -2123,6 +2384,10 @@ impl Tool for GlobTool {
             let walker = ignore::WalkBuilder::new(&root).hidden(true).build();
             for entry in walker.flatten() {
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
+                    continue;
+                }
+                // Deny rules hide matching paths from listings too.
+                if rules.read_denied("glob", entry.path(), &cwd) {
                     continue;
                 }
                 let rel = entry.path().strip_prefix(&root).unwrap_or(entry.path());
@@ -2381,7 +2646,8 @@ mod tests {
     #[test]
     fn allow_patterns_gate_the_prompt() {
         let ctx = ToolCtx::new("/tmp");
-        ctx.set_allow(&["git status *".to_string(), "cargo *".to_string()]);
+        ctx.add_allow_pattern("git status *");
+        ctx.add_allow_pattern("cargo *");
         assert!(ctx.bash_allowed("git status --short"));
         assert!(ctx.bash_allowed("git status")); // "x *" covers the bare form
         assert!(ctx.bash_allowed("cargo build --release"));
@@ -2416,7 +2682,7 @@ mod tests {
         let ctx = ToolCtx::new("/tmp").with_approval(true);
         let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
         let ctx = ctx.with_interaction(ask_tx);
-        ctx.set_allow(&["echo *".to_string()]);
+        ctx.add_allow_pattern("echo *");
         tokio::spawn(async move {
             while let Some(req) = ask_rx.recv().await {
                 let _ = req.reply.send("deny".into());
@@ -2424,6 +2690,163 @@ mod tests {
         });
         assert!(ctx.check_bash_approval("echo hello").await.is_ok());
         assert!(ctx.check_bash_approval("rm file").await.is_err()); // asked, denied
+    }
+
+    /// A ctx with the given permission rule lists compiled in.
+    fn ctx_with_rules(cwd: &Path, allow: &[&str], ask: &[&str], deny: &[&str]) -> ToolCtx {
+        let ctx = ToolCtx::new(cwd);
+        let perms = crate::config::Permissions {
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+            ask: ask.iter().map(|s| s.to_string()).collect(),
+            deny: deny.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(ctx.set_permissions(&perms).is_empty());
+        ctx
+    }
+
+    #[tokio::test]
+    async fn deny_rule_blocks_edit_write_and_read() {
+        let dir = std::env::temp_dir().join(format!("rift-rules-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("secrets")).unwrap();
+        std::fs::write(dir.join("secrets/key.pem"), "PRIVATE").unwrap();
+        std::fs::write(dir.join("root-key.pem"), "PRIVATE").unwrap();
+        let ctx = ctx_with_rules(
+            &dir,
+            &[],
+            &[],
+            &["Edit(secrets/**)", "Read(secrets/**)", "Read(root-key.pem)"],
+        );
+        // Deny holds even with approval mode off and no interactive user.
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("secrets/key.pem".into()));
+        args.insert("content".into(), Value::String("overwritten".into()));
+        let err = WriteTool.execute(&args, &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("permission rule"), "got: {err}");
+        let err = ReadTool.execute(&args, &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("permission rule"), "got: {err}");
+        // The file is untouched and unread.
+        assert_eq!(std::fs::read_to_string(dir.join("secrets/key.pem")).unwrap(), "PRIVATE");
+        // grep skips denied files inside the walk.
+        let mut gargs = Map::new();
+        gargs.insert("pattern".into(), Value::String("PRIVATE".into()));
+        let out = GrepTool.execute(&gargs, &ctx).await.unwrap();
+        assert_eq!(out, "no matches");
+        // Listing the denied directory is refused (Read(secrets/**) covers
+        // its contents), and an individually denied file is hidden from a
+        // parent listing (the directory's NAME may still show — knowing
+        // secrets/ exists isn't reading it).
+        let mut largs = Map::new();
+        largs.insert("path".into(), Value::String("secrets".into()));
+        let err = LsTool.execute(&largs, &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("permission rule"), "got: {err}");
+        largs.insert("path".into(), Value::String(".".into()));
+        let listing = LsTool.execute(&largs, &ctx).await.unwrap();
+        assert!(!listing.contains("root-key.pem"), "denied file leaked into listing: {listing}");
+        assert!(listing.contains("secrets"), "listing lost unrelated entries: {listing}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn allow_rule_skips_the_edit_prompt() {
+        let dir = std::env::temp_dir().join(format!("rift-allow-rule-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        // Approval ON with a channel that denies everything: only the allow
+        // rule can let the write through.
+        let ctx = ctx_with_rules(&dir, &["Edit(src/**)"], &[], &[]).with_approval(true);
+        let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
+        let ctx = ctx.with_interaction(ask_tx);
+        tokio::spawn(async move {
+            while let Some(req) = ask_rx.recv().await {
+                let _ = req.reply.send("deny".into());
+            }
+        });
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("src/lib.rs".into()));
+        args.insert("content".into(), Value::String("pub fn x() {}".into()));
+        WriteTool.execute(&args, &ctx).await.unwrap();
+        args.insert("path".into(), Value::String("elsewhere.rs".into()));
+        assert!(WriteTool.execute(&args, &ctx).await.is_err()); // asked, denied
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ask_rule_forces_prompt_even_in_yolo() {
+        // Approval OFF: an ask rule must still prompt (and deny headless).
+        let ctx = ctx_with_rules(Path::new("/tmp"), &[], &["Bash(git push *)"], &[]).with_approval(false);
+        // Headless (no ask channel): the ask rule denies rather than runs.
+        let err = ctx.check_bash_approval("git push origin main").await.unwrap_err();
+        assert!(err.to_string().contains("interactive approval"), "got: {err}");
+        // Ask rules see the same expansion folding as deny — `${IFS}` must
+        // not smuggle the command past the gate.
+        assert!(ctx.check_bash_approval("git${IFS}push origin main").await.is_err());
+        assert!(ctx.check_bash_approval("true && git push --force").await.is_err());
+        // Non-matching commands sail through in yolo, as before.
+        assert!(ctx.check_bash_approval("git status").await.is_ok());
+        // With a user attached, the prompt fires and their answer rules.
+        let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
+        let ctx = ctx.with_interaction(ask_tx);
+        tokio::spawn(async move {
+            while let Some(req) = ask_rx.recv().await {
+                // Forced prompts offer no session/persistent grants.
+                assert_eq!(req.choices, vec!["allow once".to_string(), "deny".to_string()]);
+                let _ = req.reply.send("allow once".into());
+            }
+        });
+        assert!(ctx.check_bash_approval("git push origin main").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn edit_review_applies_reviewer_content() {
+        let dir = std::env::temp_dir().join(format!("rift-review-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "line1\nline2\n").unwrap();
+        let ctx = ToolCtx::new(&dir).with_approval(true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EditReviewRequest>();
+        ctx.set_edit_review(Some(tx));
+        // Reviewer accepts a hunk-filtered subset of the proposal.
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                assert_eq!(req.old, "line1\nline2\n");
+                assert_eq!(req.new, "line1\nCHANGED\n");
+                let _ = req.reply.send(EditReviewReply::Apply("line1\nREVIEWED\n".into()));
+            }
+        });
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("a.txt".into()));
+        args.insert("old_string".into(), Value::String("line2".into()));
+        args.insert("new_string".into(), Value::String("CHANGED".into()));
+        let result = EditTool.execute(&args, &ctx).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "line1\nREVIEWED\n");
+        // The model is told the proposal was modified in review.
+        assert!(result.contains("accepted only part"), "got: {result}");
+        // Undo restores the pre-review content (journal saw the true prior).
+        let restored = ctx.undo_last_turn().unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "line1\nline2\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_review_deny_bails_without_writing() {
+        let dir = std::env::temp_dir().join(format!("rift-review-deny-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "keep\n").unwrap();
+        let ctx = ToolCtx::new(&dir).with_approval(true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EditReviewRequest>();
+        ctx.set_edit_review(Some(tx));
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let _ = req.reply.send(EditReviewReply::Deny);
+            }
+        });
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("a.txt".into()));
+        args.insert("content".into(), Value::String("clobbered\n".into()));
+        let err = WriteTool.execute(&args, &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("DENIED"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "keep\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

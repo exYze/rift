@@ -73,6 +73,20 @@
       {
         "command": "rift.addSelectionToPrompt",
         "title": "Rift: Add Selection to Prompt"
+      },
+      {
+        "command": "rift.reviewApply",
+        "title": "Rift: Apply Reviewed Edit",
+        "icon": "$(check)"
+      },
+      {
+        "command": "rift.reviewReject",
+        "title": "Rift: Reject Reviewed Edit",
+        "icon": "$(close)"
+      },
+      {
+        "command": "rift.reviewToggle",
+        "title": "Rift: Toggle Review Hunk"
       }
     ],
     "keybindings": [
@@ -89,6 +103,32 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "rift.reviewApply",
+          "when": "resourceScheme == rift-review",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rift.reviewReject",
+          "when": "resourceScheme == rift-review",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "rift.reviewApply",
+          "when": "resourceScheme == rift-review"
+        },
+        {
+          "command": "rift.reviewReject",
+          "when": "resourceScheme == rift-review"
+        },
+        {
+          "command": "rift.reviewToggle",
+          "when": "false"
+        }
+      ],
       "editor/context": [
         {
           "command": "rift.addSelectionToPrompt",
@@ -145,6 +185,11 @@
           "type": ["number", "null"],
           "default": null,
           "description": "Max agent-loop iterations per turn, passed as --max-iterations (empty = rift's default, 25)."
+        },
+        "rift.inlineDiffReview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Review the agent's file edits as native diffs with per-hunk accept/reject before they are written. Off = classic in-chat approval prompts with the diff as text."
         }
       }
     }
