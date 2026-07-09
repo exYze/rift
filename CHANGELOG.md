@@ -3,6 +3,44 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.7.0 — 2026-07-08
+
+- **Granular permission rules**: `permissions.allow` / `ask` / `deny` lists
+  of `Tool(pattern)` rules — `Bash(git push *)`, `Edit(src/**)`,
+  `Read(~/.ssh/**)`, `Fetch(*://*.internal/*)` — with precedence
+  deny > ask > allow > approval mode. Deny holds everywhere: YOLO mode,
+  headless runs, inside grep/glob walks, `ls` of a covered directory, and
+  across fetch redirects (re-checked per hop). Ask rules force a prompt
+  even in /yolo (and deny headless); allow rules load from the user config
+  only — a project `.rift.json` can add deny/ask but never allow. Matching
+  is hardened: paths canonicalize first (symlinks, `..`, `\\?\` verbatim
+  prefixes, case-insensitive on Windows/macOS), bash rules see the same
+  `${IFS}`-folded chained segments as the deny list, URLs normalize
+  scheme/host/default-port. Edit approval prompts offer a persistent
+  "always allow `Edit(<dir>/**)`" scoped to the file's work area;
+  `/permissions add|remove <allow|ask|deny> <rule>` edits rules live; the
+  legacy `bash_allow`/`bash_deny` globs still load as `Bash(...)` rules
+- **Inline diff review in VS Code — per-hunk accept/reject**: every
+  write/edit the agent proposes opens as a native VS Code diff *before it
+  touches disk*. Accept or reject each hunk via CodeLens (rejecting one
+  visibly removes its change), apply with the ✓ title-bar button, and
+  track pending reviews as chat cards (Apply / Open diff / Reject). Only
+  the accepted hunks are written, the model is told when a proposal was
+  partially applied, and `/undo` still restores the true prior state.
+  Serve protocol: consumers opt in with `{"cmd":"hello","edit_review":true}`,
+  then receive `edit_review {path, old, new}` events and reply with
+  `edit_decision`; cancelled/finished turns emit `edit_review_closed` so a
+  stale Apply can't claim success. Consumers that never say hello (older
+  extensions, scripts) keep the classic in-chat approval prompts
+- **Context-window gauge**: the TUI status bar shows `ctx 42% 13k/32k`
+  next to the model chip (green under 60%, amber to 84%, red above) and
+  the VS Code chat header shows a matching color-coded `ctx 42%` pill with
+  token counts on hover — the calibrated estimate of what the conversation
+  occupies (system prompt + history + tool schemas) vs the working
+  `num_ctx`, refreshed at startup and after every turn, command, and
+  compaction. New serve event `context {used, limit}`; `ready` now
+  carries `num_ctx`
+
 ## v1.6.4 — 2026-07-07
 
 - **Multi-agent visibility in the VS Code chat**: when rift fans work out to
