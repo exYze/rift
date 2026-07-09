@@ -380,6 +380,18 @@ impl Agent {
         let mut stats = TurnStats::default();
         let mut tool_records: Vec<ToolTraceRecord> = vec![];
         let mut repeat_counts: HashMap<String, u32> = HashMap::new();
+        // Stuck-turn guard. `consecutive_fail` counts tool calls that failed
+        // or were refused as repeats, with no success in between (reset to 0
+        // on any success). It catches the general "stuck" pattern — both an
+        // exact-repeat doom loop AND a model varying a broken command
+        // slightly each time — which the identical-signature guard alone
+        // misses. A small model that can't get a command right would
+        // otherwise hammer it to `max_iterations` (25 wasted steps); this
+        // nudges once to change tack, then ends the turn cleanly and early.
+        let mut consecutive_fail = 0usize;
+        let mut stuck_nudged = false;
+        const STUCK_NUDGE_AT: usize = 4;
+        const STUCK_STOP_AT: usize = 7;
         // Chat-only failure mode: small models sometimes "answer" a coding
         // task by pasting the fix into the reply without touching any file.
         // A variant seen in the first bench matrix (gemma4:26b): the model
@@ -594,14 +606,20 @@ impl Agent {
                 *count += 1;
                 if *count >= 3 {
                     stats.failures.doom_loop_trips += 1;
+                    consecutive_fail += 1;
                     tool_records.push(ToolTraceRecord {
                         name: canonical.clone(),
                         ok: false,
                         target: trace_target(&call.function.arguments),
                     });
-                    let _ = tx.send(AgentEvent::Warning(format!(
-                        "tool '{canonical}' called 3x with identical arguments; refusing the repeat"
-                    )));
+                    // Warn once per signature — not on every repeat, which
+                    // spammed the UI with identical lines when a model kept
+                    // hammering the same call.
+                    if *count == 3 {
+                        let _ = tx.send(AgentEvent::Warning(format!(
+                            "tool '{canonical}' called repeatedly with identical arguments; refusing the repeat"
+                        )));
+                    }
                     // Answer the call anyway: every id in the assistant's
                     // tool_calls must get a tool result or strict
                     // OpenAI-compatible servers reject the whole history.
@@ -659,6 +677,13 @@ impl Agent {
                 if ok && matches!(canonical.as_str(), "write" | "edit" | "bash" | "agent") {
                     used_mutating = true;
                 }
+                // Stuck-turn guard: a success clears the streak; a failure
+                // extends it. Checked once per iteration below.
+                if ok {
+                    consecutive_fail = 0;
+                } else {
+                    consecutive_fail += 1;
+                }
 
                 let _ = tx.send(AgentEvent::ToolResult {
                     name: canonical.clone(),
@@ -674,6 +699,31 @@ impl Agent {
                 let mut result_msg = Message::tool_result(requested_name, result);
                 result_msg.tool_call_id = call.id.clone();
                 self.messages.push(result_msg);
+            }
+
+            // Stuck-turn guard, evaluated once per iteration after its tool
+            // calls. A hard cap ends the turn in a handful of steps instead
+            // of grinding to max_iterations; a soft threshold first nudges
+            // the model to change tack, which a capable model often acts on.
+            if consecutive_fail >= STUCK_STOP_AT {
+                stats.failures.doom_loop_trips += 1;
+                let _ = tx.send(AgentEvent::Warning(format!(
+                    "stopped: {consecutive_fail} tool calls in a row failed or repeated without progress — \
+                     the model was stuck. Check the command/paths or rephrase the request."
+                )));
+                stats.duration_ms = start.elapsed().as_millis();
+                self.write_trace(user_input, "stuck", &stats, &tool_records, tx);
+                let _ = tx.send(AgentEvent::Done(stats.clone()));
+                return Ok(stats);
+            }
+            if consecutive_fail >= STUCK_NUDGE_AT && !stuck_nudged {
+                stuck_nudged = true;
+                self.messages.push(Message::user(
+                    "[system] Several tool calls in a row have failed. Do NOT repeat the same call again. \
+                     Either try a genuinely different approach (different tool, different command, or fix \
+                     the exact error shown), or stop now and tell the user plainly what is blocking you and \
+                     what you have learned so far.",
+                ));
             }
 
             if cancel.is_cancelled() {

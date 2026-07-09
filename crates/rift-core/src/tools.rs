@@ -1369,10 +1369,18 @@ fn wrap_sandbox(template: &str, command: &str, cwd: &Path) -> String {
 fn shell_command(command: &str) -> tokio::process::Command {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-        let mut cmd = tokio::process::Command::new(shell);
-        cmd.arg("/C").arg(command);
-        cmd
+        let mut cmd = std::process::Command::new(shell);
+        // Rust's default argument quoting targets the MSVCRT parser, but
+        // cmd.exe uses its own rules and mangles embedded double quotes —
+        // a `python -c "import x"` argument came out as a broken `"import`
+        // and the command failed. Build the command line ourselves with
+        // `raw_arg` and use `/S`, which tells cmd to strip exactly the outer
+        // quote pair and run everything between them untouched. That keeps
+        // any quoting inside `command` intact for any command shape.
+        cmd.raw_arg(format!("/S /C \"{command}\""));
+        tokio::process::Command::from(cmd)
     }
     #[cfg(not(windows))]
     {
@@ -3019,6 +3027,21 @@ mod tests {
         args.insert("command".into(), Value::String("exit 3".into()));
         let out = BashTool.execute(&args, &ctx).await.unwrap();
         assert!(out.contains("exit code: 3"), "exit-code note missing: {out}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_bash_preserves_embedded_double_quotes() {
+        // Regression: a `python -c "import x"` argument used to reach the
+        // shell as a broken `"import` because cmd.exe mangled Rust's escaped
+        // quotes. A double-quoted argument must now round-trip verbatim
+        // (cmd's `echo` prints its argument literally, quotes included).
+        let ctx = ToolCtx::new(std::env::temp_dir());
+        let mut args = Map::new();
+        args.insert("command".into(), Value::String(r#"echo "a b; c""#.into()));
+        let out = BashTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains(r#""a b; c""#), "quotes/semicolon corrupted: {out}");
+        assert!(!out.contains('\\'), "backslash leaked from quote mangling: {out}");
     }
 
     // Windows analogue of the (unix-gated) timeout test: a hanging command must
