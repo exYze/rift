@@ -107,7 +107,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
     ("/paste", "", "attach a clipboard image to your next message (vision models)"),
-    ("/permissions", "", "active shell deny patterns"),
+    ("/permissions", "[add|remove <allow|ask|deny> <rule>]", "show or edit permission rules — Bash(git push *), Edit(src/**), Read(~/.ssh/**)"),
     ("/plan", "[clear]", "show or clear the agent's task checklist"),
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
     ("/save", "<name>", "name this session (keeps autosaving to it)"),
@@ -180,7 +180,7 @@ pub async fn run_command(
         "/sessions" => cmd_sessions(rest, agent, cx, fx),
         "/tools" => cmd_tools(agent, fx),
         "/mcp" => cmd_mcp(rest, agent, cx, fx).await,
-        "/permissions" => cmd_permissions(agent, cx, fx),
+        "/permissions" => cmd_permissions(rest, agent, cx, fx),
         "/plan" => cmd_plan(rest, agent, fx),
         "/swarm" => cmd_swarm(rest, agent, cx, fx, cancel).await,
         "/merge" => cmd_merge(rest, cx, fx).await,
@@ -780,9 +780,64 @@ async fn cmd_mcp(
     }
 }
 
-fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
-    let user = agent.ctx().user_deny_patterns();
-    let allow = agent.ctx().user_allow_patterns();
+fn cmd_permissions(
+    rest: &str,
+    agent: &Agent,
+    cx: &CmdCx,
+    fx: &UnboundedSender<UiEffect>,
+) -> Result<String> {
+    // /permissions add|remove <allow|ask|deny> <rule> — persisted to the
+    // USER config (rules can only loosen from the user's own machine),
+    // applied live by recompiling the rule set from disk.
+    if !rest.is_empty() {
+        let mut parts = rest.splitn(3, char::is_whitespace);
+        let (op, list, rule) = (
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or("").to_ascii_lowercase(),
+            parts.next().unwrap_or("").trim(),
+        );
+        if rule.is_empty() || !matches!(list.as_str(), "allow" | "ask" | "deny") {
+            bail!("usage: /permissions [add|remove <allow|ask|deny> <Tool(pattern)>] — e.g. /permissions add deny Read(~/.ssh/**)");
+        }
+        if rift_core::permissions::Rule::parse(rule).is_none() {
+            bail!("malformed rule '{rule}' — expected Tool or Tool(pattern), e.g. Bash(git push *), Edit(src/**)");
+        }
+        let path = match op {
+            "add" => rift_core::config::append_user_permission_rule(&list, rule)?,
+            "remove" => {
+                let (path, mut removed) = rift_core::config::remove_user_permission_rule(&list, rule)?;
+                if !removed {
+                    // Legacy bash_allow/bash_deny entries display as
+                    // Bash(...) rules — removing that form should reach them.
+                    let legacy = match list.as_str() {
+                        "allow" => Some("bash_allow"),
+                        "deny" => Some("bash_deny"),
+                        _ => None,
+                    };
+                    if let (Some(legacy), Some(inner)) =
+                        (legacy, rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')))
+                    {
+                        removed = rift_core::config::remove_user_permission_rule(legacy, inner)?.1;
+                    }
+                }
+                if !removed {
+                    bail!("rule '{rule}' not found in the user config's permissions.{list}");
+                }
+                path
+            }
+            other => bail!("usage: /permissions [add|remove <allow|ask|deny> <rule>] — got '{other}'"),
+        };
+        // Recompile from disk so the change (and any project tightening)
+        // applies immediately.
+        let loaded = rift_core::Config::load(&cx.cwd)?;
+        for w in agent.ctx().set_permissions(&loaded.config.permissions) {
+            let _ = fx.send(UiEffect::Out(Kind::Warn, format!("! {w}")));
+        }
+        let msg = format!("{list} rule {op}{}: {rule} (saved to {})", if op == "add" { "ed" } else { "d" }, path.display());
+        let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
+        return Ok(msg);
+    }
+    let (allow, ask, deny) = agent.ctx().permission_rules();
     let mut out = format!(
         "approval mode: {}\n\n",
         if agent.ctx().approval_enabled() {
@@ -797,24 +852,32 @@ fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) ->
             "sandbox wrapper: none — bash runs directly (set permissions.bash_wrapper to route through WSL/Docker/firejail)\n\n",
         ),
     }
-    out.push_str("allowed (run without an approval prompt; permissions.bash_allow, grown by 'always allow'):\n");
+    out.push_str("allow (skip the approval prompt; user config only, grown by 'always allow'):\n");
     if allow.is_empty() {
-        out.push_str("  none yet — choose \"always allow '<pattern>'\" on an approval prompt to add one\n");
+        out.push_str("  none yet — choose \"always allow '<rule>'\" on an approval prompt, or /permissions add allow Bash(cargo *)\n");
     } else {
-        for pat in &allow {
-            out.push_str(&format!("  {pat}\n"));
+        for rule in &allow {
+            out.push_str(&format!("  {rule}\n"));
         }
     }
-    out.push_str("\nbanned (always refused, even in YOLO mode):\n\nbuilt-in:\n");
-    for pat in builtin_bash_deny() {
-        out.push_str(&format!("  {pat}\n"));
-    }
-    if user.is_empty() {
-        out.push_str("\nuser (permissions.bash_deny): none configured");
+    out.push_str("\nask (always prompt, even in YOLO mode):\n");
+    if ask.is_empty() {
+        out.push_str("  none — /permissions add ask Bash(git push *)\n");
     } else {
-        out.push_str("\nuser (permissions.bash_deny):\n");
-        for pat in &user {
-            out.push_str(&format!("  {pat}\n"));
+        for rule in &ask {
+            out.push_str(&format!("  {rule}\n"));
+        }
+    }
+    out.push_str("\ndeny (always refused, even in YOLO mode):\n\nbuilt-in:\n");
+    for pat in builtin_bash_deny() {
+        out.push_str(&format!("  Bash({pat})\n"));
+    }
+    if deny.is_empty() {
+        out.push_str("\nuser/project: none — /permissions add deny Read(~/.ssh/**)");
+    } else {
+        out.push_str("\nuser/project:\n");
+        for rule in &deny {
+            out.push_str(&format!("  {rule}\n"));
         }
     }
     if let Some(p) = &cx.config_path {
@@ -822,10 +885,11 @@ fn cmd_permissions(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) ->
     }
     let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
     Ok(format!(
-        "{} allowed · {} builtin + {} user deny pattern(s)",
+        "{} allow · {} ask · {} builtin + {} user deny rule(s)",
         allow.len(),
+        ask.len(),
         builtin_bash_deny().len(),
-        user.len()
+        deny.len()
     ))
 }
 
@@ -1225,7 +1289,7 @@ fn cmd_yolo(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<
     }
 }
 
-const CONFIG_TEMPLATE: &str = "{\n  \"host\": \"http://localhost:11434\",\n  \"model\": \"gemma4:26b\",\n  \"mcp\": {},\n  \"permissions\": {\"bash_deny\": [], \"bash_allow\": []}\n}\n";
+const CONFIG_TEMPLATE: &str = "{\n  \"host\": \"http://localhost:11434\",\n  \"model\": \"gemma4:26b\",\n  \"mcp\": {},\n  \"permissions\": {\"allow\": [], \"ask\": [], \"deny\": []}\n}\n";
 
 fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     match arg {
@@ -1269,8 +1333,9 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
                 let _ = fx.send(UiEffect::Out(Kind::Warn, format!("! {w}")));
             }
             let config = loaded.config;
-            agent.ctx().set_deny(&config.permissions.bash_deny);
-            agent.ctx().set_allow(&config.permissions.bash_allow);
+            for w in agent.ctx().set_permissions(&config.permissions) {
+                let _ = fx.send(UiEffect::Out(Kind::Warn, format!("! {w}")));
+            }
             agent.ctx().set_bash_wrapper(config.permissions.bash_wrapper.clone());
             agent.ctx().set_search_url(config.search_url.clone());
             agent.ctx().set_approval(config.permissions.approve_effective());
@@ -1287,11 +1352,14 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
             );
             agent.ctx().set_post_edit_hooks(&post_edit);
             cx.config_path = loaded.paths.last().cloned();
+            let (allow_n, ask_n, deny_n) = {
+                let (a, k, d) = agent.ctx().permission_rules();
+                (a.len(), k.len(), d.len())
+            };
             let msg = format!(
-                "config reloaded — approval {}, {} allowed / {} user deny pattern(s) (host/model/MCP changes need a restart)",
+                "config reloaded — approval {}, {} allow / {} ask / {} deny rule(s) (host/model/MCP changes need a restart)",
                 if config.permissions.approve_effective() { "ON" } else { "off" },
-                config.permissions.bash_allow.len(),
-                config.permissions.bash_deny.len(),
+                allow_n, ask_n, deny_n,
             );
             let _ = fx.send(UiEffect::Out(Kind::Info, msg.clone()));
             Ok(msg)

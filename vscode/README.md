@@ -11,6 +11,22 @@ project memory, `/fork`, swarm, web search, the live diff pane — all of it.
 
 ## Features
 
+### Inline diff review — accept or reject each hunk
+
+Every file edit the agent proposes opens as a **native VS Code diff**
+*before it touches disk*: original on the left, proposal on the right, with
+a CodeLens on every hunk to accept or reject it individually (rejecting a
+hunk visibly removes its change from the diff). Apply with the ✓ title-bar
+button or the top CodeLens — only the accepted hunks are written, and the
+agent is told when you kept just part of its proposal. Reject everything
+and the agent is told the edit was denied and adjusts course.
+
+A matching card in the chat tracks each pending review (Apply / Open diff /
+Reject), so nothing gets lost if you close the diff tab. Set
+`rift.inlineDiffReview` to `false` to go back to the classic in-chat
+approval prompts. Requires rift ≥ 1.7 (older binaries keep the classic
+prompts automatically).
+
 ### Sidebar chat
 
 Click the Rift icon in the activity bar (or `Ctrl+Cmd+R` / `Ctrl+Alt+R`, or
@@ -64,6 +80,7 @@ The same values are exposed as VS Code settings:
 | `rift.numCtx` | *(empty)* | Context window per call, passed as `--num-ctx` |
 | `rift.temperature` | *(empty)* | Sampling temperature, passed as `--temp` |
 | `rift.maxIterations` | *(empty)* | Max agent-loop iterations per turn, passed as `--max-iterations` |
+| `rift.inlineDiffReview` | `true` | Review agent edits as native diffs with per-hunk accept/reject; off = classic in-chat prompts |
 
 Empty settings defer to rift's own defaults and `.rift.json` config, so an
 existing rift setup needs no configuration here at all.

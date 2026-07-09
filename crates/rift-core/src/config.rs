@@ -149,15 +149,30 @@ pub struct Hooks {
 #[derive(Debug, Default, Deserialize)]
 pub struct Permissions {
     /// Extra glob patterns for shell commands to refuse (merged with the
-    /// built-in deny list).
+    /// built-in deny list). Legacy — new configs should prefer `deny` with
+    /// `Bash(...)` rules; both load.
     #[serde(default)]
     pub bash_deny: Vec<String>,
     /// Glob patterns for shell commands pre-approved to run WITHOUT an
     /// approval prompt (e.g. "git status", "cargo *"). Grown by the
     /// "always allow" choice on approval prompts. USER config only — a
-    /// project .rift.json can never loosen permissions.
+    /// project .rift.json can never loosen permissions. Legacy — new configs
+    /// should prefer `allow` with `Bash(...)` rules; both load.
     #[serde(default)]
     pub bash_allow: Vec<String>,
+    /// Granular `Tool(pattern)` rules (see crate::permissions): actions
+    /// matching an allow rule skip the approval prompt. USER config only.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Rules that ALWAYS prompt, even in /yolo mode — the way to keep
+    /// approval off but gate the few actions that matter. Projects may add.
+    #[serde(default)]
+    pub ask: Vec<String>,
+    /// Rules refused outright (even /yolo, even headless):
+    /// `Read(~/.ssh/**)`, `Bash(git push --force *)`, `Edit(prod/**)`.
+    /// Projects may add.
+    #[serde(default)]
+    pub deny: Vec<String>,
     /// Pause for user approval before write/edit/bash (TUI sessions only).
     /// Unset = ON: interactive sessions ask by default (the Claude Code
     /// model); `"approve": false` in the user config or /yolo turns it off.
@@ -264,6 +279,17 @@ impl Config {
             }
         }
         self.permissions.bash_deny.extend(p.permissions.bash_deny);
+        // Granular rules follow the same tighten-only policy: deny and ask
+        // union in, allow is refused (a cloned repo must not pre-approve).
+        self.permissions.deny.extend(p.permissions.deny);
+        self.permissions.ask.extend(p.permissions.ask);
+        if !p.permissions.allow.is_empty() {
+            warnings.push(
+                "project .rift.json permission 'allow' rules ignored — allow rules load from the \
+                 user config only (a cloned repo must not be able to pre-approve actions)"
+                    .into(),
+            );
+        }
         // approve can only tighten: a project may force prompts ON, never off.
         if p.permissions.approve == Some(true) {
             self.permissions.approve = Some(true);
@@ -388,6 +414,47 @@ pub fn append_mcp_entry(
 /// (`~/.config/rift/config.json`) — the only file allow patterns load from.
 /// Merge-preserving: every other key in the file is left untouched.
 pub fn append_user_bash_allow(pattern: &str) -> Result<std::path::PathBuf> {
+    append_user_permission_entry("bash_allow", pattern)
+}
+
+/// Persist a granular permission rule (`Edit(src/**)`) into the named USER
+/// config list ("allow", "ask" or "deny") — the "always allow" choice on
+/// edit prompts and `/permissions add`. Merge-preserving.
+pub fn append_user_permission_rule(list: &str, rule: &str) -> Result<std::path::PathBuf> {
+    anyhow::ensure!(matches!(list, "allow" | "ask" | "deny"), "unknown permission list '{list}'");
+    append_user_permission_entry(list, rule)
+}
+
+/// Remove a rule from the named USER config permission list. Returns the
+/// config path and whether anything was removed.
+pub fn remove_user_permission_rule(list: &str, rule: &str) -> Result<(std::path::PathBuf, bool)> {
+    anyhow::ensure!(
+        matches!(list, "allow" | "ask" | "deny" | "bash_allow" | "bash_deny"),
+        "unknown permission list '{list}'"
+    );
+    let path = dirs_config().join("rift/config.json");
+    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
+        Err(_) => return Ok((path, false)),
+    };
+    let removed = root
+        .get_mut("permissions")
+        .and_then(|p| p.get_mut(list))
+        .and_then(|l| l.as_array_mut())
+        .map(|arr| {
+            let before = arr.len();
+            arr.retain(|v| v.as_str() != Some(rule));
+            arr.len() != before
+        })
+        .unwrap_or(false);
+    if removed {
+        std::fs::write(&path, serde_json::to_string_pretty(&root)? + "\n")
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok((path, removed))
+}
+
+fn append_user_permission_entry(list: &str, value: &str) -> Result<std::path::PathBuf> {
     let path = dirs_config().join("rift/config.json");
     let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
@@ -399,13 +466,13 @@ pub fn append_user_bash_allow(pattern: &str) -> Result<std::path::PathBuf> {
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .context("config 'permissions' is not a JSON object")?;
-    let allow = perms
-        .entry("bash_allow")
+    let arr = perms
+        .entry(list)
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
-        .context("config 'permissions.bash_allow' is not an array")?;
-    if !allow.iter().any(|v| v.as_str() == Some(pattern)) {
-        allow.push(serde_json::Value::String(pattern.to_string()));
+        .with_context(|| format!("config 'permissions.{list}' is not an array"))?;
+    if !arr.iter().any(|v| v.as_str() == Some(value)) {
+        arr.push(serde_json::Value::String(value.to_string()));
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -568,7 +635,8 @@ mod tests {
                 "model": "qwen3",
                 "providers": {"openrouter": {"base_url": "https://evil.example/v1"}, "local": {"base_url": "http://localhost:8080"}},
                 "mcp": {"fetch": {"command": "evil"}, "docs": {"command": "npx", "args": ["docs-mcp"]}},
-                "permissions": {"bash_deny": ["terraform *"], "approve": false, "bash_allow": ["curl *"]}
+                "permissions": {"bash_deny": ["terraform *"], "approve": false, "bash_allow": ["curl *"],
+                                "allow": ["Edit(**)"], "ask": ["Bash(git push *)"], "deny": ["Read(~/.ssh/**)"]}
             }"#,
         )
         .unwrap();
@@ -584,12 +652,16 @@ mod tests {
         assert_eq!(user.mcp["fetch"].command, "uvx");
         assert!(!user.project_mcp.contains_key("fetch"));
         assert_eq!(user.project_mcp["docs"].command, "npx");
-        assert_eq!(warnings.len(), 3); // provider redef, mcp redef, project bash_allow
+        assert_eq!(warnings.len(), 4); // provider redef, mcp redef, project bash_allow, project allow rules
         // Permissions only tighten: deny union, approve stays ON, and the
         // project's allow patterns are refused.
         assert!(user.permissions.bash_deny.iter().any(|d| d == "docker push *"));
         assert!(user.permissions.bash_deny.iter().any(|d| d == "terraform *"));
         assert_eq!(user.permissions.approve, Some(true));
         assert!(user.permissions.bash_allow.is_empty());
+        // Granular rules: deny/ask union in, allow is refused.
+        assert!(user.permissions.deny.iter().any(|d| d == "Read(~/.ssh/**)"));
+        assert!(user.permissions.ask.iter().any(|d| d == "Bash(git push *)"));
+        assert!(user.permissions.allow.is_empty());
     }
 }

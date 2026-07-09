@@ -3,15 +3,27 @@
 //! per line; stdin carries one command object per line; stderr stays
 //! human-readable diagnostics. The process exits when stdin closes.
 //!
-//! Commands:  {"cmd":"prompt","text":…} | {"cmd":"answer","id":…,"text":…}
-//!            | {"cmd":"cancel"} | {"cmd":"undo"}
+//! Commands:  {"cmd":"hello","edit_review":bool} | {"cmd":"prompt","text":…}
+//!            | {"cmd":"answer","id":…,"text":…} | {"cmd":"cancel"} | {"cmd":"undo"}
+//!            | {"cmd":"edit_decision","id":…,"apply":bool,"content":…}
 //! Events:    ready, history, iteration, thinking, content, tool_start,
 //!            tool_result, info, warning, plan, subagent_started, subagent,
 //!            subagent_finished, task_started, task_finished,
-//!            ask (answer it by id), done (always ends a turn).
+//!            ask (answer it by id), edit_review (decide it by id),
+//!            done (always ends a turn).
+//!
+//! Inline diff review is a capability the consumer opts into with
+//! `{"cmd":"hello","edit_review":true}` (the VS Code extension sends it at
+//! spawn). Once enabled, every proposed write/edit is emitted as an
+//! edit_review event ({path, old, new}) BEFORE it touches disk; the
+//! consumer shows a native diff and replies with edit_decision —
+//! apply:true writes `content` (the proposal, or the accepted-hunk subset
+//! the reviewer assembled; omitted = the proposal verbatim), apply:false
+//! rejects it. Consumers that never say hello keep the plain `ask`
+//! approval prompts, so older frontends are unaffected.
 
 use anyhow::Result;
-use rift_core::{Agent, AgentEvent, AskRequest, SessionStore, TurnStats};
+use rift_core::{Agent, AgentEvent, AskRequest, EditReviewReply, EditReviewRequest, SessionStore, TurnStats};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::io::AsyncBufReadExt;
@@ -86,6 +98,11 @@ pub async fn run_serve(
 ) -> Result<()> {
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<ServeCmd>();
+    // Inline diff review: created here but only installed into the ctx when
+    // the consumer's hello opts in — a consumer that doesn't know the
+    // edit_review event must keep getting plain ask prompts, not hang.
+    let (review_tx, mut review_rx) = mpsc::unbounded_channel::<EditReviewRequest>();
+    let review_ctl = agent.ctx().clone();
     // Background-task events surface through the same channel, between turns.
     agent.ctx().bg().set_notify(ev_tx.clone());
     let cwd = std::env::current_dir()?.display().to_string();
@@ -161,10 +178,15 @@ pub async fn run_serve(
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut pending_asks: HashMap<u64, tokio::sync::oneshot::Sender<String>> = HashMap::new();
+    // Review id → (reply channel, the proposed content) — the proposal is
+    // kept so an `apply` with no `content` field applies it verbatim.
+    let mut pending_reviews: HashMap<u64, (tokio::sync::oneshot::Sender<EditReviewReply>, String)> =
+        HashMap::new();
     let mut ask_seq: u64 = 0;
     let mut current_cancel: Option<CancellationToken> = None;
     let mut busy = false;
     let mut asks_open = true;
+    let mut reviews_open = true;
 
     loop {
         tokio::select! {
@@ -173,6 +195,13 @@ pub async fn run_serve(
                 if matches!(ev, AgentEvent::Done(_)) {
                     busy = false;
                     current_cancel = None;
+                    // Any review still pending when the turn ends is
+                    // orphaned (its tool is gone) — a later edit_decision
+                    // would silently do nothing while the consumer shows
+                    // "applied". Tell it to close them instead.
+                    for (id, _) in pending_reviews.drain() {
+                        emit(json!({"event": "edit_review_closed", "id": id}));
+                    }
                 }
                 emit(event_json(&ev));
             }
@@ -192,6 +221,24 @@ pub async fn run_serve(
                     None => asks_open = false,
                 }
             }
+            review = review_rx.recv(), if reviews_open => {
+                match review {
+                    Some(req) => {
+                        // Same id space as asks — one counter, two maps.
+                        ask_seq += 1;
+                        emit(json!({
+                            "event": "edit_review",
+                            "id": ask_seq,
+                            "tool": req.tool,
+                            "path": req.path.display().to_string(),
+                            "old": req.old,
+                            "new": req.new,
+                        }));
+                        pending_reviews.insert(ask_seq, (req.reply, req.new));
+                    }
+                    None => reviews_open = false,
+                }
+            }
             line = lines.next_line() => {
                 let Ok(Some(line)) = line else { break }; // EOF: consumer went away
                 if line.trim().is_empty() {
@@ -205,6 +252,14 @@ pub async fn run_serve(
                     }
                 };
                 match v["cmd"].as_str() {
+                    // Capability handshake. Idempotent; send it once at spawn.
+                    Some("hello") => {
+                        if v["edit_review"].as_bool().unwrap_or(false) {
+                            review_ctl.set_edit_review(Some(review_tx.clone()));
+                        } else {
+                            review_ctl.set_edit_review(None);
+                        }
+                    }
                     Some("prompt") => {
                         let text = v["text"].as_str().unwrap_or("").to_string();
                         if text.trim().is_empty() {
@@ -225,9 +280,30 @@ pub async fn run_serve(
                             let _ = reply.send(v["text"].as_str().unwrap_or("").to_string());
                         }
                     }
+                    Some("edit_decision") => {
+                        let id = v["id"].as_u64().unwrap_or(0);
+                        if let Some((reply, proposal)) = pending_reviews.remove(&id) {
+                            let decision = if v["apply"].as_bool().unwrap_or(false) {
+                                // `content` = the reviewer's accepted-hunk
+                                // text; absent = apply the proposal as-is.
+                                match v["content"].as_str() {
+                                    Some(c) => EditReviewReply::Apply(c.to_string()),
+                                    None => EditReviewReply::Apply(proposal),
+                                }
+                            } else {
+                                EditReviewReply::Deny
+                            };
+                            let _ = reply.send(decision);
+                        }
+                    }
                     Some("cancel") => {
                         if let Some(c) = &current_cancel {
                             c.cancel();
+                        }
+                        // Cancelling drops the tools awaiting review; close
+                        // their diffs so a decision can't be sent into the void.
+                        for (id, _) in pending_reviews.drain() {
+                            emit(json!({"event": "edit_review_closed", "id": id}));
                         }
                     }
                     Some("undo") => {
@@ -239,15 +315,17 @@ pub async fn run_serve(
                         }
                         let _ = prompt_tx.send(ServeCmd::Undo);
                     }
-                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/cancel/undo)"})),
+                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/edit_decision/cancel/undo)"})),
                 }
             }
         }
     }
 
-    // Shutdown: abandon any pending ask, cancel the in-flight turn, and let
-    // the agent task finish its loop so the session file gets its last save.
+    // Shutdown: abandon any pending ask/review (dropped reply = denied),
+    // cancel the in-flight turn, and let the agent task finish its loop so
+    // the session file gets its last save.
     pending_asks.clear();
+    pending_reviews.clear();
     if let Some(c) = current_cancel {
         c.cancel();
     }

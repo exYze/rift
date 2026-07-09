@@ -6,6 +6,7 @@ pub mod memory;
 pub mod outline;
 pub mod outline_cache;
 pub mod paths;
+pub mod permissions;
 pub mod prompts;
 pub mod session;
 pub mod skills;
@@ -27,8 +28,10 @@ pub use tasks::{BgTasks, TaskKind, TaskStatus, TaskView};
 pub use swarm::{
     judge_swarm, run_swarm, Candidate, CandidateOutcome, JudgeVerdict, ProviderFactory, Swarm,
 };
+pub use permissions::{Decision, RuleSet};
 pub use tools::{
-    builtin_bash_deny, AskRequest, AskUserTool, EditRecord, PlanItem, Tool, ToolCtx, ToolRegistry,
+    builtin_bash_deny, AskRequest, AskUserTool, EditRecord, EditReviewReply, EditReviewRequest,
+    PlanItem, Tool, ToolCtx, ToolRegistry,
 };
 pub use trace::{FailureCounters, TraceWriter};
 

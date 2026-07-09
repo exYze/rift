@@ -107,11 +107,309 @@ function riftArgs() {
   return args;
 }
 
+// ── Inline diff review ──────────────────────────────────────────────────────
+// rift (with the edit_review capability negotiated at spawn) emits every
+// proposed write/edit as {path, old, new} BEFORE touching disk. We show it
+// as a native VS Code diff between two virtual documents and let the user
+// accept/reject individual hunks via CodeLens; the assembled result goes
+// back as an edit_decision and only then does rift write the file.
+
+/** Line-based Myers diff of a → b as an op list ('same' | 'del' | 'ins').
+ *  Falls back to one whole-file change when the edit distance exceeds the
+ *  cap — review still works, just as a single hunk. */
+function diffOps(a, b) {
+  const n = a.length;
+  const m = b.length;
+  if (!n) return b.map(() => 'ins');
+  if (!m) return a.map(() => 'del');
+  const maxD = Math.min(n + m, 2000);
+  const offset = maxD;
+  let v = new Array(2 * maxD + 1).fill(0);
+  const trace = [];
+  let found = -1;
+  for (let d = 0; d <= maxD && found < 0; d++) {
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let x;
+      if (k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])) x = v[offset + k + 1];
+      else x = v[offset + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+      v[offset + k] = x;
+      if (x >= n && y >= m) {
+        found = d;
+        break;
+      }
+    }
+  }
+  if (found < 0) return [...a.map(() => 'del'), ...b.map(() => 'ins')];
+  const ops = [];
+  let x = n;
+  let y = m;
+  for (let d = found; d > 0; d--) {
+    const vp = trace[d];
+    const k = x - y;
+    const prevK = k === -d || (k !== d && vp[offset + k - 1] < vp[offset + k + 1]) ? k + 1 : k - 1;
+    const prevX = vp[offset + prevK];
+    const prevY = prevX - prevK;
+    while (x > prevX && y > prevY) { x--; y--; ops.push('same'); }
+    if (x === prevX) { y--; ops.push('ins'); }
+    else { x--; ops.push('del'); }
+  }
+  while (x > 0 && y > 0) { x--; y--; ops.push('same'); }
+  while (x > 0) { x--; ops.push('del'); }
+  while (y > 0) { y--; ops.push('ins'); }
+  return ops.reverse();
+}
+
+/** Group old/new text into alternating unchanged/changed segments — each
+ *  changed segment is one reviewable hunk. */
+function diffSegments(oldText, newText) {
+  const a = oldText.split('\n');
+  const b = newText.split('\n');
+  const segs = [];
+  let ai = 0;
+  let bi = 0;
+  for (const op of diffOps(a, b)) {
+    const last = segs[segs.length - 1];
+    if (op === 'same') {
+      if (last && last.same) last.lines.push(a[ai]);
+      else segs.push({ same: true, lines: [a[ai]] });
+      ai++; bi++;
+    } else {
+      let seg = last && !last.same ? last : null;
+      if (!seg) {
+        seg = { same: false, oldLines: [], newLines: [] };
+        segs.push(seg);
+      }
+      if (op === 'del') { seg.oldLines.push(a[ai]); ai++; }
+      else { seg.newLines.push(b[bi]); bi++; }
+    }
+  }
+  return segs;
+}
+
+/** The right-hand document: unchanged text plus each hunk in its currently
+ *  accepted (new) or rejected (old) form — so rejecting a hunk visibly
+ *  removes its highlight from the diff. Also returns each hunk's line. */
+function reviewPreview(r) {
+  const lines = [];
+  const hunkAt = [];
+  let h = 0;
+  for (const seg of r.segments) {
+    if (seg.same) {
+      lines.push(...seg.lines);
+      continue;
+    }
+    hunkAt[h] = lines.length;
+    lines.push(...(r.accepted[h] ? seg.newLines : seg.oldLines));
+    h++;
+  }
+  return { text: lines.join('\n'), hunkAt };
+}
+
+const REVIEW_SCHEME = 'rift-review';
+
+/** Command argument → review id: editor-title buttons pass the resource
+ *  Uri, CodeLens/chat pass the id itself. */
+function reviewIdFromArg(arg) {
+  if (arg && typeof arg === 'object' && arg.scheme) {
+    return arg.scheme === REVIEW_SCHEME ? arg.path.split('/')[1] : undefined;
+  }
+  return arg;
+}
+
+class DiffReviewer {
+  constructor() {
+    /** Pending reviews by String(id): {id, tool, rel, old, segments,
+     *  accepted[], left, right, send, notify, done}. */
+    this.reviews = new Map();
+    this.contentEmitter = new vscode.EventEmitter();
+    this.lensEmitter = new vscode.EventEmitter();
+    /** TextDocumentContentProvider */
+    this.onDidChange = this.contentEmitter.event;
+    /** CodeLensProvider */
+    this.onDidChangeCodeLenses = this.lensEmitter.event;
+  }
+
+  /** Track a new edit_review event. `send` writes an edit_decision command
+   *  to rift; `notify` updates the chat card when the review resolves. */
+  register(ev, send, notify) {
+    const rel = vscode.workspace.asRelativePath(ev.path, false);
+    const segments = diffSegments(ev.old, ev.new);
+    // The basename keeps its extension so the diff gets real syntax
+    // highlighting; the id makes the pair unique.
+    const name = path.basename(ev.path);
+    const left = vscode.Uri.from({ scheme: REVIEW_SCHEME, path: `/${ev.id}/orig/${name}` });
+    const right = vscode.Uri.from({ scheme: REVIEW_SCHEME, path: `/${ev.id}/proposed/${name}` });
+    const r = {
+      id: ev.id,
+      tool: ev.tool,
+      rel,
+      old: ev.old,
+      segments,
+      accepted: segments.filter((s) => !s.same).map(() => true),
+      left,
+      right,
+      send,
+      notify,
+      done: false,
+    };
+    this.reviews.set(String(ev.id), r);
+    const added = segments.reduce((t, s) => t + (s.same ? 0 : s.newLines.length), 0);
+    const removed = segments.reduce((t, s) => t + (s.same ? 0 : s.oldLines.length), 0);
+    return { hunks: r.accepted.length, added, removed };
+  }
+
+  get(id) {
+    return this.reviews.get(String(id));
+  }
+
+  async show(id) {
+    const r = this.get(id);
+    if (!r) return;
+    const n = r.accepted.length;
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      r.left,
+      r.right,
+      `rift: ${r.rel} (${n} hunk${n === 1 ? '' : 's'})`,
+      { preview: false }
+    );
+  }
+
+  provideTextDocumentContent(uri) {
+    const [, id, side] = uri.path.split('/');
+    const r = this.reviews.get(id);
+    if (!r) return '(review closed)';
+    return side === 'orig' ? r.old : reviewPreview(r).text;
+  }
+
+  provideCodeLenses(doc) {
+    const [, id, side] = doc.uri.path.split('/');
+    if (side !== 'proposed') return [];
+    const r = this.reviews.get(id);
+    if (!r || r.done) return [];
+    const { hunkAt } = reviewPreview(r);
+    const total = r.accepted.length;
+    const kept = r.accepted.filter(Boolean).length;
+    const top = new vscode.Range(0, 0, 0, 0);
+    const lenses = [
+      new vscode.CodeLens(top, {
+        title: kept
+          ? `✔ rift: Apply ${kept}/${total} hunk${total === 1 ? '' : 's'}`
+          : 'rift: nothing accepted — Apply rejects the edit',
+        command: 'rift.reviewApply',
+        arguments: [r.id],
+        tooltip: 'Write the accepted hunks to the file; the agent continues from the result',
+      }),
+      new vscode.CodeLens(top, {
+        title: '✘ Reject all',
+        command: 'rift.reviewReject',
+        arguments: [r.id],
+        tooltip: 'Apply nothing — the agent is told the edit was denied',
+      }),
+    ];
+    r.accepted.forEach((on, i) => {
+      const line = Math.min(hunkAt[i] || 0, Math.max(doc.lineCount - 1, 0));
+      lenses.push(
+        new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
+          title: on
+            ? `✓ hunk ${i + 1}/${total} — click to reject`
+            : `✗ hunk ${i + 1}/${total} rejected — click to restore`,
+          command: 'rift.reviewToggle',
+          arguments: [r.id, i],
+        })
+      );
+    });
+    return lenses;
+  }
+
+  toggle(id, i) {
+    const r = this.get(id);
+    if (!r || r.done) return;
+    r.accepted[i] = !r.accepted[i];
+    this.contentEmitter.fire(r.right);
+    this.lensEmitter.fire();
+  }
+
+  apply(id) {
+    const r = this.get(id);
+    if (!r || r.done) return;
+    const kept = r.accepted.filter(Boolean).length;
+    if (!kept) return this.reject(id); // nothing accepted = a rejection
+    r.send({ cmd: 'edit_decision', id: r.id, apply: true, content: reviewPreview(r).text });
+    this.finish(r, `applied ${kept}/${r.accepted.length} hunk${r.accepted.length === 1 ? '' : 's'}`, true);
+  }
+
+  reject(id) {
+    const r = this.get(id);
+    if (!r || r.done) return;
+    r.send({ cmd: 'edit_decision', id: r.id, apply: false });
+    this.finish(r, 'rejected', false);
+  }
+
+  finish(r, verdict, applied) {
+    r.done = true;
+    this.reviews.delete(String(r.id));
+    r.notify({ verdict, applied });
+    this.lensEmitter.fire();
+    this.closeTabs(r);
+  }
+
+  /** Close every diff tab showing this review. */
+  async closeTabs(r) {
+    const target = r.right.toString();
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (tab.input && tab.input.modified && tab.input.modified.toString() === target) {
+          try {
+            await vscode.window.tabGroups.close(tab);
+          } catch {
+            /* already gone */
+          }
+        }
+      }
+    }
+  }
+
+  /** Resolve one pending review without sending a decision — the turn was
+   *  cancelled/finished, so rift already denied or abandoned the edit. */
+  cancelOne(id, reason) {
+    const r = this.get(id);
+    if (!r) return;
+    r.done = true;
+    this.reviews.delete(String(r.id));
+    r.notify({ verdict: reason, applied: false });
+    this.closeTabs(r);
+    this.lensEmitter.fire();
+  }
+
+  /** rift exited / session restarted: resolve every pending card, close tabs.
+   *  No decision is sent — rift saw the channel drop and denied the edit. */
+  cancelAll(reason) {
+    for (const r of [...this.reviews.values()]) this.cancelOne(r.id, reason);
+  }
+
+  /** The review in the active tab — lets the editor-title ✓/✗ buttons work
+   *  without arguments. */
+  activeReviewId() {
+    const tab = vscode.window.tabGroups.activeTabGroup && vscode.window.tabGroups.activeTabGroup.activeTab;
+    const uri =
+      tab && tab.input && tab.input.modified
+        ? tab.input.modified
+        : vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.uri;
+    if (!uri || uri.scheme !== REVIEW_SCHEME) return undefined;
+    return uri.path.split('/')[1];
+  }
+}
+
 // ── Sidebar chat ────────────────────────────────────────────────────────────
 
 class RiftChatProvider {
-  constructor(context) {
+  constructor(context, reviewer) {
     this.context = context;
+    this.reviewer = reviewer;
     this.view = null;
     this.proc = null;
     this.busy = false;
@@ -285,12 +583,18 @@ class RiftChatProvider {
     proc.on('exit', (code) => {
       this.proc = null;
       this.busy = false;
+      this.reviewer.cancelAll('cancelled — rift exited');
       if (code !== 0 && code != null) {
         const tail = this.stderrTail.slice(-4).join('\n');
         this.post({ type: 'rift', ev: { event: 'warning', text: `rift exited (code ${code})${tail ? '\n' + tail : ''}` } });
       }
       this.postStatus();
     });
+    // Capability handshake: opt into edit_review events so write/edit
+    // proposals arrive as native diffs instead of plain approval prompts.
+    // rift.inlineDiffReview=false skips the opt-in — approvals fall back to
+    // the classic in-chat prompt with the diff as colored text.
+    this.write({ cmd: 'hello', edit_review: config().get('inlineDiffReview') !== false });
     this.postStatus();
   }
 
@@ -299,10 +603,39 @@ class RiftChatProvider {
       this.model = ev.model;
     } else if (ev.event === 'done') {
       this.busy = false;
+    } else if (ev.event === 'edit_review') {
+      // Full file contents ride on this event — route it to the diff
+      // reviewer and give the webview a slim card instead of the raw event.
+      this.onEditReview(ev);
+      return;
+    } else if (ev.event === 'edit_review_closed') {
+      // The turn ended/cancelled before a decision — resolve the card so a
+      // stale Apply can't claim success for an edit that never happened.
+      this.reviewer.cancelOne(ev.id, 'cancelled — the turn ended before a decision');
+      return;
     }
     // Thinking/content deltas are high-volume; replaying them is what makes
     // the transcript reappear intact, so they are recorded like the rest.
     this.post({ type: 'rift', ev });
+    this.postStatus();
+  }
+
+  onEditReview(ev) {
+    const stats = this.reviewer.register(
+      ev,
+      (cmd) => this.write(cmd),
+      (res) => this.post({ type: 'editReviewDone', id: ev.id, verdict: res.verdict, applied: res.applied })
+    );
+    this.post({
+      type: 'editReview',
+      id: ev.id,
+      tool: ev.tool,
+      path: vscode.workspace.asRelativePath(ev.path, false),
+      hunks: stats.hunks,
+      added: stats.added,
+      removed: stats.removed,
+    });
+    this.reviewer.show(ev.id);
     this.postStatus();
   }
 
@@ -334,6 +667,17 @@ class RiftChatProvider {
       case 'answer':
         this.write({ cmd: 'answer', id: m.id, text: m.text });
         break;
+      case 'reviewAction': {
+        // Buttons on the chat review card mirror the diff view's actions.
+        if (!this.reviewer.get(m.id)) {
+          this.post({ type: 'rift', ev: { event: 'warning', text: 'that edit review is no longer pending' } }, false);
+          break;
+        }
+        if (m.action === 'open') this.reviewer.show(m.id);
+        else if (m.action === 'apply') this.reviewer.apply(m.id);
+        else if (m.action === 'reject') this.reviewer.reject(m.id);
+        break;
+      }
       case 'cancel':
         this.write({ cmd: 'cancel' });
         break;
@@ -505,6 +849,7 @@ class RiftChatProvider {
   }
 
   restart(extraArgs) {
+    this.reviewer.cancelAll('cancelled — session restarted');
     if (this.proc) {
       this.proc.kill();
       this.proc = null;
@@ -521,6 +866,7 @@ class RiftChatProvider {
   }
 
   dispose() {
+    this.reviewer.cancelAll('cancelled');
     if (this.proc) this.proc.kill();
     this.proc = null;
   }
@@ -559,12 +905,25 @@ function mentionPath(uri) {
 }
 
 function activate(context) {
-  const chat = new RiftChatProvider(context);
+  const reviewer = new DiffReviewer();
+  const chat = new RiftChatProvider(context, reviewer);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('rift.chatView', chat, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     chat,
+    vscode.workspace.registerTextDocumentContentProvider(REVIEW_SCHEME, reviewer),
+    vscode.languages.registerCodeLensProvider({ scheme: REVIEW_SCHEME }, reviewer),
+    vscode.commands.registerCommand('rift.reviewToggle', (id, i) => reviewer.toggle(id, i)),
+    // Title-bar invocations pass the editor's resource Uri; CodeLens and
+    // chat-card invocations pass the review id; bare palette calls pass
+    // nothing — resolve all three.
+    vscode.commands.registerCommand('rift.reviewApply', (arg) =>
+      reviewer.apply(reviewIdFromArg(arg) ?? reviewer.activeReviewId())
+    ),
+    vscode.commands.registerCommand('rift.reviewReject', (arg) =>
+      reviewer.reject(reviewIdFromArg(arg) ?? reviewer.activeReviewId())
+    ),
     vscode.window.onDidCloseTerminal((t) => {
       if (t === riftTerminal) riftTerminal = null;
     })

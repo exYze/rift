@@ -389,7 +389,9 @@ async fn main() -> Result<()> {
     // a project `"approve": true` force it on.
     let approve = cli.approve || config.permissions.approve_effective();
     let mut ctx = ToolCtx::with_extra_deny(&cwd, &config.permissions.bash_deny).with_approval(approve);
-    ctx.set_allow(&config.permissions.bash_allow);
+    for warning in ctx.set_permissions(&config.permissions) {
+        eprintln!("warning: {warning}");
+    }
     if let Some(w) = &config.permissions.bash_wrapper {
         eprintln!("sandbox wrapper: every bash command routes through `{w}`");
     }
@@ -404,8 +406,8 @@ async fn main() -> Result<()> {
         registry.register(Box::new(AskUserTool));
         if approve {
             eprintln!(
-                "approval: write/edit/bash ask first ({} allowed pattern(s) skip the prompt; /yolo stops asking)",
-                config.permissions.bash_allow.len()
+                "approval: write/edit/bash ask first ({} allow rule(s) skip the prompt; /yolo stops asking)",
+                ctx.user_allow_patterns().len()
             );
         }
     } else if cli.approve || config.permissions.approve == Some(true) {
