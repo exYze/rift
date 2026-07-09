@@ -116,6 +116,11 @@ pub enum AgentEvent {
     TaskFinished { id: u64, label: String, ok: bool, preview: String },
     /// Turn finished (success or abort); always the final event of a turn.
     Done(TurnStats),
+    /// Context-window occupancy: estimated tokens the conversation holds
+    /// vs the working num_ctx — the frontends' context gauge. Emitted by
+    /// the agent-owning task after every turn/command (post-compaction),
+    /// and once at startup so resumed sessions show their fill level.
+    Context { used: u64, limit: u64 },
 }
 
 pub struct Agent {
@@ -224,6 +229,18 @@ impl Agent {
     /// Current actual/estimated prompt-token ratio of the estimator.
     pub fn calibration(&self) -> f64 {
         self.calibration
+    }
+
+    /// Estimated tokens the conversation currently occupies, and the
+    /// working context window — the context gauge. Same calibrated
+    /// estimator budget enforcement uses (system prompt + history + tool
+    /// schemas), so the number tracks what the next request will send.
+    pub fn context_usage(&self) -> (u64, u64) {
+        let overhead = compact::estimate_tokens(
+            &serde_json::to_string(&self.registry.tool_defs()).unwrap_or_default(),
+        );
+        let used = compact::estimate_prompt_tokens(&self.messages, overhead, self.calibration);
+        (used, self.cfg.num_ctx)
     }
 
     /// Enforce the context budget before a request. Stage 1 prunes old tool

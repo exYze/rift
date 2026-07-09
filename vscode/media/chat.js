@@ -165,6 +165,30 @@
     statusEl.textContent = baseStatus + (active ? ` · ⧉ ${active} running` : '');
   }
 
+  // ── Context gauge ─────────────────────────────────────────────────────────
+  // A header pill showing how full the model's context window is (estimated
+  // conversation tokens vs the working num_ctx, from rift's context events).
+  const ctxEl = document.getElementById('ctx');
+
+  function fmtTok(n) {
+    return n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+  }
+
+  function renderCtxGauge(used, limit) {
+    if (!limit) {
+      ctxEl.className = 'hidden';
+      return;
+    }
+    const pct = Math.min(999, Math.round((used * 100) / limit));
+    ctxEl.textContent = `ctx ${pct}%`;
+    ctxEl.className = pct >= 85 ? 'ctx-high' : pct >= 60 ? 'ctx-mid' : 'ctx-low';
+    ctxEl.setAttribute(
+      'data-tip',
+      `Context window: ~${fmtTok(used)} of ${fmtTok(limit)} tokens in use` +
+        (pct >= 85 ? ' — rift will compact older history soon' : '')
+    );
+  }
+
   /** One card per sub-agent/background task: a status head plus its own
    *  scrolling activity feed, so parallel agents don't interleave. */
   function agentLane(tag, icon, model, label) {
@@ -637,6 +661,7 @@
     else if (m.type === 'status') {
       baseStatus = m.text;
       renderStatus();
+      renderCtxGauge(m.ctxUsed, m.ctxLimit);
       btnStop.classList.toggle('hidden', !m.busy);
       btnSend.classList.toggle('hidden', m.busy);
     } else if (m.type === 'insert') {

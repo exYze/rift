@@ -110,7 +110,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/yolo [off]` | YOLO mode: stop asking before write/edit/bash (the deny list still applies); `/yolo off` restores prompts. When prompts are on, choosing "always allow '<pattern>'" saves the pattern to your user config so that command family never asks again |
 | `/copy [all\|log]` | copy the last reply, whole transcript, or activity log to the clipboard |
 | `/compact` | force history compaction now |
-| `/tokens` | context budget, usage estimate, estimator calibration |
+| `/tokens` | context budget, usage estimate, estimator calibration — the status bar also shows a live `ctx 42% 13k/32k` gauge (green/amber/red as the window fills), refreshed after every turn, command, and compaction |
 | `/sessions [n]` | interactive session picker, or resume the nth directly |
 | `/skills` · `/skill:<name> [task]` | list packaged skills, or run one |
 | `/skills new [--global] <desc>` · `/mcp new [--global] <desc>` | the agent builds its own extensions: writes a skill file, or writes + self-tests a local MCP server and registers it (trust-gated). Default is project-scoped (`.rift/`, this repo only); `--global` installs user-wide (`~/.config/rift/`, every project) — `/restart` loads them |

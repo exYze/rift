@@ -419,6 +419,10 @@ class RiftChatProvider {
     this.log = [];
     this.stderrTail = [];
     this.stdoutBuf = '';
+    /** Context-window occupancy from rift's `context` events: estimated
+     *  tokens in the conversation vs the working num_ctx. 0/0 = unknown. */
+    this.ctxUsed = 0;
+    this.ctxLimit = 0;
   }
 
   resolveWebviewView(view) {
@@ -449,6 +453,7 @@ class RiftChatProvider {
 <body>
   <div id="header">
     <span id="status">rift</span>
+    <span id="ctx" class="hidden"></span>
     <span id="header-buttons">
       <button id="btn-undo" data-tip="Undo — revert the file edits from the last turn (changes made via bash are not tracked)">↶</button>
       <button id="btn-new" data-tip="New session — clear this conversation and start fresh">＋</button>
@@ -524,8 +529,16 @@ class RiftChatProvider {
       ? `${this.model || 'starting…'}${this.busy ? ' · working' : ''}`
       : 'not running — send a message to start';
     // Status is derived state, not history: never recorded for replay.
+    // ctxUsed/ctxLimit drive the header's context gauge pill.
     if (this.view) {
-      this.view.webview.postMessage({ type: 'status', text, running: !!this.proc, busy: this.busy });
+      this.view.webview.postMessage({
+        type: 'status',
+        text,
+        running: !!this.proc,
+        busy: this.busy,
+        ctxUsed: this.proc ? this.ctxUsed : 0,
+        ctxLimit: this.proc ? this.ctxLimit : 0,
+      });
     }
   }
 
@@ -601,6 +614,7 @@ class RiftChatProvider {
   onServerEvent(ev) {
     if (ev.event === 'ready') {
       this.model = ev.model;
+      if (ev.num_ctx) this.ctxLimit = ev.num_ctx;
     } else if (ev.event === 'done') {
       this.busy = false;
     } else if (ev.event === 'edit_review') {
@@ -612,6 +626,13 @@ class RiftChatProvider {
       // The turn ended/cancelled before a decision — resolve the card so a
       // stale Apply can't claim success for an edit that never happened.
       this.reviewer.cancelOne(ev.id, 'cancelled — the turn ended before a decision');
+      return;
+    } else if (ev.event === 'context') {
+      // Derived state for the status line (and the webview gauge) — not
+      // transcript history, so don't record/forward the raw event.
+      this.ctxUsed = ev.used;
+      this.ctxLimit = ev.limit;
+      this.postStatus();
       return;
     }
     // Thinking/content deltas are high-volume; replaying them is what makes
@@ -855,6 +876,8 @@ class RiftChatProvider {
       this.proc = null;
     }
     this.busy = false;
+    this.ctxUsed = 0;
+    this.ctxLimit = 0;
     this.log = [];
     this.post({ type: 'reset' }, false);
     this.ensureServer(extraArgs);

@@ -10,7 +10,9 @@
 //!            tool_result, info, warning, plan, subagent_started, subagent,
 //!            subagent_finished, task_started, task_finished,
 //!            ask (answer it by id), edit_review (decide it by id),
-//!            done (always ends a turn).
+//!            done (always ends a turn), context ({used, limit} —
+//!            context-window occupancy, sent at startup and after each
+//!            turn's idle compaction).
 //!
 //! Inline diff review is a capability the consumer opts into with
 //! `{"cmd":"hello","edit_review":true}` (the VS Code extension sends it at
@@ -78,6 +80,9 @@ fn event_json(ev: &AgentEvent) -> Value {
                 "tokens_per_sec": s.tokens_per_sec,
             },
         }),
+        AgentEvent::Context { used, limit } => {
+            json!({"event": "context", "used": used, "limit": limit})
+        }
     }
 }
 
@@ -112,6 +117,9 @@ pub async fn run_serve(
     // responsive mid-turn for cancel and ask answers.
     let turn_ev = ev_tx.clone();
     let cwd_save = cwd.clone();
+    // Captured before the agent moves: the ready event carries num_ctx and
+    // an initial gauge so resumed sessions show their fill level up front.
+    let (initial_used, num_ctx) = agent.context_usage();
     let agent_task = tokio::spawn(async move {
         while let Some(cmd) = prompt_rx.recv().await {
             match cmd {
@@ -125,6 +133,9 @@ pub async fn run_serve(
                     }
                     // Compact while the consumer renders the reply, not mid-turn.
                     agent.idle_compact(&turn_ev).await;
+                    // Post-compaction context gauge for the consumer's UI.
+                    let (used, limit) = agent.context_usage();
+                    let _ = turn_ev.send(AgentEvent::Context { used, limit });
                 }
                 // Same semantics as the TUI's /undo: revert the write/edit
                 // journal's most recent turn; conversation stays intact.
@@ -156,7 +167,9 @@ pub async fn run_serve(
         "session": session_path,
         "cwd": cwd,
         "version": env!("CARGO_PKG_VERSION"),
+        "num_ctx": num_ctx,
     }));
+    emit(json!({"event": "context", "used": initial_used, "limit": num_ctx}));
     if !resumed.is_empty() {
         // Replay user/assistant exchanges so a resumed session renders its
         // prior conversation (tool/system traffic stays out — the consumer
