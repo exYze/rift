@@ -219,8 +219,10 @@ impl Tool for PluginTool {
         {
             use tokio::io::AsyncWriteExt;
             let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-            stdin.write_all(serde_json::to_string(args)?.as_bytes()).await?;
-            // Drop closes the pipe — tools that read stdin to EOF finish.
+            // A tool that exits without reading stdin EPIPEs this write —
+            // that's fine; its exit status is the real signal. Drop closes
+            // the pipe so tools that read stdin to EOF finish.
+            let _ = stdin.write_all(serde_json::to_string(args)?.as_bytes()).await;
         }
         let out = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output())
             .await
