@@ -3,6 +3,31 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.9.0 — 2026-07-10
+
+Distribution, finished (roadmap v1.9) — plus the long-standing quick wins.
+
+- **winget**: `scripts/make_winget.sh vX.Y.Z` generates the manifest trio
+  from a release's published checksums; the release workflow auto-submits
+  version updates to microsoft/winget-pkgs via wingetcreate once the
+  `WINGET_TOKEN` secret exists (first-time submission is manual — see
+  packaging/winget/README.md)
+- **crates.io**: rift-provider/ollama/openai/anthropic/core now carry full
+  publish metadata and the release workflow publishes them in dependency
+  order once `CARGO_REGISTRY_TOKEN` exists — `rift-ollama` and friends
+  usable as standalone dependencies
+- **`--version` update nudge**: `rift --version` reports a newer release
+  when the 24h update-check cache knows one — cache-only, never a network
+  call, so offline machines never stall. Headless runs print the same
+  nudge to stderr after the turn (stdout pipelines unaffected)
+- **`/copy` palette completion**: typing `/copy ` offers `all` and `log`
+  with descriptions, prefix-filtered like command completion
+- **Palette mouse-wheel**: the wheel moves the selection in the command /
+  @file popup instead of scrolling the pane beneath it
+- **Session file size cap**: autosaves stay under 10MB — whole turns are
+  trimmed from the front (system prompt kept, tool-call pairs never
+  split). Live context is untouched; compaction still owns that
+
 ## v1.8.0 — 2026-07-10
 
 Model targets: each open-model family treated as a compiler target, with

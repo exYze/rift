@@ -240,11 +240,22 @@ target, the bench matrix as the fitness function.
 
 Closes the v0.9 tail so every mainstream install path works.
 
-- [ ] winget submission
-- [ ] Publish crates to crates.io (`rift-ollama` is useful standalone)
-- [ ] homebrew-core PR once the repo clears the notability bar
-- [ ] Quick-wins batch: `/copy` palette completion, mouse-wheel scroll on
-  the palette popup, `--version` update nudge, session file size cap
+- [x] winget (shipped 1.9.0): `scripts/make_winget.sh` generates the
+  manifest trio from a release's checksums; the release workflow submits
+  version bumps automatically via wingetcreate once the WINGET_TOKEN
+  secret exists. The package's FIRST submission to winget-pkgs is manual —
+  packaging/winget/README.md has the two routes
+- [x] crates.io (shipped 1.9.0): the five library crates carry full
+  publish metadata (internal deps versioned via workspace.dependencies);
+  the release workflow publishes them in dependency order once the
+  CARGO_REGISTRY_TOKEN secret exists. `rift-tui` stays releases-only
+- [ ] homebrew-core PR once the repo clears the notability bar (external —
+  the tap install works today)
+- [x] Quick-wins batch (shipped 1.9.0): `/copy` argument completion in the
+  palette, mouse-wheel scroll moves the palette selection, `--version`
+  prints a cache-only update nudge (headless runs nudge on stderr too),
+  autosaved session files capped at 10MB (whole turns trimmed from the
+  front; live context untouched)
 
 ## v1.10 — Serve protocol v1
 

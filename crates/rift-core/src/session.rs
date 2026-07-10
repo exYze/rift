@@ -61,6 +61,39 @@ pub fn normalize_tool_call_ids(messages: &mut [Message]) {
     }
 }
 
+/// Autosaved session files stay under this size — a long-lived session with
+/// giant tool outputs otherwise grows a file that slows every save and
+/// resume. Live context is untouched (compaction owns that); only what's
+/// persisted is trimmed.
+const MAX_SESSION_BYTES: usize = 10 * 1024 * 1024;
+
+/// Cap the persisted history: keep the leading system messages, then drop
+/// whole turns from the front (cuts land on User messages, so an assistant
+/// tool call is never separated from its role=tool results) until the
+/// serialized size fits. The final turn is always kept whatever its size.
+fn cap_history(messages: &[Message]) -> Vec<Message> {
+    let sizes: Vec<usize> =
+        messages.iter().map(|m| serde_json::to_vec(m).map_or(0, |v| v.len())).collect();
+    let mut total: usize = sizes.iter().sum();
+    if total <= MAX_SESSION_BYTES {
+        return messages.to_vec();
+    }
+    let sys_end = messages.iter().position(|m| m.role != Role::System).unwrap_or(messages.len());
+    let mut start = sys_end;
+    while total > MAX_SESSION_BYTES {
+        let Some(next) = (start + 1..messages.len()).find(|&i| messages[i].role == Role::User)
+        else {
+            break;
+        };
+        total -= sizes[start..next].iter().sum::<usize>();
+        start = next;
+    }
+    if start == sys_end {
+        return messages.to_vec();
+    }
+    messages[..sys_end].iter().chain(&messages[start..]).cloned().collect()
+}
+
 fn sessions_dir() -> Result<PathBuf> {
     let dir = crate::paths::data_dir()
         .context("could not determine a home directory (set HOME or USERPROFILE)")?;
@@ -231,7 +264,7 @@ impl SessionStore {
             model: model.to_string(),
             saved_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
             cwd: cwd.to_string(),
-            messages: messages.to_vec(),
+            messages: cap_history(messages),
         };
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&saved)?)?;
@@ -256,6 +289,37 @@ mod tests {
         let mut m = Message::tool_result(name, "ok");
         m.tool_call_id = id.map(str::to_string);
         m
+    }
+
+    #[test]
+    fn cap_history_drops_whole_turns_from_the_front() {
+        // 6 turns of ~3MB each (user + assistant tool call + tool result):
+        // well past the 10MB cap, so the front turns must go.
+        let big = "x".repeat(3 * 1024 * 1024);
+        let mut messages = vec![Message::system("sys")];
+        for i in 0..6 {
+            messages.push(Message::user(format!("turn {i}")));
+            let mut a = Message::user(big.clone());
+            a.role = Role::Assistant;
+            a.tool_calls = vec![call("read", Some(&format!("c{i}")))];
+            messages.push(a);
+            messages.push(tool_result("read", Some(&format!("c{i}"))));
+        }
+
+        let capped = cap_history(&messages);
+        let size = serde_json::to_vec(&capped).unwrap().len();
+        assert!(size <= MAX_SESSION_BYTES, "still {size} bytes");
+        // System prompt survives; the cut lands on a turn boundary, so no
+        // orphaned assistant call or role=tool result leads the history.
+        assert_eq!(capped[0].role, Role::System);
+        assert_eq!(capped[1].role, Role::User);
+        // The most recent turn is always kept.
+        assert!(capped.iter().any(|m| m.content == "turn 5"));
+        assert!(!capped.iter().any(|m| m.content == "turn 0"));
+
+        // Small histories come back untouched.
+        let small = vec![Message::system("sys"), Message::user("hi")];
+        assert_eq!(cap_history(&small).len(), 2);
     }
 
     #[test]

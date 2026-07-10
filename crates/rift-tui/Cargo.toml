@@ -3,6 +3,8 @@ name = "rift-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+publish = false
 description = "Rift: a fast, flicker-free terminal coding agent for local Ollama models"
 
 [[bin]]
@@ -10,10 +12,10 @@ name = "rift"
 path = "src/main.rs"
 
 [dependencies]
-rift-core = { path = "../rift-core" }
-rift-ollama = { path = "../rift-ollama" }
-rift-openai = { path = "../rift-openai" }
-rift-anthropic = { path = "../rift-anthropic" }
+rift-core.workspace = true
+rift-ollama.workspace = true
+rift-openai.workspace = true
+rift-anthropic.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true

@@ -103,8 +103,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser, Debug)]
-#[command(name = "rift", version, about = "Rift — a fast terminal coding agent for local Ollama models")]
+#[command(name = "rift", disable_version_flag = true, about = "Rift — a fast terminal coding agent for local Ollama models")]
 struct Cli {
+    /// Print version — and, from the last update check's cache, whether a
+    /// newer release exists (never hits the network)
+    #[arg(long, short = 'V')]
+    version: bool,
     /// Ollama server URL [default: http://localhost:11434, or `host` in config]
     #[arg(long, env = "RIFT_HOST")]
     host: Option<String>,
@@ -192,6 +196,17 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.version {
+        // Same first line clap printed before (the homebrew formula's test
+        // greps for it); the nudge reads only the 24h check cache, so an
+        // offline machine never stalls here.
+        println!("rift {}", env!("CARGO_PKG_VERSION"));
+        if let Some(latest) = update::cached_newer(env!("CARGO_PKG_VERSION")) {
+            println!("update available: v{latest} — run `rift update`");
+        }
+        return Ok(());
+    }
 
     // Load config up front so it can supply defaults for host/model. Precedence
     // for each: CLI flag > env var (clap folds both into `cli`) > config file >
@@ -953,6 +968,11 @@ async fn run_headless(
             "session": store.path().display().to_string(),
         });
         println!("{result}");
+    }
+    // Update nudge for headless users too — stderr so pipelines parsing
+    // stdout never see it, cache-only so offline runs never stall.
+    if let Some(latest) = update::cached_newer(env!("CARGO_PKG_VERSION")) {
+        eprintln!("\x1b[2mrift v{latest} is available (current v{}) — run `rift update`\x1b[0m", env!("CARGO_PKG_VERSION"));
     }
     Ok(())
 }

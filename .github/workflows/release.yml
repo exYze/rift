@@ -206,6 +206,57 @@ jobs:
           fi
           cd vscode && npx --yes @vscode/vsce publish -p "$VSCE_PAT"
 
+  # Publish the library crates to crates.io in dependency order. No-ops
+  # (successfully) until the CARGO_REGISTRY_TOKEN secret exists. An
+  # already-published version warns instead of failing, so release re-runs
+  # stay green.
+  crates:
+    needs: [plan, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "CARGO_REGISTRY_TOKEN not set — skipping crates.io publish"
+            exit 0
+          fi
+          rustup update stable
+          for crate in rift-provider rift-ollama rift-openai rift-anthropic rift-core; do
+            cargo publish -p "$crate" ||
+              echo "::warning::cargo publish $crate failed (already published?)"
+          done
+
+  # Update the winget manifest for this release and submit the version PR
+  # to microsoft/winget-pkgs. No-ops (successfully) until the WINGET_TOKEN
+  # secret exists — a classic PAT with public_repo. The FIRST submission of
+  # the package must be manual (see packaging/winget/README.md); this job
+  # handles every version bump after that.
+  winget:
+    needs: [plan, release]
+    runs-on: windows-latest
+    steps:
+      - name: submit winget version update
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          if (-not $env:WINGET_TOKEN) {
+            Write-Host "WINGET_TOKEN not set - skipping winget submission"
+            exit 0
+          }
+          $version = $env:TAG.TrimStart("v")
+          $url = "https://github.com/exYze/rift/releases/download/$($env:TAG)/rift-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
+          .\wingetcreate.exe update exYze.rift --version $version --urls $url --token $env:WINGET_TOKEN --submit
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::wingetcreate update failed (first-time submissions are manual - packaging/winget/README.md)"
+            exit 0
+          }
+
   # Regenerate the Homebrew formula from the just-published checksums and
   # push it to exYze/homebrew-tap. No-ops (successfully) until the
   # TAP_PUSH_TOKEN secret exists — a fine-grained PAT with contents:write
