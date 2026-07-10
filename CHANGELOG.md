@@ -3,6 +3,28 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.10.0 — 2026-07-10
+
+Serve protocol v1 (roadmap v1.10): the `--serve` surface becomes a
+contract third parties can build on.
+
+- **docs/SERVE.md** documents every command and event — fields, semantics
+  (one turn at a time, one id space, orphaned reviews closed, dropped
+  replies deny), and the versioning rules: additive changes never break
+  v1, consumers ignore what they don't know, and removals/renames bump
+  the protocol version (a 2.0-class change)
+- **`protocol_version`** now rides in the `ready` event, and `hello` is
+  acked with a `capabilities` event carrying the negotiated set — a
+  consumer can confirm exactly what it's speaking to
+- **Conformance tests** pin every event's exact wire shape in serve.rs;
+  a failing test means a breaking protocol change and says so
+- **Reference client**: `scripts/serve_client.py` — an interactive minimal
+  integration (spawn, hello, prompt, stream events, answer asks, decide
+  reviews) for Neovim/JetBrains plugin authors; SERVE.md's integration
+  guide walks through it
+- The VS Code extension (the reference consumer) checks
+  `protocol_version` and warns on a mismatch instead of failing weirdly
+
 ## v1.9.0 — 2026-07-10
 
 Distribution, finished (roadmap v1.9) — plus the long-standing quick wins.

@@ -615,6 +615,13 @@ class RiftChatProvider {
     if (ev.event === 'ready') {
       this.model = ev.model;
       if (ev.num_ctx) this.ctxLimit = ev.num_ctx;
+      // This extension speaks serve protocol v1 (docs/SERVE.md). An absent
+      // protocol_version means a pre-1.10 rift — same v1 wire shapes.
+      if (ev.protocol_version && ev.protocol_version > 1) {
+        vscode.window.showWarningMessage(
+          `rift speaks serve protocol v${ev.protocol_version}; this extension expects v1 — update the extension`
+        );
+      }
     } else if (ev.event === 'done') {
       this.busy = false;
     } else if (ev.event === 'edit_review') {
