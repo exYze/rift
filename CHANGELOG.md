@@ -3,6 +3,18 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.2.0 — 2026-07-10
+
+- **Project-plugin trust over the serve protocol**: untrusted project
+  plugins are no longer silently skipped in `--serve` mode. Right after
+  startup, each one arrives as an ordinary `ask` event (`choices:
+  ["trust","skip"]`, the tool commands listed in `detail`) — so the
+  VS Code chat (or any serve consumer) can approve it. Answering `trust`
+  registers the plugin's tools into the running agent immediately,
+  activates its post_edit hooks, and persists the approval in the same
+  store the TUI's startup prompt uses (trust once, anywhere). Ignoring or
+  skipping the ask fails safe; the manifest re-asks only if it changes
+
 ## v2.1.0 — 2026-07-10
 
 - **`/release-notes`**: a closable popup showing what's new in the running

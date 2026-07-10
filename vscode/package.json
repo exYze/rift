@@ -2,7 +2,7 @@
   "name": "rift-vscode",
   "displayName": "Rift",
   "description": "Rift — a fast terminal coding agent for local Ollama models, integrated into VS Code",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "publisher": "exYze",
   "license": "MIT",
   "repository": {
