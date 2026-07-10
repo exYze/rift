@@ -60,6 +60,15 @@ pub struct Config {
     /// arbitrary command, so a cloned repo's .rift.json must never pick it.
     #[serde(default)]
     pub editor: Option<String>,
+    /// Config schema version. Absent = v1. `rift config migrate` writes 2;
+    /// 2.0 migrates automatically on load.
+    #[serde(default)]
+    pub version: Option<u32>,
+    /// Preview features, off by default. `{"experimental": {"plugins": true}}`
+    /// enables the plugin API (crates/rift-core/src/plugins.rs) ahead of its
+    /// 2.0 stabilization.
+    #[serde(default)]
+    pub experimental: Experimental,
     /// Automation hooks. `post_edit` commands run after every successful
     /// write/edit; a failing hook's output is appended to the tool result,
     /// so the model sees broken builds/tests immediately and fixes them in
@@ -99,6 +108,13 @@ pub struct Config {
     pub project_mcp: HashMap<String, McpServerConfig>,
     #[serde(default)]
     pub permissions: Permissions,
+}
+
+/// Preview-feature switches (see the `experimental` field on [`Config`]).
+#[derive(Debug, Default, Deserialize)]
+pub struct Experimental {
+    #[serde(default)]
+    pub plugins: bool,
 }
 
 /// Result of [`Config::load`]: the merged config plus which files fed it and
@@ -223,6 +239,18 @@ impl Config {
             loaded.config.merge_project(project, &mut loaded.warnings);
             loaded.paths.push(project_path);
         }
+        // Deprecations — everything 2.0 changes warns here first, with the
+        // exact way out named.
+        if !loaded.config.permissions.bash_allow.is_empty()
+            || !loaded.config.permissions.bash_deny.is_empty()
+        {
+            loaded.warnings.push(
+                "deprecated: permissions.bash_allow/bash_deny globs are replaced by \
+                 Bash(...) rules in permissions.allow/deny and stop loading in 2.0 — \
+                 `rift config migrate` rewrites them (--dry-run to preview)"
+                    .into(),
+            );
+        }
         Ok(loaded)
     }
 
@@ -320,6 +348,70 @@ impl Config {
             );
         }
     }
+}
+
+// ---- schema v2 migration ----------------------------------------------------
+
+/// Rewrite a v1 config JSON object to schema v2 in place, returning a
+/// human-readable list of changes (empty = already v2 with nothing legacy).
+/// v2 = v1 minus the deprecated keys, plus an explicit `"version": 2`:
+/// - `permissions.bash_allow`/`bash_deny` globs become `Bash(...)` rules in
+///   `permissions.allow`/`deny` (duplicates dropped).
+pub fn migrate_value(root: &mut serde_json::Value) -> Vec<String> {
+    let mut changes = vec![];
+    let Some(obj) = root.as_object_mut() else { return changes };
+    if let Some(perms) = obj.get_mut("permissions").and_then(|p| p.as_object_mut()) {
+        for (legacy, target) in [("bash_allow", "allow"), ("bash_deny", "deny")] {
+            let Some(list) = perms.remove(legacy) else { continue };
+            let globs: Vec<String> = serde_json::from_value(list).unwrap_or_default();
+            let rules = perms
+                .entry(target)
+                .or_insert_with(|| serde_json::Value::Array(vec![]));
+            let Some(arr) = rules.as_array_mut() else { continue };
+            for g in globs {
+                let rule = format!("Bash({g})");
+                if arr.iter().any(|v| v.as_str() == Some(rule.as_str())) {
+                    changes.push(format!("permissions.{legacy} \"{g}\": dropped ({target} rule already present)"));
+                } else {
+                    changes.push(format!("permissions.{legacy} \"{g}\" → permissions.{target} \"{rule}\""));
+                    arr.push(serde_json::Value::String(rule));
+                }
+            }
+        }
+    }
+    if obj.get("version").and_then(|v| v.as_u64()) != Some(2) {
+        obj.insert("version".into(), serde_json::Value::from(2));
+        changes.push("version → 2".into());
+    }
+    changes
+}
+
+/// `rift config migrate`: rewrite one config file to schema v2. Dry-run
+/// prints what would change; a real run writes a `.v1.bak` backup first.
+pub fn migrate_config_file(path: &Path, dry_run: bool) -> Result<String> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let changes = migrate_value(&mut root);
+    if changes.is_empty() {
+        return Ok(format!("{}: already schema v2 — nothing to do", path.display()));
+    }
+    let listed: String = changes.iter().map(|c| format!("  {c}\n")).collect();
+    if dry_run {
+        return Ok(format!("{} would change:\n{listed}(--dry-run: nothing written)", path.display()));
+    }
+    let backup = path.with_extension("json.v1.bak");
+    std::fs::copy(path, &backup).with_context(|| format!("backing up to {}", backup.display()))?;
+    std::fs::write(path, serde_json::to_string_pretty(&root)? + "\n")
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(format!("{} migrated to schema v2 (backup: {}):\n{listed}", path.display(), backup.display()))
+}
+
+/// The user config path (`~/.config/rift/config.json`) — the default
+/// `rift config migrate` target.
+pub fn user_config_path() -> std::path::PathBuf {
+    dirs_config().join("rift/config.json")
 }
 
 // ---- hook trust store -------------------------------------------------------
@@ -629,6 +721,35 @@ mod tests {
         // Duplicate names are refused, pointing at /config edit.
         assert!(append_mcp_entry(false, &dir, "fetch", &entry).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_rewrites_legacy_globs_and_stamps_v2() {
+        let mut root: serde_json::Value = serde_json::from_str(
+            r#"{
+                "model": "qwen3:32b",
+                "permissions": {
+                    "bash_allow": ["git status*"],
+                    "bash_deny": ["docker push *", "rm -rf *"],
+                    "deny": ["Bash(rm -rf *)"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let changes = migrate_value(&mut root);
+        // Globs became rules; the pre-existing duplicate rule was dropped.
+        let perms = &root["permissions"];
+        assert!(perms.get("bash_allow").is_none() && perms.get("bash_deny").is_none());
+        assert_eq!(perms["allow"][0], "Bash(git status*)");
+        assert_eq!(perms["deny"][0], "Bash(rm -rf *)");
+        assert_eq!(perms["deny"][1], "Bash(docker push *)");
+        assert_eq!(perms["deny"].as_array().unwrap().len(), 2);
+        assert_eq!(root["version"], 2);
+        assert_eq!(changes.len(), 4, "{changes:?}"); // allow glob + deny glob + dup drop + version
+        // Everything untouched survives.
+        assert_eq!(root["model"], "qwen3:32b");
+        // Idempotent: a second pass changes nothing.
+        assert!(migrate_value(&mut root).is_empty());
     }
 
     #[test]

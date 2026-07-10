@@ -191,6 +191,25 @@ enum Cmd {
     },
     /// Update rift to the latest release
     Update,
+    /// Config utilities (schema migration)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigAction {
+    /// Rewrite the config to schema v2 — deprecated bash_allow/bash_deny
+    /// globs become Bash(...) rules. Backs up the original first.
+    Migrate {
+        /// Print what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Migrate the project .rift.json instead of the user config
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 #[tokio::main]
@@ -205,6 +224,19 @@ async fn main() -> Result<()> {
         if let Some(latest) = update::cached_newer(env!("CARGO_PKG_VERSION")) {
             println!("update available: v{latest} — run `rift update`");
         }
+        return Ok(());
+    }
+
+    // `rift config migrate` runs BEFORE the normal config load — a config
+    // broken enough to need migrating must not block the migrator.
+    if let Some(Cmd::Config { action }) = &cli.cmd {
+        let ConfigAction::Migrate { dry_run, project } = action;
+        let path = if *project {
+            std::env::current_dir()?.join(".rift.json")
+        } else {
+            rift_core::config::user_config_path()
+        };
+        println!("{}", rift_core::config::migrate_config_file(&path, *dry_run)?);
         return Ok(());
     }
 
@@ -286,6 +318,8 @@ async fn main() -> Result<()> {
             println!("{}", update::self_update(env!("CARGO_PKG_VERSION")).await?);
             return Ok(());
         }
+        // Handled before the config load; a broken config must not block it.
+        Some(Cmd::Config { .. }) => unreachable!("config subcommand returns early"),
         None => {}
     }
 
@@ -458,7 +492,30 @@ async fn main() -> Result<()> {
 
     // Skills (Agent Skills standard): listed in the system prompt, bodies
     // loaded on demand via the skill tool or /skill:<name>.
-    let skills = rift_core::load_skills(&cwd);
+    let mut skills = rift_core::load_skills(&cwd);
+    // Experimental plugin API (2.0 preview, config `experimental.plugins`):
+    // plugin commands ride the skill machinery (/skill:<name>, same listing
+    // to the model); tools register from USER plugins only — see
+    // rift-core/src/plugins.rs for the security cut.
+    if config.experimental.plugins {
+        let plugins = rift_core::load_plugins(&cwd);
+        if !plugins.is_empty() {
+            for w in rift_core::register_plugin_tools(&mut registry, &plugins) {
+                eprintln!("warning: {w}");
+            }
+            let cmds = rift_core::commands_as_skills(&plugins);
+            for c in cmds {
+                if !skills.iter().any(|s| s.name == c.name) {
+                    skills.push(c);
+                }
+            }
+            skills.sort_by(|a, b| a.name.cmp(&b.name));
+            eprintln!(
+                "plugins (experimental): {}",
+                plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
     if !skills.is_empty() {
         prompt_text.push_str(&rift_core::skills_prompt_section(&skills));
         registry.register(Box::new(rift_core::SkillTool::new(skills.clone())));
