@@ -194,7 +194,12 @@ def main():
     ap.add_argument("--runs", type=int, default=1,
                     help="repetitions per task — nondeterministic models need "
                          "multi-run variance, not single-run point estimates")
+    ap.add_argument("--schema", choices=["rich", "lean"], default="rich",
+                    help="tool-schema variant for rift runs (RIFT_TOOL_SCHEMA): "
+                         "lean = first-sentence descriptions, no per-param docs — "
+                         "the schema A/B for the model matrix")
     args = ap.parse_args()
+    os.environ["RIFT_TOOL_SCHEMA"] = args.schema
     agents = args.agents or ["rift", "opencode"]
     models = [m.strip() for m in args.models.split(",") if m.strip()]
 
@@ -216,6 +221,7 @@ def main():
                     print(f"=== {agent} / {model} / {task}{tag} ...", flush=True)
                     r = run_task(agent, task, model, args.dir)
                     r["run"] = run
+                    r["schema"] = args.schema
                     print(f"    ok={r['ok']} {r['secs']}s prompt={r['prompt_tok']} "
                           f"out={r['output_tok']} calls={r['llm_calls']}", flush=True)
                     results.append(r)

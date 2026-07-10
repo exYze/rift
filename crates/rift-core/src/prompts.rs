@@ -46,6 +46,17 @@ const EMBEDDED: &[(&str, &str)] = &[
     // explored without editing). Validate against default.md's 40/50
     // baseline on the next matrix run — see prompts/README.md.
     ("gemma", include_str!("../prompts/gemma.md")),
+    // The remaining families are provisional too — derived from each
+    // family's documented failure modes, awaiting their first matrix run
+    // through the evolution gate (scripts/prompt_gate.py). qwen: trim
+    // narration and double-verification; deepseek: cap reasoning spill and
+    // exploration; glm: chat-only tendency (gemma-style CRITICAL framing) +
+    // reply-language pin; mistral: exact-match edit retries without
+    // whole-file rewrites.
+    ("qwen", include_str!("../prompts/qwen.md")),
+    ("deepseek", include_str!("../prompts/deepseek.md")),
+    ("glm", include_str!("../prompts/glm.md")),
+    ("mistral", include_str!("../prompts/mistral.md")),
 ];
 
 /// Parse a target file: `--- family: x / match: a, b ---` frontmatter,
@@ -159,7 +170,7 @@ mod tests {
     #[test]
     fn default_target_renders_placeholders() {
         let targets = embedded_targets();
-        let t = select("deepseek-coder:33b", &targets).unwrap();
+        let t = select("llama3.3:70b", &targets).unwrap();
         assert_eq!(t.family, "default");
         let p = render(t, "/work/repo");
         assert!(p.starts_with("You are Rift, an expert coding agent working in the directory /work/repo."));
@@ -181,6 +192,38 @@ mod tests {
         // The rules the trace data says gemma needs are actually present.
         assert!(p.contains("changes NOTHING"));
         assert!(p.contains("never stop after only reading files"));
+    }
+
+    #[test]
+    fn every_family_target_selects_and_renders() {
+        let targets = embedded_targets();
+        // Each family catches its models — including hf.co/ paths and
+        // finetune names — and renders with no leftover placeholders.
+        for (model, family) in [
+            ("qwen3:32b", "qwen"),
+            ("qwen2.5-coder:14b", "qwen"),
+            ("qwq:32b", "qwen"),
+            ("deepseek-r1:70b", "deepseek"),
+            ("deepseek-coder-v2:16b", "deepseek"),
+            ("hf.co/unsloth/DeepSeek-V4-GGUF:latest", "deepseek"),
+            ("glm-5:9b", "glm"),
+            ("codegeex4:9b", "glm"),
+            ("mistral:7b", "mistral"),
+            ("devstral:24b", "mistral"),
+            ("codestral:22b", "mistral"),
+            ("mixtral:8x7b", "mistral"),
+            ("gemma4:26b", "gemma"),
+            ("llama3.3:70b", "default"),
+        ] {
+            let t = select(model, &targets).unwrap();
+            assert_eq!(t.family, family, "{model}");
+            let p = render(t, "/work/repo");
+            assert!(!p.contains("{cwd}") && !p.contains("{shell}"), "{family}");
+            // Every target keeps the non-negotiables: tool-call channel
+            // discipline and the plan-tool nudge.
+            assert!(p.contains("NEVER write tool-call JSON"), "{family}");
+            assert!(p.contains("plan(set=[...])"), "{family}");
+        }
     }
 
     #[test]
@@ -213,7 +256,7 @@ mod tests {
 
         let mut targets = targets_from_dir(&dir);
         targets.extend(embedded_targets());
-        let t = select("mistral:7b", &targets).unwrap();
+        let t = select("llama3:8b", &targets).unwrap();
         assert_eq!(render(t, "/x"), "overridden /x");
 
         let _ = std::fs::remove_dir_all(&dir);
