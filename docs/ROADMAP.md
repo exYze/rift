@@ -214,6 +214,75 @@ and `rift update` has carried users through 10+ versions without a manual
 reinstall. 1.0 means breaking changes now require a major version — trust,
 codified.
 
+**Shipped 2026-07-06.** The 1.x line since (highlights): concurrent
+sub-agents (1.0), model roles (1.1), vision attachments (1.2), post-edit
+hooks (1.3), remote MCP (1.4), `web_search` (1.5), VS Code sidebar chat on
+`--serve` (1.6), granular permission rules + inline diff review (1.7), and
+merge-to-release CI. Full detail in CHANGELOG.md.
+
+## v1.8 — Model targets, finished
+
+Absorbs the open v0.8.5 items — each model family treated as a compiler
+target, the bench matrix as the fitness function.
+
+- [ ] **Family targets**: qwen/deepseek/glm/mistral prompt files landed
+  through the evolution gate; validate the provisional `gemma.md` against
+  the default-prompt baseline on the next matrix run
+- [ ] **Prompt evolution gate**: prompt files are versioned; a change
+  merges only if it beats the incumbent on the bench matrix
+- [ ] **Tool-schema A/B on the matrix**: measure richer vs leaner
+  parameter schemas per family — more params = more places for a small
+  model to hallucinate; don't assume
+- [ ] Per-family bench numbers published in BENCHMARKS.md
+
+## v1.9 — Distribution, finished
+
+Closes the v0.9 tail so every mainstream install path works.
+
+- [ ] winget submission
+- [ ] Publish crates to crates.io (`rift-ollama` is useful standalone)
+- [ ] homebrew-core PR once the repo clears the notability bar
+- [ ] Quick-wins batch: `/copy` palette completion, mouse-wheel scroll on
+  the palette popup, `--version` update nudge, session file size cap
+
+## v1.10 — Serve protocol v1
+
+The bridge to the platform: the `--serve` surface becomes something third
+parties can build on without fear.
+
+- [ ] Versioned protocol (`protocol_version` in hello) with documented
+  event/command names — docs/SERVE.md is the contract
+- [ ] Compatibility tests: a conformance suite that pins the wire format;
+  the VS Code extension runs against it and doubles as the reference
+- [ ] Integration guide + minimal reference client for Neovim/JetBrains
+  plugin authors
+
+## v1.11 — Platform preview
+
+Everything 2.0 will stabilize ships here first, behind flags, so the
+breaking release is a promotion — not a surprise.
+
+- [ ] **Experimental plugin API** (`.rift/plugins/`, user + project, trust-
+  gated like hooks/MCP): rift-native slash commands, tools, themes, and
+  prompt targets from a manifest — MCP covers external tools; plugins
+  cover extending rift itself
+- [ ] Config schema v2 draft + `rift config migrate --dry-run`
+- [ ] Deprecation warnings on every path 2.0 changes, with the exact
+  replacement named
+
+## v2.0 — The agent platform
+
+Breaking changes, bundled once, and only these:
+
+- [ ] Plugin API stable: tools, slash commands, hooks, themes, prompt
+  targets — semver'd
+- [ ] Config schema v2 with one-shot automatic migration (old configs
+  keep working through the migrator; no hand-editing)
+- [ ] Serve protocol v1 frozen: editor integrations built on it keep
+  working across every 2.x release
+- [ ] The 1.0 stability promise resets for 2.x: config + protocol stable,
+  provider matrix green, benchmarks per release
+
 ---
 
 ## Engineering process (ongoing, not versioned)
