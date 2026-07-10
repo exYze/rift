@@ -1,56 +1,56 @@
-<svg viewBox="0 0 1280 570" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <rect width="1280" height="570" rx="14" fill="#0d1117"/>
+<svg viewBox="0 0 1280 790" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect width="1280" height="790" rx="14" fill="#0d1117"/>
 
   <!-- header -->
   <text x="55" y="56" font-size="28" font-weight="700" fill="#e6edf3">rift <tspan fill="#39c5cf">roadmap</tspan></text>
-  <text x="55" y="82" font-size="14" fill="#8b949e">the local-first coding agent — where it's headed</text>
+  <text x="55" y="82" font-size="14" fill="#8b949e">the local-first coding agent — the road to 2.0</text>
   <text x="1225" y="56" font-size="13" fill="#8b949e" text-anchor="end">github.com/exYze/rift</text>
-  <text x="1225" y="78" font-size="13" font-weight="700" fill="#39c5cf" text-anchor="end">current: v0.9.5</text>
+  <text x="1225" y="78" font-size="13" font-weight="700" fill="#39c5cf" text-anchor="end">current: v1.7.3</text>
 
-  <!-- row 1 -->
+  <!-- row 1: shipped eras -->
   <g transform="translate(55,110)">
     <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
     <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
     <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">shipped</text>
-    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.3</text>
+    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.3–0.6</text>
     <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">the foundation</text>
     <text x="18" y="84" font-size="12" fill="#8b949e">· native Ollama agent, zero shims</text>
     <text x="18" y="106" font-size="12" fill="#8b949e">· Compactor: 80% fewer tokens</text>
     <text x="18" y="128" font-size="12" fill="#8b949e">· WarpDrive worktree races</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· MCP + 23 slash commands</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· Provider trait: vLLM, llama.cpp</text>
   </g>
   <g transform="translate(355,110)">
     <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
     <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
     <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">shipped</text>
-    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.4</text>
-    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">plan view + trust</text>
-    <text x="18" y="84" font-size="12" fill="#8b949e">· live task checklist in the TUI</text>
-    <text x="18" y="106" font-size="12" fill="#8b949e">· approval mode for write/bash</text>
-    <text x="18" y="128" font-size="12" fill="#8b949e">· full input-line editing</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· RIFT.md auto-loaded</text>
+    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.7–0.9</text>
+    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">cloud + context</text>
+    <text x="18" y="84" font-size="12" fill="#8b949e">· Anthropic + OpenAI native APIs</text>
+    <text x="18" y="106" font-size="12" fill="#8b949e">· hydrate-on-demand: −18% tok</text>
+    <text x="18" y="128" font-size="12" fill="#8b949e">· cross-provider swarm + judge</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· brew/scoop, benches, demo</text>
   </g>
   <g transform="translate(655,110)">
     <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
     <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
     <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">shipped</text>
-    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.5</text>
-    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">commands + UX</text>
-    <text x="18" y="84" font-size="12" fill="#8b949e">· /retry /stats /system /save</text>
-    <text x="18" y="106" font-size="12" fill="#8b949e">· @file mentions + completion</text>
-    <text x="18" y="128" font-size="12" fill="#8b949e">· syntax highlighting</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· streaming diff pane</text>
+    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v1.0</text>
+    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">stability promise</text>
+    <text x="18" y="84" font-size="12" fill="#8b949e">· concurrent sub-agents</text>
+    <text x="18" y="106" font-size="12" fill="#8b949e">· config stable, matrix green</text>
+    <text x="18" y="128" font-size="12" fill="#8b949e">· benchmarks per release</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· breaking change = major ver</text>
   </g>
   <g transform="translate(955,110)">
     <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
     <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
     <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">shipped</text>
-    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.6</text>
-    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">local providers</text>
-    <text x="18" y="84" font-size="12" fill="#8b949e">· Provider trait abstraction</text>
-    <text x="18" y="106" font-size="12" fill="#8b949e">· vLLM, LM Studio, llama.cpp</text>
-    <text x="18" y="128" font-size="12" fill="#8b949e">· OpenRouter via compat API</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· retries, timeouts, MCP trust</text>
+    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v1.1–1.7</text>
+    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">the 1.x sprint</text>
+    <text x="18" y="84" font-size="12" fill="#8b949e">· vision, roles, post-edit hooks</text>
+    <text x="18" y="106" font-size="12" fill="#8b949e">· remote MCP + web_search</text>
+    <text x="18" y="128" font-size="12" fill="#8b949e">· VS Code chat on --serve</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· granular permissions, CI releases</text>
   </g>
 
   <!-- row 1 chevrons -->
@@ -62,55 +62,77 @@
   <path d="M1090 285 v 20 H 190 v 13" fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4 4"/>
   <path d="M183 318 l7 8 7 -8" fill="none" stroke="#30363d" stroke-width="1.5"/>
 
-  <!-- row 2 -->
+  <!-- row 2: the road to 2.0 -->
   <g transform="translate(55,330)">
-    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
-    <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">shipped</text>
-    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.7</text>
-    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">cloud + swarm</text>
-    <text x="18" y="84" font-size="12" fill="#8b949e">· Anthropic + OpenAI APIs</text>
-    <text x="18" y="106" font-size="12" fill="#8b949e">· traces, matrix, prompt targets</text>
-    <text x="18" y="128" font-size="12" fill="#8b949e">· cross-provider swarm + judge</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· cost display for cloud models</text>
+    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.5"/>
+    <rect x="192" y="16" width="60" height="20" rx="10" fill="#39c5cf"/>
+    <text x="222" y="30" font-size="11" font-weight="700" fill="#0d1117" text-anchor="middle">next</text>
+    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v1.8</text>
+    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">model targets</text>
+    <text x="18" y="84" font-size="12" fill="#8b949e">· qwen/deepseek/glm/mistral files</text>
+    <text x="18" y="106" font-size="12" fill="#8b949e">· prompt evolution gate</text>
+    <text x="18" y="128" font-size="12" fill="#8b949e">· tool-schema A/B per family</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· per-family bench numbers</text>
   </g>
   <g transform="translate(355,330)">
     <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
     <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
-    <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">shipped</text>
-    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.8</text>
-    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">context engine v2</text>
-    <text x="18" y="84" font-size="12" fill="#8b949e">· hydrate-on-demand: −18% tok</text>
-    <text x="18" y="106" font-size="12" fill="#8b949e">· repo-map cache + centrality</text>
-    <text x="18" y="128" font-size="12" fill="#8b949e">· idle-time compaction</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· hard-tier bench + judge bench</text>
+    <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">planned</text>
+    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v1.9</text>
+    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">distribution, finished</text>
+    <text x="18" y="84" font-size="12" fill="#8b949e">· winget + crates.io</text>
+    <text x="18" y="106" font-size="12" fill="#8b949e">· homebrew-core push</text>
+    <text x="18" y="128" font-size="12" fill="#8b949e">· quick-wins batch</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· every install path covered</text>
   </g>
   <g transform="translate(655,330)">
-    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.5"/>
-    <rect x="164" y="16" width="88" height="20" rx="10" fill="#39c5cf"/>
-    <text x="208" y="30" font-size="11" font-weight="700" fill="#0d1117" text-anchor="middle">in progress</text>
-    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v0.9</text>
-    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">distribution</text>
-    <text x="18" y="84" font-size="12" fill="#8b949e">· brew install rift ✓ · scoop ✓</text>
-    <text x="18" y="106" font-size="12" fill="#8b949e">· demo GIF in README ✓</text>
-    <text x="18" y="128" font-size="12" fill="#8b949e">· CHANGELOG + templates ✓</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· next: winget, crates.io</text>
+    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+    <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">planned</text>
+    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v1.10</text>
+    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">serve protocol v1</text>
+    <text x="18" y="84" font-size="12" fill="#8b949e">· versioned hello + events</text>
+    <text x="18" y="106" font-size="12" fill="#8b949e">· conformance test suite</text>
+    <text x="18" y="128" font-size="12" fill="#8b949e">· docs/SERVE.md contract</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· Neovim/JetBrains guide</text>
   </g>
   <g transform="translate(955,330)">
-    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-    <text x="18" y="32" font-size="16" font-weight="700" fill="#3fb950">v1.0</text>
-    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">stability promise</text>
-    <text x="18" y="84" font-size="12" fill="#8b949e">· config stable across releases</text>
-    <text x="18" y="106" font-size="12" fill="#8b949e">· provider matrix green in CI</text>
-    <text x="18" y="128" font-size="12" fill="#8b949e">· benchmarks per release</text>
-    <text x="18" y="150" font-size="12" fill="#8b949e">· breaking change = major ver</text>
+    <rect width="270" height="170" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect x="178" y="16" width="74" height="20" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+    <text x="215" y="30" font-size="11" font-weight="700" fill="#8b949e" text-anchor="middle">planned</text>
+    <text x="18" y="32" font-size="16" font-weight="700" fill="#39c5cf">v1.11</text>
+    <text x="18" y="54" font-size="14" font-weight="600" fill="#e6edf3">platform preview</text>
+    <text x="18" y="84" font-size="12" fill="#8b949e">· plugin API behind a flag</text>
+    <text x="18" y="106" font-size="12" fill="#8b949e">· commands, tools, themes</text>
+    <text x="18" y="128" font-size="12" fill="#8b949e">· config v2 dry-run migrator</text>
+    <text x="18" y="150" font-size="12" fill="#8b949e">· deprecation warnings</text>
   </g>
 
   <!-- row 2 chevrons -->
   <path d="M336 408 l8 7 -8 7" fill="none" stroke="#39c5cf" stroke-width="2" stroke-linecap="round"/>
   <path d="M636 408 l8 7 -8 7" fill="none" stroke="#39c5cf" stroke-width="2" stroke-linecap="round"/>
-  <path d="M936 408 l8 7 -8 7" fill="none" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>
+  <path d="M936 408 l8 7 -8 7" fill="none" stroke="#39c5cf" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- connector row 2 -> v2.0 -->
+  <path d="M1090 505 v 20 H 640 v 12" fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <path d="M633 537 l7 8 7 -8" fill="none" stroke="#30363d" stroke-width="1.5"/>
+
+  <!-- v2.0: the finale -->
+  <g transform="translate(55,555)">
+    <rect width="1170" height="150" rx="10" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+    <text x="18" y="34" font-size="18" font-weight="700" fill="#3fb950">v2.0</text>
+    <text x="70" y="34" font-size="15" font-weight="600" fill="#e6edf3">the agent platform — breaking changes, bundled once</text>
+    <text x="18" y="70" font-size="12" fill="#8b949e">· plugin API stable: tools, slash commands,</text>
+    <text x="18" y="90" font-size="12" fill="#8b949e">&#160;&#160;hooks, themes, prompt targets — semver'd</text>
+    <text x="18" y="118" font-size="12" fill="#8b949e">· config schema v2, auto-migrated</text>
+    <text x="420" y="70" font-size="12" fill="#8b949e">· serve protocol v1 frozen: editor</text>
+    <text x="420" y="90" font-size="12" fill="#8b949e">&#160;&#160;integrations keep working across 2.x</text>
+    <text x="420" y="118" font-size="12" fill="#8b949e">· third parties build on rift, fear-free</text>
+    <text x="810" y="70" font-size="12" fill="#8b949e">· stability promise resets for 2.x:</text>
+    <text x="810" y="90" font-size="12" fill="#8b949e">&#160;&#160;config + protocol stable, matrix green</text>
+    <text x="810" y="118" font-size="12" fill="#8b949e">· local-first, always</text>
+  </g>
 
   <!-- footer -->
-  <text x="640" y="540" font-size="12.5" fill="#8b949e" text-anchor="middle">full details in docs/ROADMAP.md · local-first, always — cloud is an option, never a requirement</text>
+  <text x="640" y="760" font-size="12.5" fill="#8b949e" text-anchor="middle">full details in docs/ROADMAP.md · local-first, always — cloud is an option, never a requirement</text>
 </svg>
