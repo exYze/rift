@@ -899,9 +899,16 @@ impl ToolRegistry {
     }
 
     pub fn tool_defs(&self) -> Vec<ToolDef> {
+        let lean = std::env::var("RIFT_TOOL_SCHEMA").is_ok_and(|v| v.eq_ignore_ascii_case("lean"));
         self.tools
             .iter()
-            .map(|t| ToolDef::function(t.name(), t.description(), t.parameters()))
+            .map(|t| {
+                if lean {
+                    lean_def(t.name(), t.description(), t.parameters())
+                } else {
+                    ToolDef::function(t.name(), t.description(), t.parameters())
+                }
+            })
             .collect()
     }
 
@@ -909,23 +916,65 @@ impl ToolRegistry {
     /// data (`read_file` instead of `read`, etc). Map the common variants to
     /// our canonical names instead of failing the call.
     pub fn resolve_alias<'a>(&self, name: &'a str) -> &'a str {
-        match name {
-            "read_file" | "readfile" | "open_file" | "view_file" | "cat" | "view" => "read",
-            "write_file" | "create_file" | "save_file" | "write_to_file" => "write",
-            "edit_file" | "str_replace" | "replace_in_file" | "apply_edit" => "edit",
-            "run_command" | "execute" | "execute_command" | "shell" | "run_shell_command"
-            | "terminal" | "run_bash" | "exec" => "bash",
-            "list_files" | "list_directory" | "list_dir" | "dir" => "ls",
-            "search" | "search_files" | "grep_search" | "code_search" | "search_code" => "grep",
-            "find_files" | "file_glob" | "file_search" => "glob",
-            "skeleton" | "file_outline" | "symbols" | "get_outline" => "outline",
-            "repo_overview" | "project_map" | "codebase_map" => "repo_map",
-            "internet_search" | "google" | "web" | "duckduckgo" | "search_web" => "web_search",
-            "web_fetch" | "http_get" | "get_url" | "fetch_url" | "curl" | "wget" => "fetch",
-            "tasks" | "bg" | "task_status" | "check_task" | "background_task" | "task_output" => "task",
-            "Task" | "subagent" | "sub_agent" | "spawn_agent" | "delegate" | "dispatch_agent" => "agent",
-            other => other,
+        resolve_alias_impl(name)
+    }
+}
+
+/// The `RIFT_TOOL_SCHEMA=lean` variant for tool-schema A/B on the bench
+/// matrix (ROADMAP v1.8): tool description cut to its first sentence,
+/// per-parameter descriptions dropped. Richer schemas may help one family
+/// and hurt another — more tokens, more places for a small model to
+/// hallucinate — so both variants are measurable without a rebuild.
+fn lean_def(name: &str, description: &str, mut parameters: serde_json::Value) -> ToolDef {
+    let first = match description.find(". ") {
+        Some(end) => &description[..=end],
+        None => description,
+    };
+    strip_schema_annotations(&mut parameters);
+    ToolDef::function(name, first.trim(), parameters)
+}
+
+/// Remove `description`/`examples` annotations from every schema node,
+/// recursively. Only nodes that carry a `type` are schema nodes — a
+/// `properties` map is not, so a parameter that happens to be NAMED
+/// "description" survives.
+fn strip_schema_annotations(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("type") {
+                map.remove("description");
+                map.remove("examples");
+            }
+            for (_, val) in map.iter_mut() {
+                strip_schema_annotations(val);
+            }
         }
+        serde_json::Value::Array(items) => {
+            for val in items {
+                strip_schema_annotations(val);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_alias_impl(name: &str) -> &str {
+    match name {
+        "read_file" | "readfile" | "open_file" | "view_file" | "cat" | "view" => "read",
+        "write_file" | "create_file" | "save_file" | "write_to_file" => "write",
+        "edit_file" | "str_replace" | "replace_in_file" | "apply_edit" => "edit",
+        "run_command" | "execute" | "execute_command" | "shell" | "run_shell_command"
+        | "terminal" | "run_bash" | "exec" => "bash",
+        "list_files" | "list_directory" | "list_dir" | "dir" => "ls",
+        "search" | "search_files" | "grep_search" | "code_search" | "search_code" => "grep",
+        "find_files" | "file_glob" | "file_search" => "glob",
+        "skeleton" | "file_outline" | "symbols" | "get_outline" => "outline",
+        "repo_overview" | "project_map" | "codebase_map" => "repo_map",
+        "internet_search" | "google" | "web" | "duckduckgo" | "search_web" => "web_search",
+        "web_fetch" | "http_get" | "get_url" | "fetch_url" | "curl" | "wget" => "fetch",
+        "tasks" | "bg" | "task_status" | "check_task" | "background_task" | "task_output" => "task",
+        "Task" | "subagent" | "sub_agent" | "spawn_agent" | "delegate" | "dispatch_agent" => "agent",
+        other => other,
     }
 }
 
@@ -2420,6 +2469,38 @@ impl Tool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lean_schema_trims_annotations_but_never_structure() {
+        let def = lean_def(
+            "read",
+            "Read a file's contents. Large files are outlined instead; fetch exact ranges with offset/limit.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path"},
+                    "limit": {"type": "integer", "description": "Max lines", "examples": [100]},
+                    // A parameter literally named "description" must survive
+                    // (it is a properties key, not a schema annotation).
+                    "description": {"type": "string", "description": "annotation to strip"}
+                },
+                "required": ["path"]
+            }),
+        );
+        assert_eq!(def.function.description, "Read a file's contents.");
+        let props = &def.function.parameters["properties"];
+        assert!(props["path"].get("description").is_none());
+        assert!(props["limit"].get("description").is_none());
+        assert!(props["limit"].get("examples").is_none());
+        // Structure intact: types, required, and the awkwardly-named param.
+        assert_eq!(props["path"]["type"], "string");
+        assert_eq!(def.function.parameters["required"][0], "path");
+        assert_eq!(props["description"]["type"], "string");
+        assert!(props["description"].get("description").is_none());
+        // Single-sentence descriptions pass through whole.
+        let short = lean_def("ls", "List a directory", serde_json::json!({"type": "object"}));
+        assert_eq!(short.function.description, "List a directory");
+    }
 
     #[tokio::test]
     async fn web_search_parses_searxng_results() {

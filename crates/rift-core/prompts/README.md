@@ -30,13 +30,30 @@ only if it **beats the incumbent on the bench matrix**:
    `~/.config/rift/prompts/<family>.md` — user-level overrides are matched
    before embedded targets (there is deliberately no project-level override:
    a cloned repo must never be able to replace the system prompt).
-2. Run the matrix: `python3 bench/bench.py --models <model,...> rift`
-   with the incumbent, then with the candidate.
-3. Compare pass rate, prompt tokens, wall time, and the failure counters in
-   `bench/traces/` (textual recoveries, alias hits, doom loops — a prompt
-   that halves recoveries is a win even at equal pass rate).
-4. If the candidate wins, move it into this directory, register it in
-   `EMBEDDED` in `src/prompts.rs`, and record both runs' numbers in the PR.
+2. Run the gate — it runs the matrix twice (embedded incumbent, then your
+   candidate as the override), diffs pass rate / prompt tokens / wall time /
+   failure counters, and prints a PR-ready verdict:
+
+   ```
+   python3 scripts/prompt_gate.py --family qwen --candidate my-qwen.md \
+       --models qwen3:32b,qwen2.5-coder:14b
+   ```
+
+   (Or run `bench/bench.py` by hand and compare — the gate is the same
+   comparison, automated. A prompt that halves textual recoveries is a win
+   even at equal pass rate.)
+3. If the gate passes, move the candidate into this directory, register it
+   in `EMBEDDED` in `src/prompts.rs`, and paste the gate's numbers into
+   the PR.
+
+Tool schemas are A/B-able the same way: `bench.py --schema lean` runs with
+first-sentence tool descriptions and no per-parameter docs
+(`RIFT_TOOL_SCHEMA=lean`), `--schema rich` (default) with the full ones —
+measure per family, don't assume.
+
+Current status: `gemma`, `qwen`, `deepseek`, `glm`, and `mistral` are
+**provisional** — derived from each family's documented failure modes,
+awaiting their first gate run against `default.md` on real hardware.
 
 Keep every target short — each token counts against `num_ctx` on local
 models.

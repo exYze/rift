@@ -3,6 +3,31 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.8.0 — 2026-07-10
+
+Model targets: each open-model family treated as a compiler target, with
+the bench matrix as the fitness function (roadmap v1.8).
+
+- **Family prompt targets**: `qwen`, `deepseek`, `glm`, and `mistral`
+  prompt files embedded alongside `gemma` — each tuned to its family's
+  documented failure modes (qwen: narration and double-verification;
+  deepseek: reasoning spill and over-exploration; glm: chat-only answers
+  and reply language; mistral: exact-match edit retries without whole-file
+  rewrites). All provisional until they clear the evolution gate on a
+  matrix run; models with no family target keep `default` exactly as before
+- **Prompt evolution gate**: `scripts/prompt_gate.py --family F
+  --candidate f.md --models m1,m2` benchmarks the embedded incumbent, then
+  the candidate as a user-level override (no rebuild), and diffs pass
+  rate, prompt tokens, wall time, and the per-turn failure counters from
+  traces — printing a PR-ready verdict. A candidate merges only if it wins
+  on every model
+- **Tool-schema A/B**: `RIFT_TOOL_SCHEMA=lean` serves every tool with a
+  first-sentence description and no per-parameter docs — structure
+  (types, required, enums) is untouched. `bench.py --schema lean|rich`
+  drives it and tags each result row with the variant, so schema cost can
+  be measured per model family instead of assumed
+- BENCHMARKS.md records the methodology and the planned validation matrix
+
 ## v1.7.3 — 2026-07-10
 
 - **`"editor"` config key**: set the `/config edit` editor in rift's own

@@ -179,19 +179,15 @@ function.
   experimenting without recompiling (user-level only — a cloned repo must
   never be able to replace the system prompt). Swarm candidates each get
   their own family prompt, so cross-provider races compare tuned targets
-- [ ] **Family targets** — actual qwen/deepseek/glm/mistral files, each
-  landed through the evolution gate; workflow in
-  `crates/rift-core/prompts/README.md`. First candidate `gemma.md` is in
-  provisionally: the first 3-model matrix run (2026-07) showed gemma4:26b
-  at 40/50 with 8 chat-only failures and 3× the tokens of ornith/qwen
-  (both 50/50 on the same default prompt) — validate vs that baseline on
-  the next matrix run
-- [ ] **Prompt evolution gate** — prompt files are versioned; a change
-  merges only if it beats the incumbent on the bench matrix. Prompts are
-  code: benchmark → review → revise → benchmark → merge
-- [ ] **Tool-schema A/B on the matrix** — richer parameter schemas may help
-  one family and hurt another (more params = more places for a small model
-  to hallucinate); measure per family, don't assume
+- [x] **Family targets** (shipped 1.8.0 — see the v1.8 section below) —
+  qwen/deepseek/glm/mistral files embedded alongside the provisional
+  `gemma.md`; workflow in `crates/rift-core/prompts/README.md`. All await
+  matrix validation: the first 3-model run (2026-07) showed gemma4:26b at
+  40/50 with 8 chat-only failures and 3× the tokens of ornith/qwen
+- [x] **Prompt evolution gate** (shipped 1.8.0) — `scripts/prompt_gate.py`;
+  prompts are code: benchmark → review → revise → benchmark → merge
+- [x] **Tool-schema A/B on the matrix** (shipped 1.8.0) —
+  `bench.py --schema lean|rich`; measure per family, don't assume
 
 ## v0.9 — Distribution + community
 
@@ -225,15 +221,20 @@ merge-to-release CI. Full detail in CHANGELOG.md.
 Absorbs the open v0.8.5 items — each model family treated as a compiler
 target, the bench matrix as the fitness function.
 
-- [ ] **Family targets**: qwen/deepseek/glm/mistral prompt files landed
-  through the evolution gate; validate the provisional `gemma.md` against
-  the default-prompt baseline on the next matrix run
-- [ ] **Prompt evolution gate**: prompt files are versioned; a change
-  merges only if it beats the incumbent on the bench matrix
-- [ ] **Tool-schema A/B on the matrix**: measure richer vs leaner
-  parameter schemas per family — more params = more places for a small
-  model to hallucinate; don't assume
-- [ ] Per-family bench numbers published in BENCHMARKS.md
+- [x] **Family targets** (shipped 1.8.0): qwen/deepseek/glm/mistral prompt
+  files embedded, each derived from its family's documented failure modes.
+  All provisional — first gate run against `default.md` pending hardware,
+  same status as `gemma.md`
+- [x] **Prompt evolution gate** (shipped 1.8.0): `scripts/prompt_gate.py`
+  runs the matrix with the embedded incumbent then the candidate as a
+  user override, diffs pass rate / tokens / time / failure counters, and
+  prints a PR-ready verdict; a candidate merges only if it wins every model
+- [x] **Tool-schema A/B on the matrix** (shipped 1.8.0):
+  `RIFT_TOOL_SCHEMA=lean` (bench: `--schema lean`) cuts tool descriptions
+  to the first sentence and drops per-parameter docs; results tag which
+  variant produced them — measure per family, don't assume
+- [ ] Per-family bench numbers published in BENCHMARKS.md — needs the DGX
+  matrix run (methodology + planned matrix already recorded there)
 
 ## v1.9 — Distribution, finished
 

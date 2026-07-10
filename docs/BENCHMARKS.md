@@ -194,6 +194,29 @@ chat-only fixes (gemma prompt target + mutating-tool nudge). The hard
 tier currently differentiates efficiency more than pass rate; pass-rate
 headroom needs weaker models or harder tasks to show.
 
+## Per-family prompt targets + tool-schema A/B (v1.8 — awaiting hardware run)
+
+v1.8 lands the machinery; the numbers land with the next matrix run on the
+DGX Spark server:
+
+- **Family targets**: `qwen`, `deepseek`, `glm`, and `mistral` prompt files
+  are embedded (alongside `gemma`), each derived from its family's
+  documented failure modes. All are provisional until they clear the gate.
+- **The gate**: `scripts/prompt_gate.py --family F --candidate f.md
+  --models m1,m2` runs the matrix with the embedded incumbent, then with
+  the candidate as a user-level override, and diffs pass rate / prompt
+  tokens / wall time / failure counters. A candidate merges only if it wins
+  on every model.
+- **Schema A/B**: `bench.py --schema lean|rich` toggles
+  `RIFT_TOOL_SCHEMA` — lean cuts every tool description to its first
+  sentence and drops per-parameter docs. Each result row records which
+  variant produced it, so one results.json holds both sides.
+
+Planned matrix: {qwen3:32b, deepseek-r1:32b, glm-5:9b, devstral:24b,
+gemma4:26b} × {family target, default} × {rich, lean} on the standard
+tier, hard tier for the winners. Numbers will be recorded here per family
+before any provisional target is declared validated.
+
 ## Caveats (honest ones)
 
 - Small suite, single run per task, nondeterministic models: treat as directional, not a rigorous eval. Observed run-to-run variance on the same task was ~±30% tokens for opencode (40k–71k on t1).
