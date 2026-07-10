@@ -262,12 +262,17 @@ Closes the v0.9 tail so every mainstream install path works.
 The bridge to the platform: the `--serve` surface becomes something third
 parties can build on without fear.
 
-- [ ] Versioned protocol (`protocol_version` in hello) with documented
-  event/command names — docs/SERVE.md is the contract
-- [ ] Compatibility tests: a conformance suite that pins the wire format;
-  the VS Code extension runs against it and doubles as the reference
-- [ ] Integration guide + minimal reference client for Neovim/JetBrains
-  plugin authors
+- [x] Versioned protocol (shipped 1.10.0): `protocol_version` in `ready`,
+  a `capabilities` event acks `hello` with the negotiated set —
+  docs/SERVE.md is the contract, with the additive-vs-breaking rules
+  spelled out (breaking = version bump = 2.0-class change)
+- [x] Compatibility tests (shipped 1.10.0): the conformance suite in
+  serve.rs pins every event's exact wire shape; the VS Code extension
+  checks `protocol_version` and warns on a mismatch — it is the reference
+  consumer
+- [x] Integration guide + reference client (shipped 1.10.0): SERVE.md's
+  "writing an integration" section + `scripts/serve_client.py`, an
+  interactive minimal client for Neovim/JetBrains plugin authors
 
 ## v1.11 — Platform preview
 

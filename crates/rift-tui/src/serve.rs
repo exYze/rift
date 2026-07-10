@@ -3,13 +3,20 @@
 //! per line; stdin carries one command object per line; stderr stays
 //! human-readable diagnostics. The process exits when stdin closes.
 //!
+//! **docs/SERVE.md is the protocol contract** (protocol v1) — the tests at
+//! the bottom of this file pin the wire shapes it documents. Additive
+//! changes (new events, new fields) are fine within v1; consumers must
+//! ignore what they don't know. Removing/renaming/retyping anything bumps
+//! PROTOCOL_VERSION — which is the breaking change 2.0 exists for.
+//!
 //! Commands:  {"cmd":"hello","edit_review":bool} | {"cmd":"prompt","text":…}
 //!            | {"cmd":"answer","id":…,"text":…} | {"cmd":"cancel"} | {"cmd":"undo"}
 //!            | {"cmd":"edit_decision","id":…,"apply":bool,"content":…}
-//! Events:    ready, history, iteration, thinking, content, tool_start,
-//!            tool_result, info, warning, plan, subagent_started, subagent,
-//!            subagent_finished, task_started, task_finished,
-//!            ask (answer it by id), edit_review (decide it by id),
+//! Events:    ready, capabilities (acks hello), history, iteration,
+//!            thinking, content, tool_start, tool_result, info, warning,
+//!            plan, subagent_started, subagent, subagent_finished,
+//!            task_started, task_finished, ask (answer it by id),
+//!            edit_review (decide it by id), edit_review_closed,
 //!            done (always ends a turn), context ({used, limit} —
 //!            context-window occupancy, sent at startup and after each
 //!            turn's idle compaction).
@@ -31,6 +38,10 @@ use std::collections::HashMap;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// The serve protocol version, carried in `ready` and `capabilities`.
+/// Bumped ONLY on breaking changes (docs/SERVE.md has the rules).
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// One event object per stdout line, flushed immediately — the consumer on
 /// the other side of the pipe renders in real time.
@@ -167,6 +178,7 @@ pub async fn run_serve(
         "session": session_path,
         "cwd": cwd,
         "version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": PROTOCOL_VERSION,
         "num_ctx": num_ctx,
     }));
     emit(json!({"event": "context", "used": initial_used, "limit": num_ctx}));
@@ -265,13 +277,21 @@ pub async fn run_serve(
                     }
                 };
                 match v["cmd"].as_str() {
-                    // Capability handshake. Idempotent; send it once at spawn.
+                    // Capability handshake. Idempotent; send it once at
+                    // spawn. Acked with the effective capability set so the
+                    // consumer can confirm what it negotiated.
                     Some("hello") => {
-                        if v["edit_review"].as_bool().unwrap_or(false) {
+                        let edit_review = v["edit_review"].as_bool().unwrap_or(false);
+                        if edit_review {
                             review_ctl.set_edit_review(Some(review_tx.clone()));
                         } else {
                             review_ctl.set_edit_review(None);
                         }
+                        emit(json!({
+                            "event": "capabilities",
+                            "protocol_version": PROTOCOL_VERSION,
+                            "edit_review": edit_review,
+                        }));
                     }
                     Some("prompt") => {
                         let text = v["text"].as_str().unwrap_or("").to_string();
@@ -345,4 +365,76 @@ pub async fn run_serve(
     drop(prompt_tx);
     let _ = agent_task.await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The protocol-v1 conformance suite: every event's wire shape, pinned
+    /// exactly as docs/SERVE.md documents it. A failure here means a
+    /// breaking protocol change — either fix the regression, or bump
+    /// PROTOCOL_VERSION and update SERVE.md (that's a 2.0-class change).
+    #[test]
+    fn wire_shapes_are_frozen_protocol_v1() {
+        use rift_core::PlanItem;
+        let cases: Vec<(AgentEvent, Value)> = vec![
+            (AgentEvent::Iteration(3), json!({"event":"iteration","n":3})),
+            (AgentEvent::Thinking("hm".into()), json!({"event":"thinking","text":"hm"})),
+            (AgentEvent::Content("hi".into()), json!({"event":"content","text":"hi"})),
+            (
+                AgentEvent::ToolStart { name: "read".into(), args: "{\"path\":\"x\"}".into() },
+                json!({"event":"tool_start","name":"read","args":"{\"path\":\"x\"}"}),
+            ),
+            (
+                AgentEvent::ToolResult { name: "read".into(), ok: true, preview: "…".into() },
+                json!({"event":"tool_result","name":"read","ok":true,"preview":"…"}),
+            ),
+            (AgentEvent::Info("i".into()), json!({"event":"info","text":"i"})),
+            (AgentEvent::Warning("w".into()), json!({"event":"warning","text":"w"})),
+            (
+                AgentEvent::Plan(vec![PlanItem { text: "step".into(), done: false }]),
+                json!({"event":"plan","items":[{"text":"step","done":false}]}),
+            ),
+            (
+                AgentEvent::SubAgentStarted { tag: "a1".into(), model: "m".into(), label: "l".into() },
+                json!({"event":"subagent_started","tag":"a1","model":"m","label":"l"}),
+            ),
+            (
+                AgentEvent::SubAgentActivity { tag: "a1".into(), text: "t".into(), warn: false },
+                json!({"event":"subagent","tag":"a1","text":"t","warn":false}),
+            ),
+            (
+                AgentEvent::SubAgentFinished { tag: "a1".into(), steps: 4 },
+                json!({"event":"subagent_finished","tag":"a1","steps":4}),
+            ),
+            (
+                AgentEvent::TaskStarted { id: 1, label: "cargo test".into() },
+                json!({"event":"task_started","id":1,"label":"cargo test"}),
+            ),
+            (
+                AgentEvent::TaskFinished { id: 1, label: "cargo test".into(), ok: true, preview: "ok".into() },
+                json!({"event":"task_finished","id":1,"label":"cargo test","ok":true,"preview":"ok"}),
+            ),
+            (
+                AgentEvent::Context { used: 10, limit: 100 },
+                json!({"event":"context","used":10,"limit":100}),
+            ),
+            (
+                AgentEvent::Done(TurnStats::default()),
+                json!({"event":"done","stats":{
+                    "iterations":0,"prompt_tokens":0,"billed_prompt_tokens":0,
+                    "output_tokens":0,"duration_ms":0,"tokens_per_sec":0.0,
+                }}),
+            ),
+        ];
+        for (ev, want) in cases {
+            assert_eq!(event_json(&ev), want, "wire shape drifted for {want}");
+        }
+    }
+
+    #[test]
+    fn protocol_version_is_one_until_a_deliberate_break() {
+        assert_eq!(PROTOCOL_VERSION, 1);
+    }
 }

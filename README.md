@@ -77,6 +77,11 @@ right-click "Add File/Selection to Prompt" that types `@file` mentions into
 rift's input. See [vscode/README.md](vscode/README.md) for install and
 settings.
 
+Building your own integration (Neovim, JetBrains, anything that can spawn
+a process)? `rift --serve` speaks a versioned line-JSON protocol —
+[docs/SERVE.md](docs/SERVE.md) is the contract, and
+`scripts/serve_client.py` is a minimal reference client.
+
 ## Usage
 
 ```sh
