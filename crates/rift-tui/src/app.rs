@@ -523,6 +523,14 @@ enum PickerKind {
     Elicit { reply: Option<oneshot::Sender<String>> },
 }
 
+/// The `/release-notes` popup: a heading, the raw markdown body lines, and
+/// the current scroll offset (in wrapped display lines).
+struct NotesPopup {
+    title: String,
+    body: Vec<String>,
+    scroll: usize,
+}
+
 /// Hard-cut colored spans into visual lines of at most `width` chars, each
 /// prefixed with `indent`. The char under the cut keeps its color; span
 /// boundaries never shift.
@@ -758,6 +766,36 @@ fn line_end(s: &str, i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_bold_handles_markers_and_wraps_notes() {
+        let base = Style::default();
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        // Balanced markers → bold run between, base runs outside.
+        let runs = split_bold("a **b** c", base, bold);
+        assert_eq!(
+            runs.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(),
+            vec!["a ", "b", " c"]
+        );
+        assert!(runs[1].0.add_modifier.contains(Modifier::BOLD));
+        assert!(!runs[0].0.add_modifier.contains(Modifier::BOLD));
+        // Unbalanced marker → the remainder stays verbatim (no panic, no drop).
+        let runs = split_bold("x **y", base, bold);
+        assert_eq!(runs.iter().map(|(_, s)| s.clone()).collect::<String>(), "x **y");
+
+        // render_notes_lines: a bullet gets a marker, and a line longer than
+        // the width wraps onto more than one display line.
+        let t = theme::DARK;
+        let lines = render_notes_lines(
+            &["- **feat**: a reasonably long sentence that must wrap here".into()],
+            20,
+            &t,
+        );
+        assert!(lines.len() >= 2, "long bullet should wrap");
+        let first: String =
+            lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(first.starts_with("• "), "bullet marker missing: {first:?}");
+    }
 
     #[test]
     fn gui_editors_recognized_terminal_editors_left_to_handover() {
@@ -1244,6 +1282,10 @@ struct App {
     /// the event loop watches the editor process and reloads on close.
     /// Terminal editors (vim/nano) don't set this — they take the whole TTY.
     editing_file: Option<(String, String)>,
+    /// `/release-notes` overlay: `Some((title, wrapped-off-by scroll))` when
+    /// the closable popup is up. A dimmed modal like `editing_file`, but
+    /// scrollable and dismissed with Esc/Enter/q.
+    notes_popup: Option<NotesPopup>,
     /// Completed-task reports waiting to be fed back to the model as a
     /// [task notification] turn (fires on the next idle tick).
     task_notes: Vec<String>,
@@ -1316,6 +1358,7 @@ impl App {
             bg_running: vec![],
             ctx_gauge: None,
             editing_file: None,
+            notes_popup: None,
             task_notes: vec![],
             pending_paste: vec![],
             btw_exchanges: vec![],
@@ -1328,7 +1371,7 @@ impl App {
     /// discovered skills as /skill:<name>. Live while the user is typing the
     /// command word itself (whitespace = they've moved on to arguments).
     fn palette(&self) -> Vec<(String, String, String)> {
-        if self.palette_off || self.picker.is_some() || self.answering.is_some() {
+        if self.palette_off || self.picker.is_some() || self.answering.is_some() || self.notes_popup.is_some() {
             return vec![];
         }
         // Argument completion for commands with a small enum of arguments:
@@ -1391,6 +1434,20 @@ impl App {
     /// the text here is just the tagline rendered under the art.
     fn push_logo(&mut self) {
         self.transcript.push_block(Kind::Logo, format!("v{} · {}", env!("CARGO_PKG_VERSION"), self.model));
+    }
+
+    /// One-time "Tips for getting started" note under the banner — only on a
+    /// fresh session (resumed ones already have history to scroll). Points at
+    /// the couple of commands a first-time user most wants.
+    fn push_getting_started(&mut self) {
+        self.transcript.push_block(
+            Kind::Info,
+            "Tips for getting started\n\
+             • Run /init to generate a RIFT.md with instructions for rift\n\
+             • Run /release-notes to see what's new in this version\n\
+             • Run /help for all commands and keyboard shortcuts"
+                .into(),
+        );
     }
 
     /// Rebuild the transcript from a resumed session's message history.
@@ -1482,7 +1539,7 @@ impl App {
 
     /// Completion candidates for the @-token under the cursor.
     fn mention_palette(&mut self) -> Vec<String> {
-        if self.palette_off || self.picker.is_some() || self.answering.is_some() {
+        if self.palette_off || self.picker.is_some() || self.answering.is_some() || self.notes_popup.is_some() {
             return vec![];
         }
         let Some((_, q)) = self.mention_token() else { return vec![] };
@@ -2324,6 +2381,120 @@ fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(body).alignment(ratatui::layout::Alignment::Center), inner);
     }
+
+    // Release-notes popup: dimmed background + a centered, scrollable box.
+    // Drawn last so it sits above every pane and the picker.
+    if let Some(n) = &mut app.notes_popup {
+        frame.render_widget(
+            Block::new().style(Style::default().add_modifier(Modifier::DIM)),
+            frame.area(),
+        );
+        let fw = frame.area().width;
+        let fh = frame.area().height;
+        let width = fw.saturating_sub(6).clamp(40, 92);
+        let height = fh.saturating_sub(4).clamp(6, 30);
+        let area = Rect {
+            x: (fw.saturating_sub(width)) / 2,
+            y: (fh.saturating_sub(height)) / 2,
+            width,
+            height,
+        };
+        let inner_w = width.saturating_sub(2) as usize;
+        let inner_h = height.saturating_sub(2) as usize;
+        let all = render_notes_lines(&n.body, inner_w, &t);
+        // Clamp scroll so the last page can't scroll off into blank space,
+        // and write the clamped value back (End/`G` sets usize::MAX).
+        let max_scroll = all.len().saturating_sub(inner_h);
+        n.scroll = n.scroll.min(max_scroll);
+        let more = if n.scroll < max_scroll { " ↓ more " } else { "" };
+        let shown: Vec<Line> = all.into_iter().skip(n.scroll).take(inner_h).collect();
+        let title: String = n.title.chars().take(inner_w.saturating_sub(26)).collect();
+        let block = Block::bordered()
+            .title(format!(" What's new — {title} "))
+            .title_bottom(format!(" ↑↓ scroll · Esc close{more}"))
+            .border_style(Style::default().fg(t.accent));
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(shown), inner);
+    }
+}
+
+/// Style + word-wrap the raw changelog body for the popup: `**bold**` runs
+/// render in the accent color, `- ` list items get a `•` and a hanging
+/// indent, everything wrapped to `width`. Kept deliberately small — this is
+/// one embedded document, not a general markdown renderer.
+fn render_notes_lines(body: &[String], width: usize, t: &theme::Theme) -> Vec<Line<'static>> {
+    let width = width.max(8);
+    let base = Style::default().fg(t.fg.unwrap_or(Color::Reset));
+    let bold = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
+    let mut out: Vec<Line> = Vec::new();
+    for raw in body {
+        let trimmed = raw.trim_start();
+        let (prefix, indent, content) = if let Some(rest) = trimmed.strip_prefix("- ") {
+            ("• ", "  ", rest)
+        } else if let Some(rest) = trimmed.strip_prefix("* ") {
+            ("• ", "  ", rest)
+        } else {
+            ("", "", trimmed)
+        };
+        if content.is_empty() {
+            out.push(Line::raw(""));
+            continue;
+        }
+        // Split the content into styled runs on `**` boundaries, then greedily
+        // word-wrap those runs into lines of at most `width`.
+        let runs = split_bold(content, base, bold);
+        let mut line: Vec<Span> = vec![Span::styled(prefix.to_string(), bold)];
+        let mut col = prefix.chars().count();
+        let mut first = true;
+        for (style, text) in runs {
+            for word in text.split_inclusive(' ') {
+                let wlen = word.chars().count();
+                if !first && col + wlen > width {
+                    out.push(Line::from(std::mem::take(&mut line)));
+                    line.push(Span::raw(indent.to_string()));
+                    col = indent.chars().count();
+                }
+                line.push(Span::styled(word.to_string(), style));
+                col += wlen;
+                first = false;
+            }
+        }
+        if !line.is_empty() {
+            out.push(Line::from(line));
+        }
+    }
+    out
+}
+
+/// Split a string on `**…**` into (style, text) runs — bold inside the
+/// markers, base outside. Unbalanced markers fall back to base text.
+fn split_bold(s: &str, base: Style, bold: Style) -> Vec<(Style, String)> {
+    let mut runs = vec![];
+    let mut rest = s;
+    while let Some(open) = rest.find("**") {
+        if open > 0 {
+            runs.push((base, rest[..open].to_string()));
+        }
+        let after = &rest[open + 2..];
+        match after.find("**") {
+            Some(close) => {
+                runs.push((bold, after[..close].to_string()));
+                rest = &after[close + 2..];
+            }
+            None => {
+                // No closing marker — emit the rest verbatim (with the `**`).
+                runs.push((base, rest[open..].to_string()));
+                rest = "";
+                break;
+            }
+        }
+    }
+    if !rest.is_empty() {
+        runs.push((base, rest.to_string()));
+    }
+    runs
 }
 
 /// Expand `@path` tokens: for each existing file, append an outline (or a
@@ -2839,6 +3010,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
 
     let mut app = App::new(model, skills, theme, cwd_ui.clone());
     app.push_logo();
+    if resumed.is_empty() {
+        app.push_getting_started();
+    }
     app.seed_from_messages(&resumed);
 
     let result = (|| -> Result<()> {
@@ -3017,6 +3191,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     && app.picker.is_none()
                     && app.answering.is_none()
                     && app.editing_file.is_none()
+                    && app.notes_popup.is_none()
                 {
                     // Background tasks finished while the agent was busy (or
                     // idle): feed their reports back as ONE notification turn
@@ -3090,6 +3265,28 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     let palette = app.palette();
                     let mention = if palette.is_empty() { app.mention_palette() } else { vec![] };
                     let popup_len = palette.len().max(mention.len());
+                    // An open release-notes popup owns the keyboard: scroll or
+                    // dismiss, nothing reaches the input line behind it.
+                    if let Some(n) = app.notes_popup.as_mut() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                                app.notes_popup = None;
+                                app.status = "release notes closed".into();
+                            }
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.notes_popup = None;
+                                app.status = "release notes closed".into();
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => n.scroll = n.scroll.saturating_sub(1),
+                            KeyCode::Down | KeyCode::Char('j') => n.scroll += 1,
+                            KeyCode::PageUp => n.scroll = n.scroll.saturating_sub(10),
+                            KeyCode::PageDown => n.scroll += 10,
+                            KeyCode::Home | KeyCode::Char('g') => n.scroll = 0,
+                            KeyCode::End | KeyCode::Char('G') => n.scroll = usize::MAX,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     // An open picker owns the keyboard.
                     if app.picker.is_some() {
                         match key.code {
@@ -3407,6 +3604,14 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                         cancel,
                                     ));
                                 }
+                            } else if trimmed == "/release-notes" {
+                                // Pure UI: the changelog is embedded, no agent
+                                // turn — open the closable popup and undo the
+                                // busy flag set for a normal submission.
+                                app.idle();
+                                let (title, body) = crate::release_notes::latest();
+                                app.notes_popup = Some(NotesPopup { title, body, scroll: 0 });
+                                app.status = "release notes — Esc to close".into();
                             } else if trimmed == "/init" {
                                 // Syntactic sugar: a canned prompt through the normal agent loop.
                                 app.status = "generating RIFT.md…".into();

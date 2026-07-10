@@ -3,6 +3,7 @@ mod clipboard;
 mod commands;
 mod highlight;
 mod pricing;
+mod release_notes;
 mod serve;
 mod swarm_ui;
 mod theme;
