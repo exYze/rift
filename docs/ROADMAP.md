@@ -299,13 +299,22 @@ breaking release is a promotion — not a surprise.
 
 Breaking changes, bundled once, and only these:
 
-- [ ] Plugin API stable: tools, slash commands, hooks, themes, prompt
-  targets — semver'd
-- [ ] Config schema v2 with one-shot automatic migration (old configs
-  keep working through the migrator; no hand-editing)
-- [ ] Serve protocol v1 frozen: editor integrations built on it keep
-  working across every 2.x release
-- [ ] The 1.0 stability promise resets for 2.x: config + protocol stable,
+- [x] Plugin API stable (shipped 2.0.0, on by default): commands, tools
+  (project plugins behind a one-time manifest trust prompt, like hooks),
+  post_edit hooks, JSON themes (`themes/<name>.json`, plus
+  `~/.config/rift/themes/`), and prompt targets (`prompts/<family>.md`,
+  user plugins only — a cloned repo never replaces the system prompt)
+- [x] Config schema v2 with one-shot automatic migration (shipped 2.0.0):
+  a v1 user config is rewritten in place on first load, with a `.v1.bak`
+  backup; if the file can't be written, the migrated form is used in
+  memory — old configs keep working either way. Project `.rift.json`
+  files are never rewritten; their legacy `bash_deny` keeps loading
+  (tighten-only) with a nudge toward `rift config migrate --project`
+- [x] Serve protocol v1 frozen (shipped 2.0.0): `PROTOCOL_VERSION = 1`,
+  the conformance suite pins every wire shape, and 2.0's additions
+  (`skills` in ready, `/skill:` prompt expansion) are additive — editor
+  integrations built on v1 keep working across every 2.x release
+- [x] The 1.0 stability promise resets for 2.x: config + protocol stable,
   provider matrix green, benchmarks per release
 
 ---

@@ -464,12 +464,46 @@ async fn main() -> Result<()> {
         eprintln!("note: approval mode needs the interactive TUI; running headless without it");
     }
 
+    // Plugins (the 2.0 platform, on by default): commands ride the skill
+    // machinery, tools register into the registry (project-plugin tools
+    // behind the same one-time trust as hooks), hooks join the post_edit
+    // flow below, themes and user-plugin prompt targets load in their own
+    // modules. See rift-core/src/plugins.rs for the full security model.
+    let plugins = rift_core::load_plugins(&cwd);
+    if !plugins.is_empty() {
+        for w in rift_core::register_plugin_tools(&mut registry, &plugins, &|p| {
+            let key = rift_core::plugins::trust_key(p);
+            if rift_core::config::hook_trusted(&key) {
+                return true;
+            }
+            if interactive && confirm_plugin(&p.name, p.tools.len()) {
+                if let Err(e) = rift_core::config::trust_hook(&key) {
+                    eprintln!("warning: could not persist plugin approval: {e:#}");
+                }
+                return true;
+            }
+            false
+        }) {
+            eprintln!("warning: {w}");
+        }
+        eprintln!(
+            "plugins: {}",
+            plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+
     // post_edit hooks: user-config entries apply as-is; project entries
     // execute commands from a possibly-cloned repo, so each needs one-time
-    // trust (same model as project MCP servers).
+    // trust (same model as project MCP servers). Plugin hooks follow the
+    // same line: user plugins as-is, project plugins through the prompt.
     let mut post_edit_hooks = config.hooks.post_edit.clone();
-    for hook in &config.project_hooks.post_edit {
-        if rift_core::config::hook_trusted(hook) {
+    let plugin_hooks =
+        plugins.iter().flat_map(|p| p.hooks.post_edit.iter().map(move |h| (p.project, h)));
+    let project_hook_entries = config.project_hooks.post_edit.iter().map(|h| (true, h));
+    for (from_project, hook) in project_hook_entries.chain(plugin_hooks) {
+        // User-side entries (config or user plugin) are the user's own
+        // machine — no prompt; project-side ones need the trust flow.
+        if !from_project || rift_core::config::hook_trusted(hook) {
             post_edit_hooks.push(hook.clone());
         } else if interactive && confirm_hook(hook) {
             if let Err(e) = rift_core::config::trust_hook(hook) {
@@ -480,6 +514,7 @@ async fn main() -> Result<()> {
             eprintln!("project post_edit hook skipped (not trusted): {hook}");
         }
     }
+    post_edit_hooks.dedup();
     if !post_edit_hooks.is_empty() {
         eprintln!("post-edit hooks: {}", post_edit_hooks.join(" · "));
     }
@@ -491,31 +526,15 @@ async fn main() -> Result<()> {
     }
 
     // Skills (Agent Skills standard): listed in the system prompt, bodies
-    // loaded on demand via the skill tool or /skill:<name>.
+    // loaded on demand via the skill tool or /skill:<name>. Plugin commands
+    // join them — same palette, same listing to the model.
     let mut skills = rift_core::load_skills(&cwd);
-    // Experimental plugin API (2.0 preview, config `experimental.plugins`):
-    // plugin commands ride the skill machinery (/skill:<name>, same listing
-    // to the model); tools register from USER plugins only — see
-    // rift-core/src/plugins.rs for the security cut.
-    if config.experimental.plugins {
-        let plugins = rift_core::load_plugins(&cwd);
-        if !plugins.is_empty() {
-            for w in rift_core::register_plugin_tools(&mut registry, &plugins) {
-                eprintln!("warning: {w}");
-            }
-            let cmds = rift_core::commands_as_skills(&plugins);
-            for c in cmds {
-                if !skills.iter().any(|s| s.name == c.name) {
-                    skills.push(c);
-                }
-            }
-            skills.sort_by(|a, b| a.name.cmp(&b.name));
-            eprintln!(
-                "plugins (experimental): {}",
-                plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
-            );
+    for c in rift_core::commands_as_skills(&plugins) {
+        if !skills.iter().any(|s| s.name == c.name) {
+            skills.push(c);
         }
     }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
     if !skills.is_empty() {
         prompt_text.push_str(&rift_core::skills_prompt_section(&skills));
         registry.register(Box::new(rift_core::SkillTool::new(skills.clone())));
@@ -613,17 +632,18 @@ async fn main() -> Result<()> {
     };
 
     // Theme: config-selected, defaulting to dark; unknown names warn and fall
-    // back rather than failing startup.
+    // back rather than failing startup. Built-ins first, then custom JSON
+    // themes from ~/.config/rift/themes/ and plugin themes/ dirs.
     let ui_theme = match config.theme.as_deref() {
-        None => &theme::DARK,
-        Some(name) => theme::find(name).unwrap_or_else(|| {
+        None => theme::DARK,
+        Some(name) => theme::resolve(name, &cwd).unwrap_or_else(|| {
             eprintln!("warning: unknown theme '{name}' (available: {}); using dark", theme::names().join(", "));
-            &theme::DARK
+            theme::DARK
         }),
     };
 
     if cli.serve {
-        return serve::run_serve(agent, store, ask_rx, model_addr, resumed_messages).await;
+        return serve::run_serve(agent, store, ask_rx, model_addr, resumed_messages, skills).await;
     }
 
     match cli.prompt {
@@ -825,6 +845,23 @@ fn confirm_hook(command: &str) -> bool {
     eprint!(
         "project .rift.json defines a post_edit hook: `{command}`\nit will run automatically after every \
          write/edit. Run and trust it on this machine? [y/N] "
+    );
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim(), "y" | "Y" | "yes" | "YES")
+}
+
+/// Startup y/N prompt for a project plugin that declares tools (commands
+/// rift will execute on the model's behalf). Trust is remembered per exact
+/// manifest — editing plugin.json re-prompts.
+fn confirm_plugin(name: &str, tool_count: usize) -> bool {
+    use std::io::Write;
+    eprint!(
+        "project plugin '{name}' declares {tool_count} tool(s) — each runs a command from this \
+         repo when the model calls it. Register and trust this manifest on this machine? [y/N] "
     );
     let _ = std::io::stderr().flush();
     let mut line = String::new();

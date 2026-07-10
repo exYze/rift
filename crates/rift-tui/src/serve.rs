@@ -111,6 +111,7 @@ pub async fn run_serve(
     mut ask_rx: mpsc::UnboundedReceiver<AskRequest>,
     model: String,
     resumed: Vec<rift_ollama::Message>,
+    skills: Vec<rift_core::Skill>,
 ) -> Result<()> {
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<ServeCmd>();
@@ -180,6 +181,9 @@ pub async fn run_serve(
         "version": env!("CARGO_PKG_VERSION"),
         "protocol_version": PROTOCOL_VERSION,
         "num_ctx": num_ctx,
+        // Skills + plugin commands invocable via a "/skill:<name> [task]"
+        // prompt — listed so consumers can offer completion (additive v1).
+        "skills": skills.iter().map(|s| json!({"name": s.name, "description": s.description})).collect::<Vec<_>>(),
     }));
     emit(json!({"event": "context", "used": initial_used, "limit": num_ctx}));
     if !resumed.is_empty() {
@@ -294,13 +298,35 @@ pub async fn run_serve(
                         }));
                     }
                     Some("prompt") => {
-                        let text = v["text"].as_str().unwrap_or("").to_string();
+                        let mut text = v["text"].as_str().unwrap_or("").to_string();
                         if text.trim().is_empty() {
                             continue;
                         }
                         if busy {
                             emit(json!({"event": "warning", "text": "turn in progress — cancel it or wait for done"}));
                             continue;
+                        }
+                        // `/skill:<name> [task]` expands exactly like the
+                        // TUI, so editor chats invoke skills and plugin
+                        // commands identically. Plain prompts untouched.
+                        if let Some(rest) = text.trim().strip_prefix("/skill:") {
+                            let (name, task) = match rest.split_once(char::is_whitespace) {
+                                Some((n, t)) => (n, t.trim()),
+                                None => (rest, ""),
+                            };
+                            let Some(s) = skills.iter().find(|s| s.name == name) else {
+                                emit(json!({"event": "warning", "text": format!("unknown skill '{name}'")}));
+                                continue;
+                            };
+                            let task = if task.is_empty() {
+                                "Apply this skill to the current project now."
+                            } else {
+                                task
+                            };
+                            text = format!(
+                                "Follow this skill's instructions.\n\n--- SKILL: {} ---\n{}\n--- END SKILL ---\n\nTask: {task}",
+                                s.name, s.body
+                            );
                         }
                         let cancel = CancellationToken::new();
                         current_cancel = Some(cancel.clone());

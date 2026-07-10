@@ -538,6 +538,7 @@ class RiftChatProvider {
         busy: this.busy,
         ctxUsed: this.proc ? this.ctxUsed : 0,
         ctxLimit: this.proc ? this.ctxLimit : 0,
+        skills: this.skills || [],
       });
     }
   }
@@ -615,6 +616,8 @@ class RiftChatProvider {
     if (ev.event === 'ready') {
       this.model = ev.model;
       if (ev.num_ctx) this.ctxLimit = ev.num_ctx;
+      // Skills + plugin commands, completable in the webview as /skill:<name>.
+      this.skills = ev.skills || [];
       // This extension speaks serve protocol v1 (docs/SERVE.md). An absent
       // protocol_version means a pre-1.10 rift — same v1 wire shapes.
       if (ev.protocol_version && ev.protocol_version > 1) {

@@ -82,6 +82,34 @@ a process)? `rift --serve` speaks a versioned line-JSON protocol —
 [docs/SERVE.md](docs/SERVE.md) is the contract, and
 `scripts/serve_client.py` is a minimal reference client.
 
+## Plugins
+
+A plugin is a directory with a `plugin.json`, discovered from
+`.rift/plugins/` (project) and `~/.config/rift/plugins/` (user):
+
+```json
+{
+  "name": "standup",
+  "commands": [
+    {"name": "standup", "description": "summarize recent work",
+     "prompt": "Summarize the git log since yesterday. Focus: {args}"}
+  ],
+  "tools": [
+    {"name": "ticket_lookup", "description": "Look up a ticket by id",
+     "command": "python3 lookup.py",
+     "parameters": {"type": "object", "properties": {"id": {"type": "string"}}}}
+  ],
+  "hooks": {"post_edit": ["cargo check -q"]}
+}
+```
+
+Commands surface like skills (`/skill:standup focus on the parser` — also
+completable in the VS Code chat); tools run a subprocess with the call's
+arguments as JSON on stdin; plugins can also ship `themes/<name>.json`
+color themes and (user-level only) `prompts/<family>.md` prompt targets.
+Anything from a *project* plugin that executes commands — tools, hooks —
+gets a one-time trust prompt at startup, keyed to the exact manifest.
+
 ## Usage
 
 ```sh

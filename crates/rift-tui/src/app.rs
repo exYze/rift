@@ -925,7 +925,7 @@ mod tests {
         // Regression: theme switching is UI-side; both the typed form and
         // the picker route through apply_theme (the picker used to forward
         // "/theme <name>" to the agent dispatcher → "unknown command").
-        let mut app = App::new("m".into(), vec![], &theme::DARK, std::env::temp_dir());
+        let mut app = App::new("m".into(), vec![], theme::DARK, std::env::temp_dir());
         app.apply_theme("mono");
         assert_eq!(app.theme.name, "mono");
         app.apply_theme("dracula");
@@ -1171,7 +1171,7 @@ enum LogView {
 
 struct App {
     model: String,
-    theme: &'static theme::Theme,
+    theme: theme::Theme,
     transcript: Pane,
     log: Pane,
     /// Live working-tree diff, refreshed after each write/edit tool result.
@@ -1274,7 +1274,7 @@ struct SessionStats {
 }
 
 impl App {
-    fn new(model: String, skills: Vec<Skill>, theme: &'static theme::Theme, cwd: PathBuf) -> Self {
+    fn new(model: String, skills: Vec<Skill>, theme: theme::Theme, cwd: PathBuf) -> Self {
         let mut transcript = Pane::new();
         transcript.set_syntax(theme.syntax);
         Self {
@@ -1515,8 +1515,9 @@ impl App {
 
     /// Switch the color theme by name (typed `/theme <name>` and the picker
     /// share this — the theme is pure UI state, never routed to the agent).
+    /// Built-ins first, then custom JSON themes (user dir + plugins).
     fn apply_theme(&mut self, name: &str) {
-        match theme::find(name) {
+        match theme::resolve(name, &self.cwd) {
             Some(th) => {
                 self.theme = th;
                 // Cached code spans hold the old syntect colors.
@@ -2011,9 +2012,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
             .border_style(if focused { focused_style } else { unfocused_style });
         let inner = block.inner(transcript_area);
         app.transcript.area = inner;
-        app.transcript.rebuild(inner.width, t);
+        app.transcript.rebuild(inner.width, &t);
         app.transcript.view_height = inner.height as usize;
-        let lines = app.transcript.visible_lines(t);
+        let lines = app.transcript.visible_lines(&t);
         frame.render_widget(block, transcript_area);
         frame.render_widget(Paragraph::new(lines), inner);
     }
@@ -2076,9 +2077,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
         }
         let pane = app.log_like_pane();
         pane.area = log_inner;
-        pane.rebuild(log_inner.width, t);
+        pane.rebuild(log_inner.width, &t);
         pane.view_height = log_inner.height as usize;
-        let lines = pane.visible_lines(t);
+        let lines = pane.visible_lines(&t);
         frame.render_widget(Paragraph::new(lines), log_inner);
     } else {
         app.log.area = Rect::default();
@@ -2741,7 +2742,7 @@ pub struct TuiOptions {
     /// Config `pricing` map for the cost display (built-ins live in
     /// crate::pricing).
     pub pricing: std::collections::HashMap<String, rift_core::config::Pricing>,
-    pub theme: &'static theme::Theme,
+    pub theme: theme::Theme,
 }
 
 /// How to relaunch after /restart: the addressable model name (provider

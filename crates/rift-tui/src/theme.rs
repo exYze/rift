@@ -320,6 +320,75 @@ pub fn names() -> Vec<&'static str> {
     THEMES.iter().map(|t| t.name).collect()
 }
 
+/// Resolve a theme name: built-ins first, then custom JSON themes —
+/// `~/.config/rift/themes/<name>.json`, then `themes/<name>.json` inside
+/// any plugin (user `~/.config/rift/plugins/*/`, project `.rift/plugins/*/`
+/// — themes are inert colors, so project ones are safe to load).
+pub fn resolve(name: &str, cwd: &std::path::Path) -> Option<Theme> {
+    if let Some(t) = find(name) {
+        return Some(*t);
+    }
+    let file = format!("{}.json", name.to_ascii_lowercase());
+    let mut candidates: Vec<std::path::PathBuf> = vec![];
+    if let Some(cfg) = rift_core::paths::config_dir() {
+        candidates.push(cfg.join("rift/themes").join(&file));
+        candidates.extend(plugin_theme_paths(&cfg.join("rift/plugins"), &file));
+    }
+    candidates.extend(plugin_theme_paths(&cwd.join(".rift/plugins"), &file));
+    candidates.iter().find_map(|p| parse_custom(name, p))
+}
+
+fn plugin_theme_paths(plugins_dir: &std::path::Path, file: &str) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(plugins_dir) else { return vec![] };
+    let mut out: Vec<_> = entries.flatten().map(|e| e.path().join("themes").join(file)).collect();
+    out.sort();
+    out
+}
+
+/// Parse `{"base": "dark", "accent": "#39c5cf", ...}` — any field of
+/// [`Theme`] as a `#RRGGBB` string (or `"syntax"` as a syntect theme name);
+/// everything unspecified inherits from `base` (default: dark).
+fn parse_custom(name: &str, path: &std::path::Path) -> Option<Theme> {
+    let raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let obj = raw.as_object()?;
+    let base = obj.get("base").and_then(|b| b.as_str()).unwrap_or("dark");
+    let mut theme = *find(base)?;
+    // The name and syntax strings must be 'static: themes load once per
+    // /theme switch, so the leak is bounded and deliberate.
+    theme.name = Box::leak(name.to_ascii_lowercase().into_boxed_str());
+    let hex = |key: &str| -> Option<Color> {
+        let s = obj.get(key)?.as_str()?.trim_start_matches('#');
+        u32::from_str_radix(s, 16).ok().filter(|_| s.len() == 6).map(rgb)
+    };
+    let set = |key: &str, slot: &mut Color| {
+        if let Some(c) = hex(key) {
+            *slot = c;
+        }
+    };
+    set("border", &mut theme.border);
+    set("accent", &mut theme.accent);
+    set("muted", &mut theme.muted);
+    set("code", &mut theme.code);
+    set("tool", &mut theme.tool);
+    set("warn", &mut theme.warn);
+    set("error", &mut theme.error);
+    set("ok", &mut theme.ok);
+    set("diff_add", &mut theme.diff_add);
+    set("diff_del", &mut theme.diff_del);
+    set("diff_hunk", &mut theme.diff_hunk);
+    set("sel_fg", &mut theme.sel_fg);
+    if let Some(c) = hex("fg") {
+        theme.fg = Some(c);
+    }
+    if let Some(c) = hex("bg") {
+        theme.bg = Some(c);
+    }
+    if let Some(s) = obj.get("syntax").and_then(|s| s.as_str()) {
+        theme.syntax = Some(Box::leak(s.to_string().into_boxed_str()));
+    }
+    Some(theme)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +420,40 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod custom_tests {
+    use super::*;
+
+    #[test]
+    fn custom_json_theme_inherits_base_and_overrides() {
+        let dir = std::env::temp_dir().join(format!("rift-theme-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mytheme.json");
+        std::fs::write(
+            &path,
+            r##"{"base": "nord", "accent": "#ff0000", "bg": "#101010", "syntax": "InspiredGitHub"}"##,
+        )
+        .unwrap();
+
+        let t = parse_custom("MyTheme", &path).unwrap();
+        assert_eq!(t.name, "mytheme");
+        assert_eq!(t.accent, rgb(0xff0000));
+        assert_eq!(t.bg, Some(rgb(0x101010)));
+        assert_eq!(t.syntax, Some("InspiredGitHub"));
+        // Unspecified fields inherit from the base (nord).
+        assert_eq!(t.error, NORD.error);
+        assert_eq!(t.muted, NORD.muted);
+
+        // Bad hex is skipped, unknown base fails cleanly.
+        std::fs::write(&path, r##"{"accent": "#xyzxyz"}"##).unwrap();
+        let t = parse_custom("m", &path).unwrap();
+        assert_eq!(t.accent, DARK.accent, "bad hex must not change the field");
+        std::fs::write(&path, r##"{"base": "nope"}"##).unwrap();
+        assert!(parse_custom("m", &path).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -40,7 +40,7 @@ stdin EOF → process exits (in-flight turn cancelled, session saved)
 | command | fields | notes |
 |---|---|---|
 | `hello` | `edit_review`: bool | Capability handshake. Idempotent; send once at spawn. Answered with a `capabilities` event. |
-| `prompt` | `text`: string | Starts a turn. Rejected with a `warning` event while a turn is running. |
+| `prompt` | `text`: string | Starts a turn. Rejected with a `warning` event while a turn is running. Text beginning `/skill:<name> [task]` expands that skill (or plugin command) exactly like the TUI; an unknown name is a `warning`, not a turn. |
 | `answer` | `id`: number, `text`: string | Answers a pending `ask` by id. Unknown ids are ignored. |
 | `edit_decision` | `id`: number, `apply`: bool, `content`?: string | Decides a pending `edit_review`. `apply:true` writes `content` (the accepted-hunk subset the reviewer assembled) or, when `content` is absent, the proposal verbatim. `apply:false` rejects. |
 | `cancel` | — | Cancels the in-flight turn. Pending reviews are closed (`edit_review_closed`). |
@@ -74,7 +74,7 @@ Session and status:
 
 | event | fields | notes |
 |---|---|---|
-| `ready` | `model`, `session`, `cwd`, `version`, `protocol_version`, `num_ctx` | First event after spawn. |
+| `ready` | `model`, `session`, `cwd`, `version`, `protocol_version`, `num_ctx`, `skills`: [{`name`,`description`}] | First event after spawn. `skills` (added in 2.0, additive) lists what `/skill:<name>` prompts can invoke — skills and plugin commands — so consumers can offer completion. |
 | `capabilities` | `protocol_version`, `edit_review` | Acknowledges `hello` with the effective capability set. |
 | `context` | `used`, `limit` | Context-window occupancy; sent at startup and after each turn's idle compaction. |
 | `history` | `messages`: [{`role`,`text`}] | Prior user/assistant exchanges of a resumed session (tool/system traffic excluded). |
