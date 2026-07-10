@@ -279,13 +279,21 @@ parties can build on without fear.
 Everything 2.0 will stabilize ships here first, behind flags, so the
 breaking release is a promotion — not a surprise.
 
-- [ ] **Experimental plugin API** (`.rift/plugins/`, user + project, trust-
-  gated like hooks/MCP): rift-native slash commands, tools, themes, and
-  prompt targets from a manifest — MCP covers external tools; plugins
-  cover extending rift itself
-- [ ] Config schema v2 draft + `rift config migrate --dry-run`
-- [ ] Deprecation warnings on every path 2.0 changes, with the exact
-  replacement named
+- [x] **Experimental plugin API** (shipped 1.11.0, behind
+  `"experimental": {"plugins": true}`): `plugin.json` manifests in
+  `.rift/plugins/` (project) and `~/.config/rift/plugins/` (user).
+  **Commands** (prompt templates with `{args}`) ride the skill machinery —
+  `/skill:<name>`, listed to the model. **Tools** (subprocess: args JSON on
+  stdin, stdout = result) register from USER plugins only in the preview —
+  a cloned repo must not register commands to execute; project-tool trust
+  and themes/prompt-target contributions land with 2.0's stabilization
+- [x] Config schema v2 + migrator (shipped 1.11.0): `rift config migrate
+  [--dry-run] [--project]` rewrites deprecated `bash_allow`/`bash_deny`
+  globs to `Bash(...)` rules, stamps `"version": 2`, backs up the
+  original; runs before config load so a broken config can't block it
+- [x] Deprecation warnings (shipped 1.11.0): loading a config with
+  `bash_allow`/`bash_deny` warns that they stop loading in 2.0 and names
+  the migrator as the way out
 
 ## v2.0 — The agent platform
 
