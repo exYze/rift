@@ -1324,11 +1324,35 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
                 let _ = fx.send(UiEffect::Out(Kind::Info, format!("created {}", path.display())));
             }
             let _ = fx.send(UiEffect::EditFile(path));
-            Ok("opening config in $EDITOR…".into())
+            // Say what will actually open — the resolved editor is a
+            // surprise otherwise, especially when the PATH probe picked it.
+            let (editor, source) = crate::app::resolve_editor_with_source();
+            Ok(if source == "default" {
+                format!(
+                    "opening config in {editor}… (default — set \"editor\" in the user config or $EDITOR to change)"
+                )
+            } else {
+                format!("opening config in {editor}… (from {source})")
+            })
         }
         // Internal: dispatched by the UI after $EDITOR exits.
         "reload" => {
-            let loaded = rift_core::Config::load(&cx.cwd)?;
+            // A hand-edited config that no longer parses must not surface as
+            // a bare error with the settings in limbo: the previous config
+            // stays live, and the message points at the exact JSON error
+            // (serde includes line and column) plus the way back in.
+            let loaded = match rift_core::Config::load(&cx.cwd) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = fx.send(UiEffect::Out(
+                        Kind::Warn,
+                        format!(
+                            "! config not reloaded — {e:#}\n  previous settings still active; run /config edit to fix it"
+                        ),
+                    ));
+                    return Ok("config reload failed; previous settings kept".into());
+                }
+            };
             for w in &loaded.warnings {
                 let _ = fx.send(UiEffect::Out(Kind::Warn, format!("! {w}")));
             }
@@ -1338,6 +1362,7 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
             }
             agent.ctx().set_bash_wrapper(config.permissions.bash_wrapper.clone());
             agent.ctx().set_search_url(config.search_url.clone());
+            crate::app::set_config_editor(config.editor.clone());
             agent.ctx().set_approval(config.permissions.approve_effective());
             // Hooks: only already-trusted project entries reload here (the
             // trust prompt is a startup interaction); new ones need /restart.

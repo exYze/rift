@@ -400,6 +400,7 @@ async fn main() -> Result<()> {
         eprintln!("web search: {u}");
     }
     ctx.set_search_url(config.search_url.clone());
+    app::set_config_editor(config.editor.clone());
     let (ask_tx, ask_rx) = mpsc::unbounded_channel::<AskRequest>();
     if interactive || cli.serve {
         ctx = ctx.with_interaction(ask_tx);

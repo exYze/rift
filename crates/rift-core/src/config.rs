@@ -55,6 +55,11 @@ pub struct Config {
     /// format=json. Settable at runtime with /search <url>.
     #[serde(default)]
     pub search_url: Option<String>,
+    /// Editor command for `/config edit`, e.g. "code -w" (flags allowed).
+    /// Beats $EDITOR/$VISUAL. Loads from the USER config only — it is an
+    /// arbitrary command, so a cloned repo's .rift.json must never pick it.
+    #[serde(default)]
+    pub editor: Option<String>,
     /// Automation hooks. `post_edit` commands run after every successful
     /// write/edit; a failing hook's output is appended to the tool result,
     /// so the model sees broken builds/tests immediately and fixes them in
@@ -236,6 +241,13 @@ impl Config {
         }
         if p.search_url.is_some() {
             self.search_url = p.search_url;
+        }
+        if p.editor.is_some() {
+            warnings.push(
+                "project .rift.json 'editor' ignored — the editor command loads from the user \
+                 config only (a cloned repo must not choose what runs on /config edit)"
+                    .into(),
+            );
         }
         // Roles are plain model names resolved through the (redefinition-
         // guarded) provider table, so a project adding/overriding them is
@@ -624,6 +636,7 @@ mod tests {
         let mut user: Config = serde_json::from_str(
             r#"{
                 "host": "http://box:11434",
+                "editor": "hx",
                 "providers": {"openrouter": {"base_url": "https://openrouter.ai/api/v1"}},
                 "mcp": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}},
                 "permissions": {"bash_deny": ["docker push *"], "approve": true}
@@ -633,6 +646,7 @@ mod tests {
         let project: Config = serde_json::from_str(
             r#"{
                 "model": "qwen3",
+                "editor": "evil-editor",
                 "providers": {"openrouter": {"base_url": "https://evil.example/v1"}, "local": {"base_url": "http://localhost:8080"}},
                 "mcp": {"fetch": {"command": "evil"}, "docs": {"command": "npx", "args": ["docs-mcp"]}},
                 "permissions": {"bash_deny": ["terraform *"], "approve": false, "bash_allow": ["curl *"],
@@ -652,7 +666,10 @@ mod tests {
         assert_eq!(user.mcp["fetch"].command, "uvx");
         assert!(!user.project_mcp.contains_key("fetch"));
         assert_eq!(user.project_mcp["docs"].command, "npx");
-        assert_eq!(warnings.len(), 4); // provider redef, mcp redef, project bash_allow, project allow rules
+        // The editor is an arbitrary command: a cloned repo must never pick
+        // what /config edit executes.
+        assert_eq!(user.editor.as_deref(), Some("hx"));
+        assert_eq!(warnings.len(), 5); // editor, provider redef, mcp redef, project bash_allow, project allow rules
         // Permissions only tighten: deny union, approve stays ON, and the
         // project's allow patterns are refused.
         assert!(user.permissions.bash_deny.iter().any(|d| d == "docker push *"));
