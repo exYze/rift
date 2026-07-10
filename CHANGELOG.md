@@ -3,6 +3,32 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.11.0 — 2026-07-10
+
+Platform preview (roadmap v1.11): everything 2.0 stabilizes ships here
+first, behind flags — the breaking release becomes a promotion, not a
+surprise.
+
+- **Experimental plugin API** (`"experimental": {"plugins": true}` in the
+  config): a plugin is a directory with `plugin.json`, discovered from
+  `.rift/plugins/` (project) and `~/.config/rift/plugins/` (user).
+  *Commands* are prompt templates (`{args}` = invocation arguments) and
+  surface exactly like skills — `/skill:<name>` in the palette, listed to
+  the model. *Tools* run a subprocess (args JSON on stdin, stdout is the
+  result, nonzero exit = error, 60s timeout) — user plugins only in the
+  preview: a cloned repo must not register commands to execute, so
+  project-plugin tools are skipped with a pointed warning until 2.0's
+  trust flow
+- **Config schema v2 + migrator**: `rift config migrate` rewrites the
+  deprecated `permissions.bash_allow`/`bash_deny` globs as `Bash(...)`
+  rules, stamps `"version": 2`, and backs the original up as
+  `config.json.v1.bak`; `--dry-run` previews, `--project` targets the
+  project `.rift.json`. Runs before the normal config load, so a config
+  broken enough to need migrating can't block the migrator
+- **Deprecation warnings**: loading a config that still uses
+  `bash_allow`/`bash_deny` warns they stop loading in 2.0 and points at
+  the migrator — nothing 2.0 breaks goes unannounced
+
 ## v1.10.0 — 2026-07-10
 
 Serve protocol v1 (roadmap v1.10): the `--serve` surface becomes a
