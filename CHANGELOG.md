@@ -19,6 +19,10 @@ All notable changes to rift. Versions follow the roadmap phases in
   to parse now keeps the previous settings live and reports the exact
   error with line and column, pointing back at /config edit — instead of
   a bare reload error with the settings in limbo
+- **Merge-to-release**: merging a version bump to master now tags and
+  publishes the release automatically — the release workflow spots a
+  Cargo.toml version with no matching tag and cuts `v<version>` itself.
+  Manually pushed `v*` tags still work exactly as before
 
 ## v1.7.2 — 2026-07-09
 
