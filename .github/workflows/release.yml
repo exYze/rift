@@ -66,12 +66,23 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: install rust target
-        run: rustup update stable && rustup target add ${{ matrix.target }}
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            rustup update stable && rustup target add ${{ matrix.target }} && exit 0
+            echo "rustup attempt $i failed; retrying in $((i * 10))s" && sleep $((i * 10))
+          done
+          exit 1
 
       # Static Linux binaries: no glibc version requirements, run anywhere.
       - name: install musl toolchain
         if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y musl-tools && exit 0
+            echo "apt-get attempt $i failed; retrying in $((i * 10))s" && sleep $((i * 10))
+          done
+          exit 1
 
       - name: build
         run: cargo build --release --target ${{ matrix.target }} -p rift-tui
@@ -117,12 +128,39 @@ jobs:
         with:
           node-version: 20
       - name: package
-        run: cd vscode && npx --yes @vscode/vsce package --out ../rift-vscode.vsix
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            (cd vscode && npx --yes @vscode/vsce package --out ../rift-vscode.vsix) && exit 0
+            echo "vsce package attempt $i failed; retrying in $((i * 10))s" && sleep $((i * 10))
+          done
+          exit 1
       - uses: actions/upload-artifact@v7
         with:
           name: rift-vscode
           path: rift-vscode.vsix
           if-no-files-found: error
+
+  # Transient-flake recovery. The per-step retries above cover the network
+  # calls we run in a shell, but the `actions/upload-artifact` upload itself
+  # is a JS action that can't be wrapped in a shell retry — and a DNS blip
+  # reaching its endpoint (ENOTFOUND) is exactly what once failed one matrix
+  # leg and skipped the whole release. When any build/vsix leg fails, re-run
+  # just the failed jobs (and their dependents, i.e. release), capped at 3
+  # attempts via run_attempt so a genuine, reproducible failure still stops.
+  auto-rerun:
+    needs: [build, vsix]
+    if: failure() && github.run_attempt < 3
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: re-run failed jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "A job failed on attempt ${{ github.run_attempt }} of 3 — re-running failed jobs."
+          gh run rerun ${{ github.run_id }} --failed --repo ${{ github.repository }}
 
   release:
     needs: [plan, build, vsix]

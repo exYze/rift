@@ -22,7 +22,10 @@ All notable changes to rift. Versions follow the roadmap phases in
 - **Merge-to-release**: merging a version bump to master now tags and
   publishes the release automatically — the release workflow spots a
   Cargo.toml version with no matching tag and cuts `v<version>` itself.
-  Manually pushed `v*` tags still work exactly as before
+  Manually pushed `v*` tags still work exactly as before. The pipeline is
+  resilient to transient CI flakes: shell network steps retry, and a
+  failed build/package leg (e.g. a DNS blip on artifact upload) re-runs
+  its failed jobs automatically, capped at three attempts
 
 ## v1.7.2 — 2026-07-09
 
