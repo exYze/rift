@@ -1,15 +1,51 @@
 name: release
 
+# Two ways in: push a v* tag (manual release, as always), or merge a version
+# bump to master — the plan job spots a Cargo.toml version with no matching
+# tag and releases it automatically, so cutting a release is just merging
+# the bump PR. Master pushes whose version is already tagged skip everything.
 on:
   push:
     tags: ["v*"]
+    branches: [master]
 
 permissions:
   contents: write
 
 jobs:
+  plan:
+    name: plan release
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.decide.outputs.go }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: decide
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          tag="v${version}"
+          if [ -z "$version" ]; then
+            echo "could not read workspace version from Cargo.toml — not releasing"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag already released — nothing to do"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new version $version on master — releasing as $tag"
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: build ${{ matrix.target }}
+    needs: plan
+    if: needs.plan.outputs.go == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -72,6 +108,8 @@ jobs:
   # `code --install-extension rift-vscode.vsix`.
   vsix:
     name: package vscode extension
+    needs: plan
+    if: needs.plan.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -87,7 +125,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [build, vsix]
+    needs: [plan, build, vsix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -98,8 +136,14 @@ jobs:
       - name: checksums
         run: cd dist && sha256sum * > checksums.txt
 
+      # On a master-push release the tag doesn't exist yet: creating the
+      # release creates it, pinned to the exact merged commit. (A tag made
+      # with GITHUB_TOKEN can't retrigger this workflow, which is also why
+      # the build happens in this same run.)
       - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
 
@@ -129,14 +173,14 @@ jobs:
   # TAP_PUSH_TOKEN secret exists — a fine-grained PAT with contents:write
   # on the tap repo.
   homebrew-tap:
-    needs: release
+    needs: [plan, release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: update tap formula
         env:
           TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           if [ -z "$TAP_PUSH_TOKEN" ]; then
             echo "TAP_PUSH_TOKEN not set — skipping tap update"

@@ -787,6 +787,18 @@ mod tests {
     }
 
     #[test]
+    fn config_editor_beats_env_and_blank_means_unset() {
+        set_config_editor(Some("code -w".into()));
+        assert_eq!(resolve_editor_with_source(), ("code -w".into(), "config \"editor\""));
+        // Whitespace-only is treated as unset, falling through to the env
+        // vars / default (which of those wins depends on the test env, so
+        // only the source not being "config" is asserted).
+        set_config_editor(Some("   ".into()));
+        assert_ne!(resolve_editor_with_source().1, "config \"editor\"");
+        set_config_editor(None);
+    }
+
+    #[test]
     fn default_editor_prefers_terminal_over_notepad() {
         // The whole point of the probe: any terminal editor on PATH beats
         // notepad, and `edit` (in-box on Windows 11) wins when present.
@@ -1775,13 +1787,37 @@ fn input_height(input: &str) -> u16 {
     lines + 2 // borders
 }
 
-/// The configured editor: `$EDITOR`, `$VISUAL`, else the platform default
-/// (a terminal editor — see `default_editor`). May carry flags, e.g.
-/// "code -w".
+/// `"editor"` from the user config; beats $EDITOR/$VISUAL. A global because
+/// the resolver runs in the UI event loop, far from where the config lives;
+/// set at startup and again on /config reload so edits take effect live.
+static CONFIG_EDITOR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(crate) fn set_config_editor(editor: Option<String>) {
+    if let Ok(mut e) = CONFIG_EDITOR.lock() {
+        *e = editor.filter(|s| !s.trim().is_empty());
+    }
+}
+
+/// The configured editor and where it came from — config `"editor"`,
+/// `$EDITOR`, `$VISUAL`, else the platform default (a terminal editor — see
+/// `default_editor`). May carry flags, e.g. "code -w". The source lets
+/// `/config edit` say what it picked and how to change it.
+pub(crate) fn resolve_editor_with_source() -> (String, &'static str) {
+    if let Some(e) = CONFIG_EDITOR.lock().ok().and_then(|e| e.clone()) {
+        return (e, "config \"editor\"");
+    }
+    for (var, source) in [("EDITOR", "$EDITOR"), ("VISUAL", "$VISUAL")] {
+        if let Ok(e) = std::env::var(var) {
+            if !e.trim().is_empty() {
+                return (e, source);
+            }
+        }
+    }
+    (default_editor(), "default")
+}
+
 fn resolve_editor() -> String {
-    std::env::var("EDITOR")
-        .or_else(|_| std::env::var("VISUAL"))
-        .unwrap_or_else(|_| default_editor())
+    resolve_editor_with_source().0
 }
 
 /// The fallback when neither `$EDITOR` nor `$VISUAL` is set: an editor that

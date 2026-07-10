@@ -3,6 +3,27 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.7.3 — 2026-07-10
+
+- **`"editor"` config key**: set the `/config edit` editor in rift's own
+  config (`"editor": "code -w"`, flags allowed) instead of wrestling with
+  `$EDITOR` on Windows. Precedence: config → `$EDITOR` → `$VISUAL` → the
+  terminal-editor PATH probe. Loads from the user config only — a cloned
+  repo's `.rift.json` must never choose what command runs — and
+  hot-reloads with the rest of the config
+- **`/config edit` says what it's opening**: the resolved editor and where
+  it came from ("opening config in vim… (default — set \"editor\" in the
+  user config or $EDITOR to change)"), so the PATH-probe pick is never a
+  surprise
+- **Broken JSON no longer strands the config**: saving a config that fails
+  to parse now keeps the previous settings live and reports the exact
+  error with line and column, pointing back at /config edit — instead of
+  a bare reload error with the settings in limbo
+- **Merge-to-release**: merging a version bump to master now tags and
+  publishes the release automatically — the release workflow spots a
+  Cargo.toml version with no matching tag and cuts `v<version>` itself.
+  Manually pushed `v*` tags still work exactly as before
+
 ## v1.7.2 — 2026-07-09
 
 - **Default editor opens in the terminal**: with no `$EDITOR`/`$VISUAL`
