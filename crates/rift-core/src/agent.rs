@@ -808,7 +808,7 @@ fn preview(s: &str, max: usize) -> String {
         end -= 1;
     }
     if end < s.len() {
-        format!("{}…", &s[..end].replace('\n', " "))
+        format!("{}…", s[..end].replace('\n', " "))
     } else {
         s.replace('\n', " ")
     }

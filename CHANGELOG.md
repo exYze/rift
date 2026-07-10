@@ -3,6 +3,17 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v1.7.2 — 2026-07-09
+
+- **Default editor opens in the terminal**: with no `$EDITOR`/`$VISUAL`
+  set, Windows no longer defaults `/config edit` to notepad popping the
+  file open in a separate window. The default now probes PATH for a
+  terminal editor — `edit` (Microsoft's terminal editor, in-box on
+  Windows 11), then nano, vim, nvim, vi, hx, micro — and opens it in the
+  terminal via the usual TTY handover. Notepad remains only as the last
+  resort when no terminal editor exists; an explicitly set `$EDITOR` is
+  respected as before
+
 ## v1.7.1 — 2026-07-08
 
 - **Robust Windows shell quoting**: the bash tool ran commands through
