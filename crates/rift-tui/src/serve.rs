@@ -103,6 +103,10 @@ fn event_json(ev: &AgentEvent) -> Value {
 enum ServeCmd {
     Prompt(String, CancellationToken),
     Undo,
+    /// The consumer answered a project-plugin trust ask with "trust":
+    /// persist the approval and register the plugin's tools (and hooks)
+    /// into the running agent. Runs on the agent task, which owns both.
+    TrustPlugin(rift_core::Plugin),
 }
 
 pub async fn run_serve(
@@ -112,6 +116,7 @@ pub async fn run_serve(
     model: String,
     resumed: Vec<rift_ollama::Message>,
     skills: Vec<rift_core::Skill>,
+    pending_plugins: Vec<rift_core::Plugin>,
 ) -> Result<()> {
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<ServeCmd>();
@@ -148,6 +153,35 @@ pub async fn run_serve(
                     // Post-compaction context gauge for the consumer's UI.
                     let (used, limit) = agent.context_usage();
                     let _ = turn_ev.send(AgentEvent::Context { used, limit });
+                }
+                ServeCmd::TrustPlugin(p) => {
+                    let key = rift_core::plugins::trust_key(&p);
+                    if let Err(e) = rift_core::config::trust_hook(&key) {
+                        let _ = turn_ev
+                            .send(AgentEvent::Warning(format!("could not persist plugin approval: {e:#}")));
+                    }
+                    let names: Vec<&str> = p.tools.iter().map(|t| t.name.as_str()).collect();
+                    for tool in rift_core::plugins::tools_for(&p) {
+                        agent.register_tool(tool);
+                    }
+                    // The approval covers the whole manifest: its post_edit
+                    // hooks activate now too (and are remembered like
+                    // project-config hooks).
+                    if !p.hooks.post_edit.is_empty() {
+                        let mut hooks = agent.ctx().post_edit_hooks();
+                        for h in &p.hooks.post_edit {
+                            let _ = rift_core::config::trust_hook(h);
+                            if !hooks.contains(h) {
+                                hooks.push(h.clone());
+                            }
+                        }
+                        agent.ctx().set_post_edit_hooks(&hooks);
+                    }
+                    let _ = turn_ev.send(AgentEvent::Info(format!(
+                        "plugin '{}' trusted — tools registered: {}",
+                        p.name,
+                        names.join(", ")
+                    )));
                 }
                 // Same semantics as the TUI's /undo: revert the write/edit
                 // journal's most recent turn; conversation stays intact.
@@ -216,6 +250,41 @@ pub async fn run_serve(
     let mut busy = false;
     let mut asks_open = true;
     let mut reviews_open = true;
+
+    // Project-plugin trust rides the ordinary ask machinery: one question
+    // per untrusted manifest, right after startup, so serve consumers (the
+    // VS Code chat) can approve what the TUI would have asked on stdin.
+    // A dropped or non-"trust" answer means skipped — fail safe; the
+    // plugin's tools stay unregistered for this session.
+    for plugin in pending_plugins {
+        ask_seq += 1;
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        emit(json!({
+            "event": "ask",
+            "id": ask_seq,
+            "question": format!(
+                "Project plugin '{}' declares {} tool(s) — each runs a command from this repo \
+                 when the model calls it. Trust this manifest on this machine?",
+                plugin.name,
+                plugin.tools.len()
+            ),
+            "detail": plugin
+                .tools
+                .iter()
+                .map(|t| format!("{}: {} — `{}`", t.name, t.description, t.command))
+                .collect::<Vec<_>>(),
+            "choices": ["trust", "skip"],
+        }));
+        pending_asks.insert(ask_seq, tx);
+        let cmd_tx = prompt_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(answer) = rx.await {
+                if matches!(answer.trim().to_lowercase().as_str(), "trust" | "yes" | "y") {
+                    let _ = cmd_tx.send(ServeCmd::TrustPlugin(plugin));
+                }
+            }
+        });
+    }
 
     loop {
         tokio::select! {

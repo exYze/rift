@@ -644,7 +644,14 @@ async fn main() -> Result<()> {
     };
 
     if cli.serve {
-        return serve::run_serve(agent, store, ask_rx, model_addr, resumed_messages, skills).await;
+        // Project plugins whose tools were skipped at startup (no stdin to
+        // ask on): serve offers them as ask events instead, so the consumer
+        // can approve and have the tools register live.
+        let pending_plugins = rift_core::plugins::pending_project_tools(&plugins, &|p| {
+            rift_core::config::hook_trusted(&rift_core::plugins::trust_key(p))
+        });
+        return serve::run_serve(agent, store, ask_rx, model_addr, resumed_messages, skills, pending_plugins)
+            .await;
     }
 
     match cli.prompt {
