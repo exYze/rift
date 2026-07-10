@@ -94,14 +94,21 @@ pub fn embedded_targets() -> Vec<PromptTarget> {
     EMBEDDED.iter().map(|(stem, text)| parse_target(stem, text)).collect()
 }
 
-/// User-level override targets from `~/.config/rift/prompts/*.md`, for
-/// experimenting without recompiling. Sorted by filename so precedence
-/// between overrides is deterministic.
+/// User-level override targets: `~/.config/rift/prompts/*.md` first, then
+/// `prompts/*.md` inside USER plugins (`~/.config/rift/plugins/*/`), sorted
+/// so precedence is deterministic. Deliberately nothing project-level —
+/// a cloned repo must never be able to replace the system prompt.
 pub fn override_targets() -> Vec<PromptTarget> {
-    match crate::paths::config_dir() {
-        Some(dir) => targets_from_dir(&dir.join("rift/prompts")),
-        None => vec![],
+    let Some(dir) = crate::paths::config_dir() else { return vec![] };
+    let mut out = targets_from_dir(&dir.join("rift/prompts"));
+    if let Ok(entries) = std::fs::read_dir(dir.join("rift/plugins")) {
+        let mut plugin_dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        plugin_dirs.sort();
+        for p in plugin_dirs {
+            out.extend(targets_from_dir(&p.join("prompts")));
+        }
     }
+    out
 }
 
 fn targets_from_dir(dir: &Path) -> Vec<PromptTarget> {

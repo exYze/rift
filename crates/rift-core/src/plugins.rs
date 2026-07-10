@@ -24,15 +24,23 @@
 //! `~/.config/rift/plugins/<dir>/plugin.json` — project wins name
 //! collisions, mirroring skills.
 //!
-//! Security model (the preview's deliberate cut):
+//! Security model (2.0):
 //! - **Commands** are prompt templates — text sent to the model as a user
 //!   turn (`{args}` = whatever followed the command). Inert by themselves,
 //!   so project plugins may contribute them freely; they surface exactly
 //!   like skills (`/skill:<name>`, listed to the model by description).
 //! - **Tools** execute a subprocess (args JSON on stdin, stdout = result,
-//!   nonzero exit = error), so a cloned repo must never register one:
-//!   tools load from USER plugins only. Project-plugin tools land in 2.0
-//!   behind the same one-time trust prompt hooks and project MCP use.
+//!   nonzero exit = error). User plugins register freely (the user's own
+//!   machine); a PROJECT plugin's tools need the same one-time startup
+//!   trust prompt as project hooks/MCP — the trust key is the manifest
+//!   text itself, so any edit re-prompts.
+//! - **Hooks** (`"hooks": {"post_edit": [...]}`) follow the same line:
+//!   user plugins append directly, project-plugin hooks join the project
+//!   `.rift.json` hooks in the existing per-command trust flow.
+//! - **Themes** (`themes/<name>.json` in the plugin dir) are inert colors:
+//!   loaded from anywhere. **Prompt targets** (`prompts/<family>.md`) load
+//!   from USER plugins only — a cloned repo must never replace the system
+//!   prompt (same rule as the override dir).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -54,12 +62,22 @@ pub struct Plugin {
     pub commands: Vec<PluginCommand>,
     #[serde(default)]
     pub tools: Vec<PluginToolDef>,
+    /// Automation hooks contributed by the plugin (same shape as the
+    /// config's `hooks` key — only `post_edit` today).
+    #[serde(default)]
+    pub hooks: PluginHooks,
     #[serde(skip)]
     pub source: PathBuf,
     /// True when loaded from the project `.rift/plugins/` (affects what it
     /// may contribute — see the module doc).
     #[serde(skip)]
     pub project: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PluginHooks {
+    #[serde(default)]
+    pub post_edit: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,20 +158,33 @@ pub fn commands_as_skills(plugins: &[Plugin]) -> Vec<Skill> {
     out
 }
 
-/// Register plugin tools. USER plugins only — a project tool executes a
-/// command from a possibly-cloned repo, so it is skipped with a warning
-/// (returned for the caller to surface) until 2.0's trust flow.
-pub fn register_tools(registry: &mut ToolRegistry, plugins: &[Plugin]) -> Vec<String> {
+/// The trust key for a project plugin: its exact manifest text, prefixed —
+/// any manifest edit (new tool, changed command) re-prompts. Stored in the
+/// same one-time-approval store as project hooks.
+pub fn trust_key(plugin: &Plugin) -> String {
+    let manifest = std::fs::read_to_string(&plugin.source).unwrap_or_default();
+    format!("plugin:{}:{manifest}", plugin.name)
+}
+
+/// Register plugin tools. User plugins register freely; a PROJECT plugin's
+/// tools execute commands from a possibly-cloned repo, so they only load
+/// when `project_trusted` says the user approved this exact manifest —
+/// otherwise they're skipped with a warning (returned for the caller to
+/// surface).
+pub fn register_tools(
+    registry: &mut ToolRegistry,
+    plugins: &[Plugin],
+    project_trusted: &dyn Fn(&Plugin) -> bool,
+) -> Vec<String> {
     let mut warnings = vec![];
     for p in plugins {
         if p.tools.is_empty() {
             continue;
         }
-        if p.project {
+        if p.project && !project_trusted(p) {
             warnings.push(format!(
-                "plugin '{}': project-plugin tools are not loaded in the experimental preview \
-                 (a cloned repo must not register commands to execute) — install it under \
-                 ~/.config/rift/plugins/ to use its tools",
+                "plugin '{}': tools skipped (not trusted) — its manifest declares commands to \
+                 execute; restart interactively to review and trust it",
                 p.name
             ));
             continue;
@@ -269,19 +300,24 @@ mod tests {
         assert_eq!(skills[0].name, "standup");
         assert!(skills[0].body.contains("{args}"));
 
-        // Project tools are refused with a pointed warning; nothing lands
-        // in the registry.
+        // Untrusted project tools are refused with a pointed warning;
+        // nothing lands in the registry.
         let mut reg = ToolRegistry::standard();
-        let warnings = register_tools(&mut reg, &plugins);
+        let warnings = register_tools(&mut reg, &plugins, &|_| false);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("project-plugin tools are not loaded"));
+        assert!(warnings[0].contains("not trusted"));
         assert!(reg.get("evil").is_none());
 
-        // The same manifest as a USER plugin registers its tool.
-        plugins[0].project = false;
-        let warnings = register_tools(&mut reg, &plugins);
+        // A trusted project plugin registers its tool.
+        let warnings = register_tools(&mut reg, &plugins, &|_| true);
         assert!(warnings.is_empty());
         assert!(reg.get("evil").is_some());
+
+        // User plugins never need trust.
+        let mut reg2 = ToolRegistry::standard();
+        plugins[0].project = false;
+        assert!(register_tools(&mut reg2, &plugins, &|_| false).is_empty());
+        assert!(reg2.get("evil").is_some());
 
         let _ = std::fs::remove_dir_all(&root);
     }

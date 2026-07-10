@@ -64,9 +64,9 @@ pub struct Config {
     /// 2.0 migrates automatically on load.
     #[serde(default)]
     pub version: Option<u32>,
-    /// Preview features, off by default. `{"experimental": {"plugins": true}}`
-    /// enables the plugin API (crates/rift-core/src/plugins.rs) ahead of its
-    /// 2.0 stabilization.
+    /// Preview-feature switches. Plugins stabilized in 2.0 (always on), so
+    /// `{"experimental": {"plugins": true}}` is accepted but no longer
+    /// needed; the key stays for future previews.
     #[serde(default)]
     pub experimental: Experimental,
     /// Automation hooks. `post_edit` commands run after every successful
@@ -230,8 +230,33 @@ impl Config {
         let mut loaded = LoadedConfig { config: Config::default(), paths: vec![], warnings: vec![] };
         let user_path = dirs_config().join("rift/config.json");
         if user_path.exists() {
-            loaded.config = read_config(&user_path)?;
-            loaded.paths.push(user_path);
+            // 2.0's one-shot automatic migration: a v1 user config is
+            // rewritten to schema v2 in place (with a .v1.bak backup) the
+            // first time it loads. If the write fails (read-only file),
+            // the migrated form is still used in memory, so old configs
+            // keep working either way. Project files are never rewritten.
+            if let Ok(text) = std::fs::read_to_string(&user_path) {
+                if let Ok(mut raw) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if !migrate_value(&mut raw).is_empty() {
+                        match migrate_config_file(&user_path, false) {
+                            Ok(note) => loaded
+                                .warnings
+                                .push(note.lines().next().unwrap_or("config migrated").to_string()),
+                            Err(e) => loaded.warnings.push(format!(
+                                "config uses the v1 schema and could not be rewritten ({e:#}); \
+                                 using the migrated form in memory — run `rift config migrate`"
+                            )),
+                        }
+                        loaded.config = serde_json::from_value(raw)
+                            .with_context(|| format!("parsing {}", user_path.display()))?;
+                        loaded.paths.push(user_path.clone());
+                    }
+                }
+            }
+            if loaded.paths.is_empty() {
+                loaded.config = read_config(&user_path)?;
+                loaded.paths.push(user_path);
+            }
         }
         let project_path = cwd.join(".rift.json");
         if project_path.exists() {
@@ -239,15 +264,17 @@ impl Config {
             loaded.config.merge_project(project, &mut loaded.warnings);
             loaded.paths.push(project_path);
         }
-        // Deprecations — everything 2.0 changes warns here first, with the
-        // exact way out named.
+        // After auto-migration, legacy globs can only come from a PROJECT
+        // .rift.json. Those keep loading (bash_deny is tighten-only —
+        // dropping it would be a security regression for repos that ship
+        // one), but the project should move to rules.
         if !loaded.config.permissions.bash_allow.is_empty()
             || !loaded.config.permissions.bash_deny.is_empty()
         {
             loaded.warnings.push(
-                "deprecated: permissions.bash_allow/bash_deny globs are replaced by \
-                 Bash(...) rules in permissions.allow/deny and stop loading in 2.0 — \
-                 `rift config migrate` rewrites them (--dry-run to preview)"
+                "deprecated: this project's .rift.json uses bash_allow/bash_deny globs — they \
+                 still load (deny is tighten-only) but Bash(...) rules are the schema-v2 form; \
+                 `rift config migrate --project` rewrites them"
                     .into(),
             );
         }

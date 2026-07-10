@@ -3,6 +3,40 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.0.0 — 2026-07-10
+
+The agent platform. Breaking changes, bundled once — everything here was
+previewed behind flags in 1.10/1.11, so 2.0 is a promotion, not a
+surprise. The 1.0 stability promise resets for 2.x: config and protocol
+stay stable, breaking changes need a 3.0.
+
+- **Plugin API stable, on by default** (the `experimental.plugins` flag is
+  accepted but no longer needed). A plugin directory can now contribute:
+  - *commands* — prompt templates, surfaced like skills (`/skill:<name>`)
+  - *tools* — subprocess tools; PROJECT plugins get the same one-time
+    startup trust prompt as project hooks/MCP, keyed to the exact manifest
+    (any edit re-prompts); user plugins register freely
+  - *hooks* — `"hooks": {"post_edit": [...]}`; user plugins apply as-is,
+    project-plugin hooks join the existing per-command trust flow
+  - *themes* — `themes/<name>.json` ({"base": "dark", "accent":
+    "#39c5cf", …}); also loadable outside plugins from
+    `~/.config/rift/themes/`; `/theme <name>` resolves built-ins first
+  - *prompt targets* — `prompts/<family>.md` from USER plugins only: a
+    cloned repo must never replace the system prompt
+- **Config schema v2, migrated automatically**: a v1 user config is
+  rewritten in place on first load (backup: `config.json.v1.bak`);
+  read-only configs use the migrated form in memory. Project `.rift.json`
+  legacy `bash_deny` globs keep loading (tighten-only — dropping them
+  would be a security regression) with a nudge toward
+  `rift config migrate --project`
+- **Serve protocol v1 frozen**, with two additive extensions: `ready`
+  lists `skills` (skills + plugin commands) so editor chats can offer
+  completion, and a prompt of `/skill:<name> [task]` expands server-side
+  exactly like the TUI
+- **VS Code extension parity**: typing `/` in the sidebar chat now
+  completes skills and plugin commands (same popup as `@file` mentions,
+  descriptions included) and invoking them runs the real skill expansion
+
 ## v1.11.0 — 2026-07-10
 
 Platform preview (roadmap v1.11): everything 2.0 stabilizes ships here

@@ -542,6 +542,9 @@
   let mentionSel = 0;
   let mentionToken = 0;
   let mentionTimer = null;
+  // Skills + plugin commands from the server's ready event (via status),
+  // completable as /skill:<name> — same popup as @file mentions.
+  let skills = [];
 
   function mentionContext() {
     const pos = input.selectionStart;
@@ -556,7 +559,26 @@
     mentionPopup.classList.add('hidden');
   }
 
+  /// "/", "/sk", "/skill:stand" at the start of the input → skill completion.
+  function skillContext() {
+    const pos = input.selectionStart;
+    const m = input.value.slice(0, pos).match(/^\/(?:s(?:k(?:i(?:l(?:l:?)?)?)?)?)?([^\s/]*)$/);
+    if (!m) return null;
+    return { start: 0, query: m[1] || '', kind: 'skill' };
+  }
+
   function updateMention() {
+    const sctx = skillContext();
+    if (sctx && skills.length) {
+      mention = sctx;
+      mentionSel = 0;
+      mentionItems = skills
+        .filter((s) => s.name.toLowerCase().startsWith(sctx.query.toLowerCase()))
+        .slice(0, 12)
+        .map((s) => ({ path: 'skill:' + s.name, skill: true, desc: s.description }));
+      renderMention();
+      return;
+    }
     const ctx = mentionContext();
     if (!ctx) return closeMention();
     mention = ctx;
@@ -582,7 +604,13 @@
       name.className = 'mi-name';
       name.textContent = it.path.slice(slash + 1) + (it.dir ? '/' : '');
       row.appendChild(name);
-      if (slash > 0) {
+      if (it.skill && it.desc) {
+        // Skill rows: the description rides in the dir slot.
+        const desc = document.createElement('span');
+        desc.className = 'mi-dir';
+        desc.textContent = it.desc;
+        row.appendChild(desc);
+      } else if (slash > 0) {
         const dir = document.createElement('span');
         dir.className = 'mi-dir';
         dir.textContent = it.path.slice(0, slash);
@@ -610,7 +638,7 @@
     const it = mentionItems[i];
     if (!it || !mention) return;
     const end = input.selectionStart;
-    const text = '@' + it.path + (it.dir ? '/' : ' ');
+    const text = it.skill ? '/' + it.path + ' ' : '@' + it.path + (it.dir ? '/' : ' ');
     input.value = input.value.slice(0, mention.start) + text + input.value.slice(end);
     const caret = mention.start + text.length;
     input.setSelectionRange(caret, caret);
@@ -664,6 +692,7 @@
       renderCtxGauge(m.ctxUsed, m.ctxLimit);
       btnStop.classList.toggle('hidden', !m.busy);
       btnSend.classList.toggle('hidden', m.busy);
+      if (m.skills) skills = m.skills;
     } else if (m.type === 'insert') {
       input.value += m.text;
       input.focus();
