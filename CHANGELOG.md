@@ -3,6 +3,17 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.1.0 — 2026-07-10
+
+- **`/release-notes`**: a closable popup showing what's new in the running
+  version. The newest CHANGELOG section is embedded at compile time (so a
+  binary always shows its own notes, even after `rift update`), rendered
+  as a dimmed, scrollable overlay — `↑↓`/`j`/`k`/PageUp/PageDown to scroll,
+  `Esc`/`Enter`/`q` to close. Also completes in the command palette
+- **Getting-started tips**: a fresh session now prints a short "Tips for
+  getting started" note under the banner (`/init`, `/release-notes`,
+  `/help`); resumed sessions skip it — they already have history
+
 ## v2.0.0 — 2026-07-10
 
 The agent platform. Breaking changes, bundled once — everything here was

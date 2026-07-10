@@ -126,6 +126,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/theme", "[name]", "browse/switch color themes (13 built-in: dark, light, mono, dracula, nord, gruvbox, …)"),
     ("/ctx", "<n>", "set context window (num_ctx)"),
     ("/remember", "[fact]", "save a durable fact to project memory (.rift/memory.md); bare = show memory"),
+    ("/release-notes", "", "show what's new in this version (closable popup)"),
     ("/retry", "", "re-run the last prompt"),
     ("/fork", "", "open a second rift window continuing a COPY of this conversation"),
     ("/rewind", "[n]", "rewind n turns (default 1): restore write/edit changes AND the conversation"),
