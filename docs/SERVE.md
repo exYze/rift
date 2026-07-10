@@ -66,7 +66,7 @@ Interaction:
 
 | event | fields | notes |
 |---|---|---|
-| `ask` | `id`, `question`, `detail`: [string], `choices`: [string] | Answer via the `answer` command. Empty `choices` = free text. `detail` carries context lines (e.g. a pending diff for approval prompts). |
+| `ask` | `id`, `question`, `detail`: [string], `choices`: [string] | Answer via the `answer` command. Empty `choices` = free text. `detail` carries context lines (e.g. a pending diff for approval prompts). Asks can arrive right after startup, before any turn — untrusted project-plugin manifests are offered this way (`choices: ["trust","skip"]`); answering `trust` registers the plugin's tools live and persists the approval. Ignoring the ask fails safe (skipped). |
 | `edit_review` | `id`, `tool`, `path`, `old`, `new` | Only after `hello` with `edit_review:true`. Emitted BEFORE the write touches disk; decide via `edit_decision`. |
 | `edit_review_closed` | `id` | The review is orphaned (turn ended/cancelled) — close its diff; a late decision would be a silent no-op. |
 

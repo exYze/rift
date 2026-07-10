@@ -183,8 +183,8 @@ pub fn register_tools(
         }
         if p.project && !project_trusted(p) {
             warnings.push(format!(
-                "plugin '{}': tools skipped (not trusted) — its manifest declares commands to \
-                 execute; restart interactively to review and trust it",
+                "plugin '{}': tools not registered (manifest not trusted yet) — approve the \
+                 startup prompt (TUI) or the trust question (serve consumers) to enable them",
                 p.name
             ));
             continue;
@@ -194,6 +194,29 @@ pub fn register_tools(
         }
     }
     warnings
+}
+
+/// The boxed tools a plugin declares — for registering live into a running
+/// agent after a deferred trust approval (the serve consumers' flow).
+pub fn tools_for(plugin: &Plugin) -> Vec<Box<dyn Tool>> {
+    plugin
+        .tools
+        .iter()
+        .map(|t| Box::new(PluginTool::new(t.clone(), &plugin.name)) as Box<dyn Tool>)
+        .collect()
+}
+
+/// Project plugins whose tools were NOT registered at startup — the ones a
+/// serve consumer should be asked to trust.
+pub fn pending_project_tools(
+    plugins: &[Plugin],
+    trusted: &dyn Fn(&Plugin) -> bool,
+) -> Vec<Plugin> {
+    plugins
+        .iter()
+        .filter(|p| p.project && !p.tools.is_empty() && !trusted(p))
+        .cloned()
+        .collect()
 }
 
 /// A manifest-declared subprocess tool: arguments JSON on stdin, stdout is
@@ -318,6 +341,16 @@ mod tests {
         plugins[0].project = false;
         assert!(register_tools(&mut reg2, &plugins, &|_| false).is_empty());
         assert!(reg2.get("evil").is_some());
+
+        // pending_project_tools: only untrusted PROJECT plugins with tools.
+        plugins[0].project = true;
+        assert_eq!(pending_project_tools(&plugins, &|_| false).len(), 1);
+        assert!(pending_project_tools(&plugins, &|_| true).is_empty());
+        plugins[0].project = false;
+        assert!(pending_project_tools(&plugins, &|_| false).is_empty());
+        plugins[0].project = true;
+        plugins[0].tools.clear();
+        assert!(pending_project_tools(&plugins, &|_| false).is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }
