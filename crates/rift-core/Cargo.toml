@@ -3,10 +3,11 @@ name = "rift-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Rift agent engine: tool registry, agent loop, session state"
 
 [dependencies]
-rift-provider = { path = "../rift-provider" }
+rift-provider.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true

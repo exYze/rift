@@ -3,6 +3,7 @@ name = "rift-provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Provider abstraction and wire types shared by rift's model backends"
 
 [dependencies]

@@ -1331,6 +1331,17 @@ impl App {
         if self.palette_off || self.picker.is_some() || self.answering.is_some() {
             return vec![];
         }
+        // Argument completion for commands with a small enum of arguments:
+        // once the command word is typed, offer its argument values (still
+        // prefix-filtered), e.g. "/copy l" → "/copy log".
+        if let Some(rest) = self.input.strip_prefix("/copy ") {
+            let want = rest.trim_start();
+            return [("all", "copy the whole transcript"), ("log", "copy the activity log")]
+                .iter()
+                .filter(|(arg, _)| arg.starts_with(want) && *arg != want)
+                .map(|(arg, d)| (format!("/copy {arg}"), String::new(), d.to_string()))
+                .collect();
+        }
         if !self.input.starts_with('/') || self.input.contains(char::is_whitespace) {
             return vec![];
         }
@@ -3843,22 +3854,37 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                 Event::Mouse(mouse) => {
                     // Route the wheel to the pane under the cursor (the hidden
                     // log-slot pane has a zero area, so at most one matches).
-                    let pane = if app.log.contains(mouse.column, mouse.row) {
-                        &mut app.log
-                    } else if app.diff.contains(mouse.column, mouse.row) {
-                        &mut app.diff
-                    } else if app.transcript.contains(mouse.column, mouse.row) {
-                        &mut app.transcript
-                    } else {
-                        app.focused_pane()
+                    // Wheel over an open palette/mention popup moves its
+                    // selection instead of scrolling the pane beneath it —
+                    // computed before the pane borrow.
+                    let popup_len = {
+                        let palette = app.palette();
+                        if palette.is_empty() { app.mention_palette().len() } else { palette.len() }
                     };
                     match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            pane.scroll_up(3);
+                        MouseEventKind::ScrollUp if popup_len > 0 => {
+                            app.palette_idx = app.palette_idx.saturating_sub(1);
                             needs_redraw = true;
                         }
-                        MouseEventKind::ScrollDown => {
-                            pane.scroll_down(3);
+                        MouseEventKind::ScrollDown if popup_len > 0 => {
+                            app.palette_idx = (app.palette_idx + 1).min(popup_len - 1);
+                            needs_redraw = true;
+                        }
+                        kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
+                            let pane = if app.log.contains(mouse.column, mouse.row) {
+                                &mut app.log
+                            } else if app.diff.contains(mouse.column, mouse.row) {
+                                &mut app.diff
+                            } else if app.transcript.contains(mouse.column, mouse.row) {
+                                &mut app.transcript
+                            } else {
+                                app.focused_pane()
+                            };
+                            if kind == MouseEventKind::ScrollUp {
+                                pane.scroll_up(3);
+                            } else {
+                                pane.scroll_down(3);
+                            }
                             needs_redraw = true;
                         }
                         _ => {}

@@ -75,6 +75,19 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Cache-only variant: the newer version string if the last check (done by
+/// a TUI/headless run within 24h) recorded one. Never touches the network —
+/// `--version` and headless nudges must not stall an offline machine.
+pub fn cached_newer(current: &str) -> Option<String> {
+    if std::env::var_os("RIFT_NO_UPDATE_CHECK").is_some() {
+        return None;
+    }
+    let cached: CheckCache =
+        serde_json::from_str(&std::fs::read_to_string(cache_path()?).ok()?).ok()?;
+    (parse_version(&cached.latest)? > parse_version(current)?)
+        .then(|| cached.latest.trim_start_matches('v').to_string())
+}
+
 /// Returns the newer version string if one is available. Silent on every
 /// failure; hits the network at most once per 24h.
 pub async fn check_for_update(current: &str) -> Option<String> {
