@@ -18,6 +18,18 @@ All notable changes to rift. Versions follow the roadmap phases in
   guards already end wasted turns early, so the cap only ever throttled
   productive turns. Still configurable via `--max-iterations`,
   `max_iterations` in config, or the VS Code chat settings.
+- **VS Code chat: red/green diffs for applied changes**: every `write`/`edit`
+  the agent applies now shows as a compact diff card in the chat — the file
+  path with `+N −M` counts, and the actual removed/added lines colored red
+  and green (click the header to collapse). Backed by a new additive serve
+  event, `edit_diff` (docs/SERVE.md); the TUI activity log and headless mode
+  print the same ± preview.
+- **VS Code chat: no more phantom blank lines**: DeepSeek-style models emit
+  whitespace-only text fragments and stray ``` fences between tool calls;
+  each one rendered as an invisible empty block (eating a row of spacing) or
+  a bare code-block bar — the thin "ruled lines" littering the transcript.
+  Whitespace-only fragments no longer open blocks (and no longer split the
+  tool-activity box), and empty code fences are skipped.
 - **DeepSeek prompt: batch independent lookups, delegate big work**: the
   deepseek-family system prompt now tells the model to issue independent
   reads/searches as multiple tool calls in one response instead of spending
