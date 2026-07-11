@@ -2,7 +2,7 @@
 
 A fast, flicker-free terminal coding agent built in Rust for **local models via Ollama's native API** — no Node, no Python, one 9.5MB binary.
 
-![rift demo — fixing a bug with gemma4:26b on a local Ollama server](docs/assets/demo.gif)
+![rift demo — fixing a bug, applying the diff, and verifying it in one turn](docs/assets/demo.gif)
 
 **Benchmarked vs opencode** on a 50-task suite (same model, same Ollama server, wire-measured tokens): **more tasks solved (44 vs 42), 57% fewer prompt tokens, 3.4× faster** — see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
@@ -70,12 +70,16 @@ rift checks for new releases on startup (at most once per 24h, cached, silent wh
 
 ## VS Code extension
 
-[`vscode/`](vscode/) packages rift for VS Code: the full TUI in the
-integrated terminal (every feature works — approval, sessions, skills, MCP,
-swarm), plus editor glue — launch keybindings, a status-bar button, and
-right-click "Add File/Selection to Prompt" that types `@file` mentions into
-rift's input. See [vscode/README.md](vscode/README.md) for install and
-settings.
+[`vscode/`](vscode/) packages rift for VS Code: a sidebar chat backed by
+`rift --serve` — streamed thinking, boxed tool activity, a red/green diff
+card for every applied edit, inline diff review, session resume and a
+past-chats picker — plus the full TUI in the integrated terminal and editor
+glue (launch keybindings, a status-bar button, right-click "Add
+File/Selection to Prompt").
+
+![rift VS Code chat — streamed thinking, boxed tool activity, and a red/green diff card for the applied fix](docs/assets/vscode.gif)
+
+See [vscode/README.md](vscode/README.md) for install and settings.
 
 Building your own integration (Neovim, JetBrains, anything that can spawn
 a process)? `rift --serve` speaks a versioned line-JSON protocol —
