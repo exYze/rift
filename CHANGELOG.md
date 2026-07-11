@@ -18,9 +18,13 @@ All notable changes to rift. Versions follow the roadmap phases in
   guards already end wasted turns early, so the cap only ever throttled
   productive turns. Still configurable via `--max-iterations`,
   `max_iterations` in config, or the VS Code chat settings.
-- **DeepSeek prompt: batch independent lookups**: the deepseek-family system
-  prompt now tells the model to issue independent reads/searches as multiple
-  tool calls in one response instead of spending a round on each.
+- **DeepSeek prompt: batch independent lookups, delegate big work**: the
+  deepseek-family system prompt now tells the model to issue independent
+  reads/searches as multiple tool calls in one response instead of spending
+  a round on each, and to act as an orchestrator on large tasks — delegating
+  self-contained subtasks to the `agent` tool, where each sub-agent runs
+  with its own fresh round budget and context window while costing the main
+  conversation a single round.
 
 ## v2.5.1 — 2026-07-11
 
