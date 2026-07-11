@@ -1311,6 +1311,37 @@ impl Tool for WriteTool {
 
 // ---------------------------------------------------------------- edit
 
+/// Reconcile line endings between `old_string`/`new_string` and the on-disk
+/// text. The read tool strips `\r` from CRLF files (via `str::lines`), so
+/// models routinely produce LF-only strings for Windows files that never match
+/// the raw CRLF bytes. When the literal `old` isn't present but the file's
+/// dominant line ending differs, promote/demote `old` (and `new`) to the file's
+/// convention so the match succeeds and the write keeps the file's endings.
+/// Only rewrites when the converted `old` actually matches; genuine mismatches
+/// fall through unchanged so the normal diagnostics still fire.
+fn reconcile_line_endings(text: &str, old: &str, new: &str) -> (String, String) {
+    if text.contains(old) {
+        return (old.to_string(), new.to_string());
+    }
+    let to_crlf = |s: &str| s.replace("\r\n", "\n").replace('\n', "\r\n");
+    let to_lf = |s: &str| s.replace("\r\n", "\n");
+    let file_crlf = text.contains("\r\n");
+    if file_crlf && !old.contains('\r') {
+        // File is CRLF, old_string arrived LF-only: promote both to CRLF.
+        let old_crlf = to_crlf(old);
+        if text.contains(&old_crlf) {
+            return (old_crlf, to_crlf(new));
+        }
+    } else if !file_crlf && old.contains("\r\n") {
+        // File is LF, old_string carries CRLF: demote both to LF.
+        let old_lf = to_lf(old);
+        if text.contains(&old_lf) {
+            return (old_lf, to_lf(new));
+        }
+    }
+    (old.to_string(), new.to_string())
+}
+
 struct EditTool;
 
 #[async_trait]
@@ -1349,6 +1380,13 @@ impl Tool for EditTool {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", enoent_hint(&ctx.cwd, &path).await),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
+        // The read tool renders CRLF files with their \r stripped (str::lines
+        // drops it), so a model copying those lines back produces an LF-only
+        // old_string that never matches the raw CRLF text on disk — the loop
+        // that leaves Windows edits stuck. Reconcile the line endings so the
+        // match succeeds and the replacement preserves the file's convention.
+        let (old, new) = reconcile_line_endings(&text, old, new);
+        let (old, new): (&str, &str) = (&old, &new);
         let count = text.matches(old).count();
         if count == 0 {
             // Diagnose WHY it didn't match so the model can fix the call in
@@ -2935,6 +2973,42 @@ mod tests {
         let err = WriteTool.execute(&args, &ctx).await.unwrap_err();
         assert!(err.to_string().contains("DENIED"), "got: {err}");
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "keep\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_matches_lf_old_string_against_crlf_file() {
+        // A model that copies lines out of the read tool gets LF-only text
+        // even when the file on disk is CRLF (Windows). The edit must still
+        // match, and the write must keep the file's CRLF endings intact.
+        let dir = std::env::temp_dir().join(format!("rift-crlf-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("w.py"), "def f():\r\n    return 1\r\n").unwrap();
+        let ctx = ToolCtx::new(&dir);
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("w.py".into()));
+        // old/new arrive LF-only, spanning a line break, as the model would send.
+        args.insert("old_string".into(), Value::String("def f():\n    return 1".into()));
+        args.insert("new_string".into(), Value::String("def f():\n    return 2".into()));
+        let result = EditTool.execute(&args, &ctx).await.unwrap();
+        assert!(result.contains("1 replacement"), "got: {result}");
+        assert_eq!(std::fs::read_to_string(dir.join("w.py")).unwrap(), "def f():\r\n    return 2\r\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_matches_crlf_old_string_against_lf_file() {
+        // The mirror case: a CRLF old_string against an LF file demotes to LF.
+        let dir = std::env::temp_dir().join(format!("rift-lf-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("w.py"), "a\nb\n").unwrap();
+        let ctx = ToolCtx::new(&dir);
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("w.py".into()));
+        args.insert("old_string".into(), Value::String("a\r\nb".into()));
+        args.insert("new_string".into(), Value::String("a\r\nc".into()));
+        EditTool.execute(&args, &ctx).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("w.py")).unwrap(), "a\nc\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
