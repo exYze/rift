@@ -599,6 +599,11 @@ fn cmd_sessions(
     if messages.first().is_some_and(|m| m.role == Role::System) {
         messages[0] = agent.messages[0].clone();
     }
+    // Same hidden note startup resume appends: index the prior exploration
+    // so the model doesn't re-explore the project to reorient itself.
+    if let Some(brief) = rift_core::session::resume_brief(&messages) {
+        messages.push(Message::user(brief));
+    }
     agent.messages = messages.clone();
     cx.store = SessionStore::at(path.clone());
     let count = messages.len();
