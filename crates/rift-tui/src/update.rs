@@ -158,6 +158,49 @@ impl UpdateOutcome {
     }
 }
 
+/// First `<stem>.old` / `<stem>.old-2` / … path next to `exe` that doesn't
+/// exist yet. Renaming the running exe must never land on an existing file:
+/// a stale `.old` can still be mapped by a process running that image, and
+/// Windows fails a replacing rename onto a mapped file with Access Denied.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn next_free_old_path(exe: &std::path::Path) -> PathBuf {
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 {
+            exe.with_extension("old")
+        } else {
+            exe.with_extension(format!("old-{n}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Best-effort cleanup of `.old*` binaries parked by earlier updates. Ones
+/// still locked (a process is running that image) simply stay for a later
+/// sweep — failures here must never fail the update.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn sweep_stale_old_binaries(exe: &std::path::Path) {
+    let (Some(dir), Some(stem)) = (exe.parent(), exe.file_stem().and_then(|s| s.to_str()))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let is_old = name
+            .strip_prefix(stem)
+            .and_then(|rest| rest.strip_prefix(".old"))
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('-'));
+        if is_old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 pub async fn self_update(current: &str) -> Result<UpdateOutcome> {
     let target = release_target()
         .with_context(|| format!("no prebuilt binary for {}-{}; update via cargo or the install script", std::env::consts::OS, std::env::consts::ARCH))?;
@@ -196,8 +239,14 @@ pub async fn self_update(current: &str) -> Result<UpdateOutcome> {
     // Windows can't overwrite a running exe, but it CAN rename it away.
     #[cfg(windows)]
     {
-        let old = exe.with_extension("old");
-        let _ = std::fs::remove_file(&old);
+        sweep_stale_old_binaries(&exe);
+        // Never rename ONTO an existing .old: a leftover from a previous
+        // update can still be mapped by a process running the old image
+        // (e.g. a rift --serve the editor started before that update), and
+        // replacing a mapped file fails with Access Denied. Park the
+        // running exe at the first free name instead; the sweep on a later
+        // run picks the leftovers up once they unlock.
+        let old = next_free_old_path(&exe);
         std::fs::rename(&exe, &old).context("cannot move the running executable aside")?;
     }
     if let Err(e) = std::fs::rename(&staged, &exe) {
@@ -217,6 +266,34 @@ mod tests {
         assert_eq!(parse_version("v1.0.0-rc1"), Some((1, 0, 0)));
         assert!(parse_version("v0.10.0") > parse_version("v0.9.9"));
         assert!(parse_version("not a version").is_none());
+    }
+
+    #[test]
+    fn old_path_never_targets_existing_files_and_sweep_clears_leftovers() {
+        let dir = std::env::temp_dir().join(format!("rift-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("rift.exe");
+        std::fs::write(&exe, "current").unwrap();
+
+        // Nothing parked yet: plain .old.
+        assert_eq!(next_free_old_path(&exe), dir.join("rift.old"));
+        // Leftovers from earlier updates (possibly still mapped by a running
+        // process) must never be rename targets — pick the next free name.
+        std::fs::write(dir.join("rift.old"), "v1").unwrap();
+        assert_eq!(next_free_old_path(&exe), dir.join("rift.old-2"));
+        std::fs::write(dir.join("rift.old-2"), "v2").unwrap();
+        assert_eq!(next_free_old_path(&exe), dir.join("rift.old-3"));
+
+        // The sweep clears unlocked leftovers — and only ours: the running
+        // exe and unrelated files stay.
+        std::fs::write(dir.join("rifter.old"), "other tool").unwrap();
+        sweep_stale_old_binaries(&exe);
+        assert!(!dir.join("rift.old").exists());
+        assert!(!dir.join("rift.old-2").exists());
+        assert!(exe.exists());
+        assert!(dir.join("rifter.old").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

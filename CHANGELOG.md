@@ -3,6 +3,17 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.5.1 — 2026-07-11
+
+- **`rift update` no longer dies with "cannot move the running executable
+  aside" on Windows**: updating parks the running `rift.exe` as `rift.old`,
+  and Windows can't delete or replace that file while any process still runs
+  the old image (say, a serve process the editor started before the last
+  update). The next update's rename onto it then failed with Access Denied.
+  Updates now park the running exe at the first *free* `.old` name
+  (`rift.old`, `rift.old-2`, …) instead of clobbering, and best-effort sweep
+  unlocked leftovers on each run so they don't accumulate.
+
 ## v2.5.0 — 2026-07-11
 
 - **Resumed sessions keep their project understanding**: restoring a session

@@ -5,7 +5,7 @@
   <text x="55" y="56" font-size="28" font-weight="700" fill="#e6edf3">rift <tspan fill="#39c5cf">roadmap</tspan></text>
   <text x="55" y="82" font-size="14" fill="#8b949e">the local-first coding agent — the road to 2.0</text>
   <text x="1225" y="56" font-size="13" fill="#8b949e" text-anchor="end">github.com/exYze/rift</text>
-  <text x="1225" y="78" font-size="13" font-weight="700" fill="#3fb950" text-anchor="end">current: v2.5.0</text>
+  <text x="1225" y="78" font-size="13" font-weight="700" fill="#3fb950" text-anchor="end">current: v2.5.1</text>
 
   <!-- row 1: shipped eras -->
   <g transform="translate(55,110)">
