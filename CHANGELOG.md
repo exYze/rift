@@ -3,6 +3,17 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.3.0 — 2026-07-11
+
+- **`edit` no longer gets stuck on CRLF (Windows) files**: the `read`
+  tool renders files with their `\r` stripped (`str::lines` drops it), so
+  a model copying those lines back produced an LF-only `old_string` that
+  never matched the raw CRLF bytes on disk. The `edit` tool now reconciles
+  line endings — an LF `old_string` matches a CRLF file (and vice versa) —
+  and the replacement preserves the file's existing convention on write.
+  This removes the re-read/retry loop that ended in "stopped after N
+  iterations without a final answer" on Windows projects.
+
 ## v2.2.0 — 2026-07-10
 
 - **Project-plugin trust over the serve protocol**: untrusted project
