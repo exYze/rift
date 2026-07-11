@@ -629,6 +629,13 @@ async fn main() -> Result<()> {
                 messages[0] = agent.messages[0].clone();
             }
             if !messages.is_empty() {
+                // Hidden context note indexing the prior exploration (files
+                // read/edited), so the model builds on what it already
+                // learned instead of re-exploring the project. Frontends
+                // hide "[system]" user messages, so it never renders.
+                if let Some(brief) = rift_core::session::resume_brief(&messages) {
+                    messages.push(rift_ollama::Message::user(brief));
+                }
                 agent.messages = messages.clone();
                 eprintln!("resumed session {} ({} messages)", store.path().display(), messages.len());
             }

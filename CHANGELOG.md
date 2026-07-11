@@ -3,6 +3,20 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.5.0 — 2026-07-11
+
+- **Resumed sessions keep their project understanding**: restoring a session
+  (`--continue`, `--resume`, `/restart`, `/sessions`, and the VS Code chat's
+  auto-resume) already replayed the conversation, but the model still
+  re-explored the folder to reorient itself before answering. Resume now
+  appends a hidden context note built from the saved history — the files it
+  already read/outlined, the files it created or edited, how much other tool
+  traffic ran, and whether older tool outputs were elided by compaction —
+  telling the model its earlier understanding still stands and to build on
+  it instead of re-scanning the project. The note is deterministic (no LLM
+  call, works offline), never renders in any frontend, and stale copies from
+  earlier restarts are stripped so they don't stack up.
+
 ## v2.4.1 — 2026-07-11
 
 - **`rift update` output refreshed**: the update command now prints a clean,

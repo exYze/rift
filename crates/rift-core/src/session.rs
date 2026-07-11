@@ -61,6 +61,100 @@ pub fn normalize_tool_call_ids(messages: &mut [Message]) {
     }
 }
 
+/// Prefix of the hidden context note `resume_brief` builds. Frontends already
+/// hide user messages starting with "[system]" from the transcript; the full
+/// prefix additionally lets `load`/`resume` strip briefs left by earlier
+/// restarts before a fresh one is appended, so they never pile up.
+pub const RESUME_BRIEF_PREFIX: &str = "[system] session resumed —";
+
+/// At most this many file paths are listed per section of the brief; the
+/// rest collapse to "(+N more)".
+const BRIEF_MAX_LISTED: usize = 20;
+
+/// Build the resume brief: a hidden `[system]` user message appended to a
+/// restored history so the model keeps the project understanding it already
+/// earned instead of re-exploring the folder from scratch. Deterministic —
+/// harvested from the saved tool calls (no LLM call, works offline): which
+/// files were read/outlined, which were written/edited, how much other tool
+/// traffic ran, and whether compaction elided older outputs. None for a
+/// chat-only history (nothing was explored, nothing to protect).
+pub fn resume_brief(messages: &[Message]) -> Option<String> {
+    fn push_unique(list: &mut Vec<String>, path: &str) {
+        if !list.iter().any(|p| p == path) {
+            list.push(path.to_string());
+        }
+    }
+    fn file_list(items: &[String]) -> String {
+        let shown = items[..items.len().min(BRIEF_MAX_LISTED)].join(", ");
+        match items.len().saturating_sub(BRIEF_MAX_LISTED) {
+            0 => shown,
+            more => format!("{shown} (+{more} more)"),
+        }
+    }
+
+    let mut read: Vec<String> = Vec::new();
+    let mut changed: Vec<String> = Vec::new();
+    let (mut searches, mut commands) = (0usize, 0usize);
+    for m in messages.iter().filter(|m| m.role == Role::Assistant) {
+        for tc in &m.tool_calls {
+            let path = tc.function.arguments.get("path").and_then(|v| v.as_str());
+            match tc.function.name.as_str() {
+                "read" | "outline" => {
+                    if let Some(p) = path {
+                        push_unique(&mut read, p);
+                    }
+                }
+                "write" | "edit" => {
+                    if let Some(p) = path {
+                        push_unique(&mut changed, p);
+                    }
+                }
+                "ls" | "grep" | "glob" | "repo_map" => searches += 1,
+                "bash" => commands += 1,
+                _ => {}
+            }
+        }
+    }
+    if read.is_empty() && changed.is_empty() && searches == 0 && commands == 0 {
+        return None;
+    }
+
+    let mut brief = format!(
+        "{RESUME_BRIEF_PREFIX} the conversation above is your own earlier work in this \
+         project, restored from disk. That understanding is still valid: do NOT \
+         re-explore the project (no fresh ls/glob/grep/repo_map sweeps) to reorient yourself."
+    );
+    if !read.is_empty() {
+        brief.push_str(&format!("\nFiles you already read or outlined: {}", file_list(&read)));
+    }
+    if !changed.is_empty() {
+        brief.push_str(&format!("\nFiles you created or edited: {}", file_list(&changed)));
+    }
+    if searches + commands > 0 {
+        brief.push_str(&format!(
+            "\nYou also ran {searches} directory/search lookups and {commands} shell commands."
+        ));
+    }
+    let elided = messages
+        .iter()
+        .any(|m| m.role == Role::Tool && m.content.contains(crate::compact::ELIDE_NOTE));
+    brief.push_str(if elided {
+        "\nSome older tool outputs above were elided to save context — re-read a file only \
+         when you need those exact details or it may have changed on disk; otherwise answer \
+         from the conversation above."
+    } else {
+        "\nRe-read a file only if it may have changed on disk; otherwise answer from the \
+         conversation above."
+    });
+    Some(brief)
+}
+
+/// Drop resume briefs left by earlier restarts — each resume appends a fresh
+/// one, so stale copies would otherwise stack up in long-lived sessions.
+fn strip_stale_briefs(messages: &mut Vec<Message>) {
+    messages.retain(|m| !(m.role == Role::User && m.content.starts_with(RESUME_BRIEF_PREFIX)));
+}
+
 /// Autosaved session files stay under this size — a long-lived session with
 /// giant tool outputs otherwise grows a file that slows every save and
 /// resume. Live context is untouched (compaction owns that); only what's
@@ -187,6 +281,7 @@ impl SessionStore {
         let text = std::fs::read_to_string(path).with_context(|| format!("cannot read session {}", path.display()))?;
         let mut saved: SavedSession = serde_json::from_str(&text)?;
         normalize_tool_call_ids(&mut saved.messages);
+        strip_stale_briefs(&mut saved.messages);
         Ok(saved)
     }
 
@@ -218,6 +313,7 @@ impl SessionStore {
         match serde_json::from_str::<SavedSession>(&text) {
             Ok(mut saved) => {
                 normalize_tool_call_ids(&mut saved.messages);
+                strip_stale_briefs(&mut saved.messages);
                 (Self { path }, saved.messages, None)
             }
             Err(e) => {
@@ -343,6 +439,92 @@ mod tests {
         // Each result answers the call with the matching name.
         assert_eq!(messages[3].tool_call_id.as_deref(), Some(ids[0].as_str()));
         assert_eq!(messages[4].tool_call_id.as_deref(), Some(ids[1].as_str()));
+    }
+
+    fn call_with_path(name: &str, path: &str) -> ToolCall {
+        let mut args = serde_json::Map::new();
+        args.insert("path".into(), serde_json::Value::String(path.into()));
+        ToolCall {
+            id: None,
+            function: ToolCallFunction { index: None, name: name.into(), arguments: args },
+        }
+    }
+
+    fn assistant_calling(calls: Vec<ToolCall>) -> Message {
+        let mut m = Message::user("");
+        m.role = Role::Assistant;
+        m.tool_calls = calls;
+        m
+    }
+
+    #[test]
+    fn resume_brief_indexes_prior_exploration() {
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("improve the proposal"),
+            assistant_calling(vec![
+                call_with_path("read", "proposal.md"),
+                call_with_path("outline", "deck.md"),
+                call_with_path("read", "proposal.md"), // duplicate — listed once
+                call_with_path("grep", "."),
+            ]),
+            Message::tool_result("read", "contents"),
+            assistant_calling(vec![call_with_path("edit", "proposal.md")]),
+        ];
+        let brief = resume_brief(&messages).unwrap();
+        assert!(brief.starts_with(RESUME_BRIEF_PREFIX));
+        // Once in the read list, once in the edited list — the duplicate
+        // read collapsed.
+        assert_eq!(brief.matches("proposal.md").count(), 2);
+        assert!(brief.contains("deck.md"));
+        assert!(brief.contains("1 directory/search lookups"));
+        // Nothing was pruned, so the elision warning stays out.
+        assert!(!brief.contains("Some older tool outputs"));
+
+        // Chat-only history: nothing was explored, nothing to protect.
+        assert!(resume_brief(&[Message::system("s"), Message::user("hi")]).is_none());
+    }
+
+    #[test]
+    fn resume_brief_caps_file_lists_and_flags_elisions() {
+        let paths: Vec<String> = (0..25).map(|i| format!("src/file{i}.rs")).collect();
+        let mut pruned = Message::tool_result(
+            "read",
+            format!("head\n{}5000 bytes to save context; re-run the tool if you need this again]", crate::compact::ELIDE_NOTE),
+        );
+        pruned.tool_call_id = Some("c0".into());
+        let messages = vec![
+            Message::user("go"),
+            assistant_calling(paths.iter().map(|p| call_with_path("read", p)).collect()),
+            pruned,
+        ];
+        let brief = resume_brief(&messages).unwrap();
+        assert!(brief.contains("file19.rs"));
+        assert!(!brief.contains("file20.rs"), "list must cap at {BRIEF_MAX_LISTED}");
+        assert!(brief.contains("(+5 more)"));
+        assert!(brief.contains("Some older tool outputs"));
+    }
+
+    #[test]
+    fn resume_and_load_strip_stale_briefs() {
+        let dir = std::env::temp_dir().join(format!("rift-brief-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stale.json");
+        let store = SessionStore::at(path.clone());
+        let messages = vec![
+            Message::user("hi"),
+            Message::user(format!("{RESUME_BRIEF_PREFIX} note from an earlier restart")),
+        ];
+        store.save("m", "/tmp", &messages).unwrap();
+
+        let (_, resumed, notice) = SessionStore::resume(path.clone());
+        assert!(notice.is_none());
+        assert_eq!(resumed.len(), 1, "stale brief must be dropped on resume");
+        assert_eq!(resumed[0].content, "hi");
+
+        let loaded = SessionStore::load(&path).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

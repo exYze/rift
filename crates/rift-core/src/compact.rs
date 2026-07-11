@@ -62,6 +62,11 @@ fn protected_start(messages: &[Message]) -> usize {
     user_idxs[user_idxs.len() - PROTECTED_TURNS]
 }
 
+/// Prefix of the elision note `prune_old_turns` splices into old tool
+/// outputs. `session::resume_brief` matches it to tell a resumed model which
+/// prior outputs are gone (and so may be worth re-reading).
+pub const ELIDE_NOTE: &str = "[... elided ";
+
 /// Stage 1: elide bulky tool outputs and drop stale thinking in older turns.
 /// Returns the number of messages touched. The elision note tells the model
 /// how to recover the data (re-run the tool) so this is safe.
@@ -73,7 +78,7 @@ pub fn prune_old_turns(messages: &mut [Message]) -> usize {
             Role::Tool if m.content.len() > PRUNE_MIN_CHARS => {
                 let head: String = m.content.chars().take(200).collect();
                 m.content = format!(
-                    "{head}\n[... elided {} bytes to save context; re-run the tool if you need this again]",
+                    "{head}\n{ELIDE_NOTE}{} bytes to save context; re-run the tool if you need this again]",
                     m.content.len()
                 );
                 touched += 1;
