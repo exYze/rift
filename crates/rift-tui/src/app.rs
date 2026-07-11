@@ -1629,6 +1629,11 @@ impl App {
                     format!("{} {name}: {preview}", if ok { '✓' } else { '✗' }),
                 );
             }
+            // The TUI's diff pane (Tab) already shows the working-tree diff;
+            // the per-edit preview just marks the applied change in the log.
+            AgentEvent::EditDiff { path, diff } => {
+                self.log.push_block(Kind::Tool, format!("✎ {path}\n{}", diff.join("\n")));
+            }
             AgentEvent::Info(i) => {
                 if i.starts_with("compacted") {
                     self.session_stats.compactions += 1;

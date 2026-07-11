@@ -973,6 +973,17 @@ async fn run_headless(
                     let mark = if ok { "✓" } else { "✗" };
                     println!("\x1b[36m{mark} {name}\x1b[0m {preview}");
                 }
+                AgentEvent::EditDiff { path, diff } => {
+                    eprintln!("\x1b[2m✎ {path}\x1b[0m");
+                    for l in &diff {
+                        let color = match l.as_bytes().first() {
+                            Some(b'+') => "\x1b[32m",
+                            Some(b'-') => "\x1b[31m",
+                            _ => "\x1b[2m",
+                        };
+                        eprintln!("{color}{l}\x1b[0m");
+                    }
+                }
                 AgentEvent::Info(i) => eprintln!("\x1b[2m· {i}\x1b[0m"),
                 AgentEvent::SubAgentStarted { tag, model, label } => {
                     eprintln!("\x1b[2m· ⧉ {tag} started ({model}): {label}\x1b[0m");

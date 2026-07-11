@@ -73,6 +73,9 @@ impl SwarmApp {
                 let args: String = args.chars().take(120).collect();
                 c.log.push_line(Kind::Tool, format!("→ {name} {args}"));
             }
+            AgentEvent::EditDiff { path, diff } => {
+                c.log.push_line(Kind::Tool, format!("✎ {path} ({} diff lines)", diff.len()));
+            }
             AgentEvent::ToolResult { name, ok, preview } => {
                 let preview: String = preview.chars().take(120).collect();
                 c.log.push_line(

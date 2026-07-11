@@ -100,6 +100,9 @@ pub enum AgentEvent {
     Warning(String),
     /// The model updated its task checklist (the `plan` tool).
     Plan(Vec<crate::tools::PlanItem>),
+    /// A write/edit was applied: the file and a capped ± preview of the
+    /// change, so frontends can render a red/green diff in the transcript.
+    EditDiff { path: String, diff: Vec<String> },
     /// A delegated sub-agent (the `task` tool) started. `tag` names its
     /// lane for frontends that group per-agent activity ("agent 1" for
     /// foreground fan-outs; background agents announce via TaskStarted and
@@ -729,6 +732,16 @@ impl Agent {
                 });
                 if canonical == "plan" && ok {
                     let _ = tx.send(AgentEvent::Plan(self.ctx.plan_snapshot()));
+                }
+                if ok && matches!(canonical.as_str(), "write" | "edit") {
+                    if let Some((path, diff)) = self.ctx.take_last_diff() {
+                        if !diff.is_empty() {
+                            let _ = tx.send(AgentEvent::EditDiff {
+                                path: path.display().to_string(),
+                                diff,
+                            });
+                        }
+                    }
                 }
 
                 // Correlate by name (Ollama) and by id (OpenAI-compat): keep both
