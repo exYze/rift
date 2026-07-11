@@ -3,6 +3,29 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.6.0 — 2026-07-11
+
+- **Turns wrap up instead of dying at the iteration cap**: a busy model
+  (e.g. DeepSeek-V4-Flash, which works in many small tool steps) used to hit
+  the per-turn iteration limit and end with "stopped after N iterations
+  without a final answer" — all the turn's work discarded. Now the agent
+  warns the model two rounds before the cap, and on the final round sends
+  the request without tools so the reply must be text: you get a real
+  answer, or a handoff summary of what was completed and what remains
+  (send "continue" to resume). Trace outcome "wrapped" and a
+  "budget wrap-ups" counter in `/stats` make it visible.
+- **Default iteration cap raised 25 → 40**: the doom-loop and stuck-turn
+  guards already end wasted turns early, so the cap only ever throttled
+  productive turns. Still configurable via `--max-iterations`,
+  `max_iterations` in config, or the VS Code chat settings.
+- **DeepSeek prompt: batch independent lookups, delegate big work**: the
+  deepseek-family system prompt now tells the model to issue independent
+  reads/searches as multiple tool calls in one response instead of spending
+  a round on each, and to act as an orchestrator on large tasks — delegating
+  self-contained subtasks to the `agent` tool, where each sub-agent runs
+  with its own fresh round budget and context window while costing the main
+  conversation a single round.
+
 ## v2.5.1 — 2026-07-11
 
 - **`rift update` no longer dies with "cannot move the running executable

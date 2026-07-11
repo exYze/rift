@@ -487,7 +487,7 @@ class RiftChatProvider {
       <span>temperature</span><input id="set-temp" type="number" min="0" max="2" step="0.1" placeholder="0.2">
     </label>
     <label data-tip="Max agent-loop iterations (tool calls) per turn (--max-iterations)">
-      <span>max iterations</span><input id="set-iters" type="number" min="1" placeholder="25">
+      <span>max iterations</span><input id="set-iters" type="number" min="1" placeholder="40">
     </label>
     <label data-tip="How much thinking models reason before answering (--effort)">
       <span>reasoning effort</span>
