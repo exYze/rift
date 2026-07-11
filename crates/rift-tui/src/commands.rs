@@ -1463,12 +1463,13 @@ async fn cmd_copy(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> R
 
 async fn cmd_update(fx: &UnboundedSender<UiEffect>, cancel: &CancellationToken) -> Result<String> {
     let _ = fx.send(UiEffect::Out(Kind::Info, "checking for the latest release…".into()));
-    let msg = tokio::select! {
+    let outcome = tokio::select! {
         biased;
         _ = cancel.cancelled() => bail!("cancelled"),
         r = crate::update::self_update(env!("CARGO_PKG_VERSION")) => r?,
     };
-    let note = if msg.starts_with("updated") {
+    let msg = outcome.plain();
+    let note = if outcome.did_update() {
         "\nrun /restart to load the new version — your chat resumes automatically"
     } else {
         ""

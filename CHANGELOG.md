@@ -3,6 +3,14 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.4.1 — 2026-07-11
+
+- **`rift update` output refreshed**: the update command now prints a clean,
+  colored banner (`✦ rift updated · vX → vY`, the install path, and a restart
+  hint) instead of a plain one-line summary, and no longer prints the
+  `config: …` provenance line — it doesn't touch config. The in-TUI
+  `/update` keeps its plain, ANSI-free line.
+
 ## v2.4.0 — 2026-07-11
 
 - **VS Code chat: reopen past chats**: the chat no longer forgets your
