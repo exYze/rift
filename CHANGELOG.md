@@ -3,6 +3,18 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.3.1 — 2026-07-11
+
+- **VS Code chat: rendered markdown tables**: the webview markdown renderer
+  now parses GFM pipe tables (header, `|---|` delimiter, body rows, with
+  per-column alignment) into real `<table>`s instead of showing raw pipes
+  and dashes — so summary tables and the like read cleanly.
+- **VS Code chat: tool activity is boxed**: a run of consecutive tool calls
+  is now collected into a single height-capped, auto-scrolling box (with a
+  click-to-collapse header and a live call count) rather than each `✓`
+  line stacking down the transcript. A long burst of reads/edits no longer
+  pushes everything else off-screen.
+
 ## v2.3.0 — 2026-07-11
 
 - **`edit` no longer gets stuck on CRLF (Windows) files**: the `read`

@@ -18,6 +18,10 @@
   let planEl = null;
   /** Tool row awaiting its result — tool_result folds into the same row. */
   let pendingTool = null;
+  /** Current run of consecutive tool calls, collected into one capped,
+   *  auto-scrolling box so a long burst doesn't take over the transcript.
+   *  Broken (reset to null) as soon as any non-tool element is added. */
+  let toolGroup = null;
   /** Sub-agent lanes by tag ("agent 1", "task #3") — one card per agent. */
   const agentLanes = new Map();
   /** Last status text from the extension; agent count is appended locally. */
@@ -61,7 +65,42 @@
     );
   }
 
-  // Minimal markdown: fenced code, inline code, bold, headings, bullets.
+  // Inline spans shared by paragraphs, list items, and table cells.
+  function inline(s) {
+    return esc(s)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  }
+
+  // A GFM pipe table: a header row, a |---|:--:| delimiter, then body rows.
+  const TABLE_DELIM = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/;
+  function tableCells(row) {
+    let s = row.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    return s.split('|').map((c) => c.trim());
+  }
+  function tableAligns(delim) {
+    return tableCells(delim).map((c) => {
+      const l = c.startsWith(':');
+      const r = c.endsWith(':');
+      return l && r ? 'center' : r ? 'right' : l ? 'left' : '';
+    });
+  }
+  function renderTable(header, delim, rows) {
+    const aligns = tableAligns(delim);
+    const cell = (tag, text, i) => {
+      const a = aligns[i] ? ` style="text-align:${aligns[i]}"` : '';
+      return `<${tag}${a}>${inline(text)}</${tag}>`;
+    };
+    const th = tableCells(header).map((c, i) => cell('th', c, i)).join('');
+    const body = rows
+      .map((r) => `<tr>${tableCells(r).map((c, i) => cell('td', c, i)).join('')}</tr>`)
+      .join('');
+    return `<table class="md-table"><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  // Minimal markdown: fenced code, inline code, bold, headings, bullets, tables.
   function md(text) {
     const out = [];
     const lines = text.split('\n');
@@ -80,7 +119,8 @@
       fenceBuf = [];
       fenceLang = '';
     };
-    for (const raw of lines) {
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
       const t = raw.trimStart();
       if (t.startsWith('```')) {
         if (inFence) {
@@ -96,9 +136,20 @@
         fenceBuf.push(raw);
         continue;
       }
-      let line = esc(raw);
-      line = line.replace(/`([^`]+)`/g, '<code>$1</code>');
-      line = line.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      // Table: this row has a pipe and the next line is the |---| delimiter.
+      if (raw.includes('|') && i + 1 < lines.length && TABLE_DELIM.test(lines[i + 1])) {
+        flush();
+        const rows = [];
+        let j = i + 2;
+        while (j < lines.length && lines[j].includes('|') && lines[j].trim() !== '') {
+          rows.push(lines[j]);
+          j++;
+        }
+        out.push(renderTable(raw, lines[i + 1], rows));
+        i = j - 1;
+        continue;
+      }
+      let line = inline(raw);
       const h = line.match(/^(#{1,3})\s+(.*)$/);
       if (h) {
         flush();
@@ -140,6 +191,9 @@
     return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 40;
   }
   function add(el) {
+    // Anything added straight to the transcript ends the current tool run,
+    // so the next tool call opens a fresh box below the intervening content.
+    toolGroup = null;
     const stick = atBottom();
     messages.appendChild(el);
     if (stick) messages.scrollTop = messages.scrollHeight;
@@ -238,8 +292,29 @@
     renderStatus();
   }
 
+  /** The box that collects the current run of tool calls. Created lazily on
+   *  the first tool row and reused until add() breaks the run. */
+  function ensureToolGroup() {
+    if (toolGroup) return toolGroup;
+    const el = document.createElement('div');
+    el.className = 'tool-group';
+    const head = document.createElement('div');
+    head.className = 'tool-group-head';
+    head.setAttribute('data-tip', 'Tool activity for this step — scrolls within its box; click to collapse');
+    const body = document.createElement('div');
+    body.className = 'tool-group-body';
+    head.addEventListener('click', () => el.classList.toggle('collapsed'));
+    el.appendChild(head);
+    el.appendChild(body);
+    add(el); // resets toolGroup to null …
+    toolGroup = { el, head, body, count: 0 }; // … so claim it afterwards
+    return toolGroup;
+  }
+
   /** One tool call = one row: an ellipsized head line that folds the result
-   *  in when it arrives, and a click-to-expand body with full args/output. */
+   *  in when it arrives, and a click-to-expand body with full args/output.
+   *  Rows live inside the current tool-group box, which caps its height and
+   *  auto-scrolls so a long burst of calls can't blow up the transcript. */
   function toolRow(name, summary, full) {
     const el = document.createElement('div');
     el.className = 'tool';
@@ -250,10 +325,19 @@
     const body = document.createElement('div');
     body.className = 'tool-body hidden';
     body.textContent = full;
-    head.addEventListener('click', () => body.classList.toggle('hidden'));
+    head.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't also toggle the group's collapse
+      body.classList.toggle('hidden');
+    });
     el.appendChild(head);
     el.appendChild(body);
-    add(el);
+    const g = ensureToolGroup();
+    const stick = atBottom();
+    g.body.appendChild(el);
+    g.count += 1;
+    g.head.textContent = `⚙ tool activity · ${g.count} call${g.count === 1 ? '' : 's'}`;
+    g.body.scrollTop = g.body.scrollHeight; // keep the newest row in view
+    if (stick) messages.scrollTop = messages.scrollHeight;
     return { el, head, body, name, summary };
   }
 
