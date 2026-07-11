@@ -97,6 +97,39 @@ fn event_json(ev: &AgentEvent) -> Value {
     }
 }
 
+/// Metadata for the past-chats picker: every saved session, newest first,
+/// each labelled by its first real user message so the consumer can show a
+/// human title. Best-effort — unreadable or corrupt files are skipped, never
+/// fatal (browsing history must not depend on every autosave being clean).
+fn session_list() -> Vec<Value> {
+    let paths = SessionStore::list().unwrap_or_default();
+    let mut out = Vec::new();
+    for path in paths.into_iter().take(200) {
+        let Ok(saved) = SessionStore::load(&path) else { continue };
+        let is_user = |m: &&rift_ollama::Message| {
+            matches!(m.role, rift_ollama::Role::User)
+                && !m.content.starts_with("[system]")
+                && !m.content.trim().is_empty()
+        };
+        let title = saved
+            .messages
+            .iter()
+            .find(is_user)
+            .map(|m| m.content.lines().next().unwrap_or("").chars().take(100).collect::<String>())
+            .unwrap_or_else(|| "(empty session)".into());
+        let turns = saved.messages.iter().filter(is_user).count();
+        out.push(json!({
+            "path": path.display().to_string(),
+            "title": title,
+            "saved_at": saved.saved_at,
+            "cwd": saved.cwd,
+            "model": saved.model,
+            "turns": turns,
+        }));
+    }
+    out
+}
+
 /// Work items for the agent task. Undo runs there (not on the select loop)
 /// because the agent owns its `ToolCtx`, and routing through the same queue
 /// keeps it serialized with turns.
@@ -443,7 +476,12 @@ pub async fn run_serve(
                         }
                         let _ = prompt_tx.send(ServeCmd::Undo);
                     }
-                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/edit_decision/cancel/undo)"})),
+                    // Past-chats picker: read-only, so it answers straight from
+                    // the select loop without touching the agent or the turn.
+                    Some("list_sessions") => {
+                        emit(json!({"event": "sessions", "items": session_list()}));
+                    }
+                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/edit_decision/cancel/undo/list_sessions)"})),
                 }
             }
         }

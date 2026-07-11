@@ -3,6 +3,18 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.4.0 — 2026-07-11
+
+- **VS Code chat: reopen past chats**: the chat no longer forgets your
+  conversation when you reload the window or update the extension. Every
+  session is already saved to disk; now the extension remembers the last
+  session per workspace and **auto-resumes it on open**, and a new 🕘
+  history button lists all past chats in a native quick-pick (titled by
+  their first message, with age and turn count) so you can reopen any one.
+  Model and settings changes also stay on the current chat instead of
+  jumping to the newest. New serve-protocol command `list_sessions` →
+  `sessions` event backs the picker (additive, still protocol v1).
+
 ## v2.3.1 — 2026-07-11
 
 - **VS Code chat: rendered markdown tables**: the webview markdown renderer

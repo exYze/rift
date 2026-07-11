@@ -855,6 +855,7 @@
   btnSend.addEventListener('click', send);
   btnStop.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
   document.getElementById('btn-undo').addEventListener('click', () => vscode.postMessage({ type: 'undo' }));
+  document.getElementById('btn-history').addEventListener('click', () => vscode.postMessage({ type: 'history' }));
   document.getElementById('btn-new').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
   document.getElementById('btn-continue').addEventListener('click', () => vscode.postMessage({ type: 'continueSession' }));
 
