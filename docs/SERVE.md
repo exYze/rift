@@ -45,6 +45,7 @@ stdin EOF → process exits (in-flight turn cancelled, session saved)
 | `edit_decision` | `id`: number, `apply`: bool, `content`?: string | Decides a pending `edit_review`. `apply:true` writes `content` (the accepted-hunk subset the reviewer assembled) or, when `content` is absent, the proposal verbatim. `apply:false` rejects. |
 | `cancel` | — | Cancels the in-flight turn. Pending reviews are closed (`edit_review_closed`). |
 | `undo` | — | Reverts the last turn's write/edit changes (bash changes aren't tracked). Rejected with a `warning` mid-turn. |
+| `list_sessions` | — | Requests the saved-session index for a history/reopen picker. Answered with a `sessions` event. Read-only — safe to send any time, including mid-turn. Reopen a chosen session by relaunching with `--resume <path>`. |
 
 Unknown commands produce a `warning` event; malformed JSON lines likewise.
 
@@ -77,6 +78,7 @@ Session and status:
 | `ready` | `model`, `session`, `cwd`, `version`, `protocol_version`, `num_ctx`, `skills`: [{`name`,`description`}] | First event after spawn. `skills` (added in 2.0, additive) lists what `/skill:<name>` prompts can invoke — skills and plugin commands — so consumers can offer completion. |
 | `capabilities` | `protocol_version`, `edit_review` | Acknowledges `hello` with the effective capability set. |
 | `context` | `used`, `limit` | Context-window occupancy; sent at startup and after each turn's idle compaction. |
+| `sessions` | `items`: [{`path`, `title`, `saved_at`, `cwd`, `model`, `turns`}] | Answer to `list_sessions` (added in 2.4, additive). Every saved session, newest first; `title` is the first user message, `saved_at` a Unix timestamp. Reopen one with `--resume <path>`. |
 | `history` | `messages`: [{`role`,`text`}] | Prior user/assistant exchanges of a resumed session (tool/system traffic excluded). |
 | `info` / `warning` | `text` | Human-relevant notices. |
 | `subagent_started` | `tag`, `model`, `label` | A concurrent sub-agent began. |

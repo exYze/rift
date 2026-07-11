@@ -3,7 +3,7 @@ members = ["crates/rift-provider", "crates/rift-ollama", "crates/rift-openai", "
 resolver = "2"
 
 [workspace.package]
-version = "2.3.0"
+version = "2.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/exYze/rift"
@@ -12,11 +12,11 @@ repository = "https://github.com/exYze/rift"
 # Internal crates carry an explicit version so `cargo publish` works (path
 # alone is stripped on publish). Keep in lockstep with workspace.version
 # when bumping a release.
-rift-provider = { path = "crates/rift-provider", version = "2.3.0" }
-rift-ollama = { path = "crates/rift-ollama", version = "2.3.0" }
-rift-openai = { path = "crates/rift-openai", version = "2.3.0" }
-rift-anthropic = { path = "crates/rift-anthropic", version = "2.3.0" }
-rift-core = { path = "crates/rift-core", version = "2.3.0" }
+rift-provider = { path = "crates/rift-provider", version = "2.4.0" }
+rift-ollama = { path = "crates/rift-ollama", version = "2.4.0" }
+rift-openai = { path = "crates/rift-openai", version = "2.4.0" }
+rift-anthropic = { path = "crates/rift-anthropic", version = "2.4.0" }
+rift-core = { path = "crates/rift-core", version = "2.4.0" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

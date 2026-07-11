@@ -417,6 +417,13 @@ class RiftChatProvider {
     /** Replay log so the transcript survives the view being disposed (e.g.
      *  when dragged between primary and secondary sidebars). */
     this.log = [];
+    /** Path of the session rift is currently in (from the `ready` event).
+     *  Persisted per-workspace so a reload reopens the same chat instead of
+     *  starting blank, and reused across model/setting restarts. */
+    this.sessionPath = null;
+    /** Set when a past-chats list was requested before rift was running —
+     *  the request is sent once the `ready` handshake arrives. */
+    this.pendingListSessions = false;
     this.stderrTail = [];
     this.stdoutBuf = '';
     /** Context-window occupancy from rift's `context` events: estimated
@@ -456,6 +463,7 @@ class RiftChatProvider {
     <span id="ctx" class="hidden"></span>
     <span id="header-buttons">
       <button id="btn-undo" data-tip="Undo — revert the file edits from the last turn (changes made via bash are not tracked)">↶</button>
+      <button id="btn-history" data-tip="Past chats — reopen a previous conversation">🕘</button>
       <button id="btn-new" data-tip="New session — clear this conversation and start fresh">＋</button>
       <button id="btn-continue" data-tip="Continue — restart rift and resume your last saved session">↻</button>
     </span>
@@ -616,6 +624,17 @@ class RiftChatProvider {
     if (ev.event === 'ready') {
       this.model = ev.model;
       if (ev.num_ctx) this.ctxLimit = ev.num_ctx;
+      // Remember which session we're in so a reload reopens it, and so
+      // model/setting restarts stay on the same chat instead of jumping.
+      if (ev.session) {
+        this.sessionPath = ev.session;
+        this.context.workspaceState.update('rift.lastSession', ev.session);
+      }
+      // A history request that arrived before rift was up: answer it now.
+      if (this.pendingListSessions) {
+        this.pendingListSessions = false;
+        this.write({ cmd: 'list_sessions' });
+      }
       // Skills + plugin commands, completable in the webview as /skill:<name>.
       this.skills = ev.skills || [];
       // This extension speaks serve protocol v1 (docs/SERVE.md). An absent
@@ -643,6 +662,11 @@ class RiftChatProvider {
       this.ctxUsed = ev.used;
       this.ctxLimit = ev.limit;
       this.postStatus();
+      return;
+    } else if (ev.event === 'sessions') {
+      // Answer to a list_sessions request — a native quick-pick, not
+      // transcript, so handle it here and don't record/forward it.
+      this.showSessionPicker(ev.items || []);
       return;
     }
     // Thinking/content deltas are high-volume; replaying them is what makes
@@ -685,6 +709,17 @@ class RiftChatProvider {
         this.postStatus();
         this.postSettings();
         this.postModels();
+        // Reopen the last chat for this workspace so a VS Code reload or a
+        // plugin update doesn't drop the conversation. Only when nothing is
+        // running and nothing has replayed yet (a genuine cold open), and
+        // only if this workspace has a saved session to return to.
+        if (!this.proc && this.log.length === 0) {
+          const last = this.context.workspaceState.get('rift.lastSession');
+          if (last) {
+            this.sessionPath = last;
+            this.ensureServer(['--resume', last]);
+          }
+        }
         break;
       }
       case 'send': {
@@ -730,10 +765,14 @@ class RiftChatProvider {
         break;
       }
       case 'newSession':
+        this.sessionPath = null;
         this.restart([]);
         break;
       case 'continueSession':
         this.restart(['--continue']);
+        break;
+      case 'history':
+        this.requestSessions();
         break;
       case 'refreshModels':
         this.postModels();
@@ -747,7 +786,7 @@ class RiftChatProvider {
           .then(() => {
             // Respawn resuming the same session: the conversation continues
             // on the newly selected model (rift recomposes the system prompt).
-            if (this.proc) this.restart(['--continue']);
+            if (this.proc) this.restart(this.continueArgs());
             this.postSettings();
           });
         break;
@@ -768,7 +807,7 @@ class RiftChatProvider {
           cfg.update('temperature', num(m.temperature), vscode.ConfigurationTarget.Global),
           cfg.update('maxIterations', num(m.maxIterations), vscode.ConfigurationTarget.Global),
         ]).then(() => {
-          if (this.proc) this.restart(['--continue']);
+          if (this.proc) this.restart(this.continueArgs());
           this.postSettings();
           this.postModels();
         });
@@ -891,6 +930,57 @@ class RiftChatProvider {
     this.log = [];
     this.post({ type: 'reset' }, false);
     this.ensureServer(extraArgs);
+  }
+
+  /** Args to relaunch on the SAME chat (model/setting changes must not jump
+   *  to a different session). Falls back to the latest saved one if we don't
+   *  yet know our path. */
+  continueArgs() {
+    return this.sessionPath ? ['--resume', this.sessionPath] : ['--continue'];
+  }
+
+  /** Ask rift for the list of past chats. Needs a running process to answer;
+   *  if none is up yet, start one and send the request on `ready`. */
+  requestSessions() {
+    if (this.proc) {
+      this.write({ cmd: 'list_sessions' });
+    } else {
+      this.pendingListSessions = true;
+      this.ensureServer();
+    }
+  }
+
+  /** Native quick-pick of past chats; picking one reopens it by resuming
+   *  that session file. */
+  async showSessionPicker(items) {
+    if (!items.length) {
+      vscode.window.showInformationMessage('rift: no past chats saved yet');
+      return;
+    }
+    const when = (s) => {
+      if (!s) return '';
+      const diff = Date.now() / 1000 - s;
+      if (diff < 3600) return `${Math.max(1, Math.round(diff / 60))}m ago`;
+      if (diff < 86400) return `${Math.round(diff / 3600)}h ago`;
+      if (diff < 86400 * 7) return `${Math.round(diff / 86400)}d ago`;
+      return new Date(s * 1000).toLocaleDateString();
+    };
+    const picks = items.map((it) => ({
+      label: it.title || '(untitled chat)',
+      description: `${when(it.saved_at)} · ${it.turns} turn${it.turns === 1 ? '' : 's'}`,
+      detail: `${it.model || ''}${it.cwd ? ' · ' + it.cwd : ''}`,
+      path: it.path,
+      current: it.path === this.sessionPath,
+    }));
+    const pick = await vscode.window.showQuickPick(picks, {
+      placeHolder: 'Reopen a past chat',
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+    if (!pick || pick.current) return;
+    this.sessionPath = pick.path;
+    this.context.workspaceState.update('rift.lastSession', pick.path);
+    this.restart(['--resume', pick.path]);
   }
 
   /** Append text to the chat input (Add File/Selection to Prompt). */
