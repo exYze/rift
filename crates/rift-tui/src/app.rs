@@ -3925,6 +3925,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                         ("greedy retries", f.greedy_retries),
                                         ("truncations", f.truncations),
                                         ("template strips", f.template_strips),
+                                        ("budget wrap-ups", f.wrap_ups),
                                     ]
                                     .iter()
                                     .filter(|(_, n)| *n > 0)

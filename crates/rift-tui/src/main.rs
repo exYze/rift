@@ -134,7 +134,7 @@ struct Cli {
     /// stdin, one object per line (used by the VS Code extension's chat)
     #[arg(long)]
     serve: bool,
-    /// Max agent-loop iterations per turn [default: 25, or `max_iterations` in config]
+    /// Max agent-loop iterations per turn [default: 40, or `max_iterations` in config]
     #[arg(long)]
     max_iterations: Option<usize>,
     /// Resume the most recent session
@@ -279,7 +279,7 @@ async fn main() -> Result<()> {
             bail!("unknown effort '{e}' — use one of: {}", rift_core::EFFORT_LEVELS.join(", "));
         }
     }
-    let max_iterations = cli.max_iterations.or(config.max_iterations).unwrap_or(25);
+    let max_iterations = cli.max_iterations.or(config.max_iterations).unwrap_or(40);
 
     // A `provider/model` string routes through a configured provider; otherwise
     // the default Ollama server at `host`. `model` becomes the bare model name;

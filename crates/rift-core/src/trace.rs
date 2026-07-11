@@ -45,6 +45,9 @@ pub struct FailureCounters {
     pub compact_prunes: u32,
     /// Context pressure: history LLM-summarized (stage-2 compaction).
     pub compact_summaries: u32,
+    /// Iteration budget nearly exhausted; model told to wrap up with a
+    /// final answer (the turn's trace outcome becomes "wrapped").
+    pub wrap_ups: u32,
 }
 
 impl FailureCounters {
@@ -61,6 +64,7 @@ impl FailureCounters {
         self.template_strips += other.template_strips;
         self.compact_prunes += other.compact_prunes;
         self.compact_summaries += other.compact_summaries;
+        self.wrap_ups += other.wrap_ups;
     }
 
     /// Model-misbehavior interventions (excludes the compaction counters,
@@ -75,6 +79,7 @@ impl FailureCounters {
             + self.apply_nudges
             + self.greedy_retries
             + self.template_strips
+            + self.wrap_ups
     }
 }
 
@@ -100,7 +105,9 @@ pub struct TurnTrace<'a> {
     pub num_ctx: u64,
     /// Capped head of the user prompt (newlines flattened).
     pub prompt: String,
-    /// "answered" | "cancelled" | "max_iterations" | "error".
+    /// "answered" | "wrapped" | "cancelled" | "stuck" | "max_iterations" |
+    /// "error". "wrapped" = answered, but only after the iteration-budget
+    /// wrap-up nudge fired.
     pub outcome: &'a str,
     pub iterations: usize,
     pub prompt_tokens: u64,

@@ -59,7 +59,11 @@ impl Default for AgentConfig {
             // tool-calling flaky: the same task alternates between a proper
             // agentic run and a chat-only answer. Pin low for reliability.
             temperature: Some(0.2),
-            max_iterations: 25,
+            // Generous on purpose: fast models (DeepSeek-Flash style) take
+            // many small tool steps, and the doom-loop/stuck guards end
+            // genuinely wasted turns long before the cap — the cap only
+            // throttles productive turns, which now wrap up gracefully.
+            max_iterations: 40,
             think: None,
             effort: None,
             always_task: false,
@@ -412,9 +416,36 @@ impl Agent {
         let tools_overhead =
             compact::estimate_tokens(&serde_json::to_string(&tools).unwrap_or_default());
 
+        // Iteration-budget wrap-up: a turn that would burn the whole budget
+        // used to die with "no final answer" — every bit of the turn's work
+        // discarded. Instead, warn the model two rounds out, then strip the
+        // tools from the last call so the reply must be text: a model that
+        // takes many small steps (DeepSeek-Flash style) ends with a usable
+        // answer or a handoff summary instead of nothing. Tiny budgets skip
+        // the machinery — with 1-4 rounds total, every round is precious.
+        let budget_wrap = self.cfg.max_iterations >= 5;
+        let mut wrap_up_nudged = false;
+
         for iteration in 1..=self.cfg.max_iterations {
             stats.iterations = iteration;
             let _ = tx.send(AgentEvent::Iteration(iteration));
+
+            let final_iteration = budget_wrap && iteration == self.cfg.max_iterations;
+            if budget_wrap && !wrap_up_nudged && iteration + 1 >= self.cfg.max_iterations {
+                wrap_up_nudged = true;
+                stats.failures.wrap_ups += 1;
+                let _ = tx.send(AgentEvent::Info(format!(
+                    "iteration budget nearly used ({iteration}/{}); asking the model to wrap up",
+                    self.cfg.max_iterations
+                )));
+                self.messages.push(Message::user(
+                    "[system] You are nearly out of tool-call rounds for this turn. Finish NOW: \
+                     make at most one more essential tool call, then give your final answer in \
+                     plain text. If the task is unfinished, state exactly what you completed, \
+                     what remains, and where you left off — the user can send 'continue' to \
+                     resume from there.",
+                ));
+            }
 
             self.enforce_budget(tools_overhead, tx, &mut stats.failures).await;
 
@@ -441,7 +472,9 @@ impl Agent {
             let req = ChatRequest {
                 model: self.cfg.model.clone(),
                 messages: request_messages,
-                tools: tools.clone(),
+                // Final round: no tools, so the model can only answer in
+                // text (providers omit an empty list from the request).
+                tools: if final_iteration { vec![] } else { tools.clone() },
                 stream: true,
                 think: self.cfg.think,
                 effort: self.cfg.effort.clone(),
@@ -510,8 +543,9 @@ impl Agent {
                 msg.content = cleaned;
             }
 
-            // Recover tool calls the model emitted as plain JSON text.
-            if msg.tool_calls.is_empty() {
+            // Recover tool calls the model emitted as plain JSON text — but
+            // not on the wrap-up round, where text IS the deliverable.
+            if msg.tool_calls.is_empty() && !final_iteration {
                 let recovered = extract_textual_tool_calls(&msg.content, &known);
                 if !recovered.is_empty() {
                     stats.failures.textual_recoveries += 1;
@@ -544,7 +578,7 @@ impl Agent {
                 // code) — either pure chat, or it explored with read-only
                 // tools and then "fixed" the task in its reply. Nudge once to
                 // apply for real.
-                if !used_mutating && !nudged_apply && !chat_output && (content_has_code || actionable_prompt) {
+                if !final_iteration && !used_mutating && !nudged_apply && !chat_output && (content_has_code || actionable_prompt) {
                     nudged_apply = true;
                     stats.failures.apply_nudges += 1;
                     let _ = tx.send(AgentEvent::Warning(
@@ -562,7 +596,7 @@ impl Agent {
                 // the chat-only attempt entirely and retry greedily — at
                 // temperature 0 the model reliably follows the tool-calling
                 // instructions. Headless/swarm only (no human to confuse).
-                if !used_tools && !retried_greedy && self.cfg.always_task && !chat_output {
+                if !final_iteration && !used_tools && !retried_greedy && self.cfg.always_task && !chat_output {
                     retried_greedy = true;
                     nudged_apply = false;
                     stats.failures.greedy_retries += 1;
@@ -586,7 +620,10 @@ impl Agent {
                     continue;
                 }
                 stats.duration_ms = start.elapsed().as_millis();
-                self.write_trace(user_input, "answered", &stats, &tool_records, tx);
+                // "wrapped" = answered under budget pressure (the wrap-up
+                // nudge fired this turn) — worth telling apart in traces.
+                let outcome = if wrap_up_nudged { "wrapped" } else { "answered" };
+                self.write_trace(user_input, outcome, &stats, &tool_records, tx);
                 let _ = tx.send(AgentEvent::Done(stats.clone()));
                 return Ok(stats);
             }
@@ -876,6 +913,104 @@ mod tests {
         // Beyond the marks → a clear error, nothing changes.
         assert!(agent.rewind(5).is_err());
         assert_eq!(agent.messages.len(), 3);
+    }
+
+    /// Calls a (varying) tool while tools are offered; answers in text once
+    /// the request arrives with none — the wrap-up round's shape.
+    struct BusyProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for BusyProvider {
+        fn base_url(&self) -> &str {
+            "stub"
+        }
+        async fn tags(&self) -> Result<Vec<rift_provider::ModelEntry>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _m: &str) -> Result<rift_provider::ModelCapabilities> {
+            Ok(rift_provider::ModelCapabilities::default())
+        }
+        async fn chat_stream(
+            &self,
+            req: &ChatRequest,
+            _on_delta: &mut (dyn FnMut(StreamDelta) + Send),
+        ) -> Result<rift_provider::ChatOutcome> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut message = Message {
+                role: Role::Assistant,
+                content: String::new(),
+                thinking: None,
+                tool_calls: vec![],
+                tool_name: None,
+                tool_call_id: None,
+                provider_data: None,
+                images: vec![],
+            };
+            if req.tools.is_empty() {
+                message.content = "wrap-up: listed the directory repeatedly; nothing remains".into();
+            } else {
+                let mut args = serde_json::Map::new();
+                args.insert("path".into(), serde_json::Value::String(".".into()));
+                // Varies per call so the doom-loop guard never trips.
+                args.insert("nonce".into(), serde_json::Value::from(n as u64));
+                message.tool_calls = vec![rift_provider::ToolCall {
+                    id: Some(format!("c{n}")),
+                    function: rift_provider::ToolCallFunction {
+                        index: None,
+                        name: "ls".into(),
+                        arguments: args,
+                    },
+                }];
+            }
+            Ok(rift_provider::ChatOutcome {
+                message,
+                done_reason: None,
+                stats: rift_provider::ChatStats::default(),
+                truncation_suspected: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_exhaustion_wraps_up_with_a_text_answer() {
+        // A model that would happily call tools forever must end the turn
+        // with a text answer, not "stopped without a final answer".
+        let cfg = AgentConfig { max_iterations: 6, ..Default::default() };
+        let mut agent = Agent::new(
+            Arc::new(BusyProvider { calls: 0.into() }),
+            cfg,
+            ToolRegistry::standard(),
+            ToolCtx::new(std::env::temp_dir()),
+            "system".into(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let stats = agent.run_turn("poke around the directory", &tx, &cancel).await.unwrap();
+
+        assert_eq!(stats.iterations, 6, "must run to the budget, not past it");
+        assert_eq!(stats.failures.wrap_ups, 1);
+        // The wrap-up nudge landed in history before the final round…
+        assert!(agent
+            .messages
+            .iter()
+            .any(|m| m.role == Role::User && m.content.contains("nearly out of tool-call rounds")));
+        // …and the turn ended with the model's text answer.
+        let last = agent.messages.last().unwrap();
+        assert_eq!(last.role, Role::Assistant);
+        assert!(last.content.contains("wrap-up"));
+        // The turn completed cleanly: a Done event, no budget-death warning.
+        let mut saw_done = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AgentEvent::Done(_) => saw_done = true,
+                AgentEvent::Warning(w) => {
+                    assert!(!w.contains("without a final answer"), "budget death still fired: {w}")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_done);
     }
 
     #[test]
