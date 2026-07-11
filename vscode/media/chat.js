@@ -115,7 +115,12 @@
       }
     };
     const closeFence = () => {
-      out.push(codeBlock(fenceBuf.join('\n'), fenceLang));
+      // Stray/empty fences (a model tic around tool calls) would render as
+      // bare code-block bars — thin phantom lines in the transcript. Skip
+      // them; a fence still streaming renders once content arrives.
+      if (fenceBuf.join('\n').trim()) {
+        out.push(codeBlock(fenceBuf.join('\n'), fenceLang));
+      }
       fenceBuf = [];
       fenceLang = '';
     };
@@ -350,21 +355,25 @@
   }
 
   function assistantBlock(text, streaming) {
-    if (streaming && assistantEl) {
+    if (streaming) {
       assistantRaw += text;
+      // Whitespace-only deltas between tool calls must not open a block:
+      // each empty block eats a flex-gap slot (a phantom blank row) and
+      // needlessly breaks the current tool-activity box.
+      if (!assistantEl) {
+        if (!assistantRaw.trim()) return;
+        assistantEl = add(Object.assign(document.createElement('div'), { className: 'msg assistant' }));
+      }
       const stick = atBottom();
       assistantEl.innerHTML = md(assistantRaw);
       if (stick) messages.scrollTop = messages.scrollHeight;
       return;
     }
+    if (!text.trim()) return;
     const el = document.createElement('div');
     el.className = 'msg assistant';
     el.innerHTML = md(text);
     add(el);
-    if (streaming) {
-      assistantEl = el;
-      assistantRaw = text;
-    }
   }
 
   function askCard(ev) {
@@ -421,6 +430,31 @@
       card.appendChild(row);
       field.focus();
     }
+    add(card);
+  }
+
+  /** Red/green summary of a change rift applied to a file. Head shows the
+   *  path and ±counts; click toggles the diff body. */
+  function diffCard(ev) {
+    const card = document.createElement('div');
+    card.className = 'diff-card';
+    const head = document.createElement('div');
+    head.className = 'diff-head';
+    head.textContent = `✎ ${ev.path} · +${ev.added} −${ev.removed}`;
+    head.setAttribute('data-tip', 'Change rift applied to this file — click to show/hide the diff');
+    const body = document.createElement('pre');
+    body.className = 'diff-body';
+    for (const l of ev.diff || []) {
+      const span = document.createElement('span');
+      span.textContent = l + '\n';
+      if (l.startsWith('+')) span.className = 'diff-add';
+      else if (l.startsWith('-')) span.className = 'diff-del';
+      else span.className = 'diff-meta';
+      body.appendChild(span);
+    }
+    head.addEventListener('click', () => body.classList.toggle('hidden'));
+    card.appendChild(head);
+    card.appendChild(body);
     add(card);
   }
 
@@ -502,6 +536,9 @@
         assistantBlock(ev.text, true);
         break;
       case 'thinking': {
+        // Don't open a reasoning block for whitespace-only deltas — an
+        // empty .thinking div is another phantom row in the transcript.
+        if (!thinkingEl && !ev.text.trim()) break;
         if (!thinkingEl) {
           thinkingEl = document.createElement('div');
           thinkingEl.className = 'thinking';
@@ -555,6 +592,9 @@
       }
       case 'ask':
         askCard(ev);
+        break;
+      case 'edit_diff':
+        diffCard(ev);
         break;
       case 'plan':
         renderPlan(ev.items);

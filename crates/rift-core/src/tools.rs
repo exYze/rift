@@ -161,7 +161,14 @@ pub struct ToolCtx {
         std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<EditReviewRequest>>>>,
     /// SearXNG endpoint for the web_search tool; None = search unavailable.
     search_url: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// ± preview of the change the LAST successful write/edit applied. The
+    /// agent loop takes it right after the call and surfaces it as an
+    /// EditDiff event, so frontends can show what actually changed.
+    last_diff: LastDiffSlot,
 }
+
+/// (edited file, capped ± preview lines) of the most recent write/edit.
+type LastDiffSlot = std::sync::Arc<std::sync::Mutex<Option<(PathBuf, Vec<String>)>>>;
 
 /// The "always allow" pattern offered for a command: program + subcommand
 /// when the second token looks like one (`git push …` → `git push *`),
@@ -203,7 +210,20 @@ impl ToolCtx {
             bash_wrapper: std::sync::Arc::new(std::sync::Mutex::new(None)),
             edit_review: std::sync::Arc::new(std::sync::Mutex::new(None)),
             search_url: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            last_diff: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Record the ± preview of a just-applied write/edit (see `last_diff`).
+    fn record_last_diff(&self, path: &Path, diff: Vec<String>) {
+        if let Ok(mut d) = self.last_diff.lock() {
+            *d = Some((path.to_path_buf(), diff));
+        }
+    }
+
+    /// Take the pending change preview, leaving None.
+    pub fn take_last_diff(&self) -> Option<(PathBuf, Vec<String>)> {
+        self.last_diff.lock().ok().and_then(|mut d| d.take())
     }
 
     /// Set/clear the SearXNG endpoint (startup, /search, /config reload).
@@ -305,6 +325,8 @@ impl ToolCtx {
             edit_review: self.edit_review.clone(),
             // Research sub-agents search too.
             search_url: self.search_url.clone(),
+            // Own slot: a child's edits surface through its own loop.
+            last_diff: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1294,8 +1316,14 @@ impl Tool for WriteTool {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        ctx.record_edit(path.clone(), prior);
+        ctx.record_edit(path.clone(), prior.clone());
         tokio::fs::write(&path, &content).await.with_context(|| format!("cannot write {}", path.display()))?;
+        // Surface what actually changed (post-review content) — skipped for
+        // binary priors, where a line diff means nothing.
+        if !prior.as_ref().is_some_and(|b| looks_binary(b)) {
+            let old = prior.as_ref().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+            ctx.record_last_diff(&path, preview_diff(&old, &content, 80));
+        }
         let mut result = format!("Wrote {} bytes to {}", content.len(), path.display());
         if content != req_str(args, "content")? {
             result.push_str(
@@ -1425,6 +1453,7 @@ impl Tool for EditTool {
             .await?;
         ctx.record_edit(path.clone(), Some(text.clone().into_bytes()));
         tokio::fs::write(&path, &applied).await?;
+        ctx.record_last_diff(&path, preview_diff(&text, &applied, 80));
         let mut result =
             format!("Edited {} ({} replacement{})", path.display(), count, if count == 1 { "" } else { "s" });
         if applied != updated {
@@ -2538,6 +2567,34 @@ mod tests {
         // Single-sentence descriptions pass through whole.
         let short = lean_def("ls", "List a directory", serde_json::json!({"type": "object"}));
         assert_eq!(short.function.description, "List a directory");
+    }
+
+    #[tokio::test]
+    async fn write_and_edit_record_a_last_diff() {
+        let dir = std::env::temp_dir().join(format!("rift-lastdiff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ToolCtx::new(&dir);
+        let reg = ToolRegistry::standard();
+
+        let args: Map<String, Value> =
+            serde_json::from_value(serde_json::json!({"path": "f.txt", "content": "a\nb\n"})).unwrap();
+        reg.get("write").unwrap().execute(&args, &ctx).await.unwrap();
+        let (path, diff) = ctx.take_last_diff().expect("write records a diff");
+        assert!(path.ends_with("f.txt"));
+        assert!(diff.iter().any(|l| l == "+a"), "got: {diff:?}");
+        // take drains: the agent loop consumes it once per call.
+        assert!(ctx.take_last_diff().is_none());
+
+        let args: Map<String, Value> = serde_json::from_value(
+            serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "c"}),
+        )
+        .unwrap();
+        reg.get("edit").unwrap().execute(&args, &ctx).await.unwrap();
+        let (_, diff) = ctx.take_last_diff().expect("edit records a diff");
+        assert!(diff.iter().any(|l| l == "-b"), "got: {diff:?}");
+        assert!(diff.iter().any(|l| l == "+c"), "got: {diff:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

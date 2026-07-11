@@ -94,6 +94,16 @@ fn event_json(ev: &AgentEvent) -> Value {
         AgentEvent::Context { used, limit } => {
             json!({"event": "context", "used": used, "limit": limit})
         }
+        // Additive (still protocol v1): consumers that don't know the event
+        // ignore the line. added/removed are precomputed so slim renderers
+        // can show a "+3 −1" head without parsing the diff body.
+        AgentEvent::EditDiff { path, diff } => json!({
+            "event": "edit_diff",
+            "path": path,
+            "added": diff.iter().filter(|l| l.starts_with('+')).count(),
+            "removed": diff.iter().filter(|l| l.starts_with('-')).count(),
+            "diff": diff,
+        }),
     }
 }
 

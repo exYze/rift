@@ -60,6 +60,7 @@ Turn flow:
 | `content` | `text` | Streamed assistant reply text. |
 | `tool_start` | `name`, `args` | A tool call begins. `args` is the raw arguments object. |
 | `tool_result` | `name`, `ok`, `preview` | Tool finished; `preview` is a short result excerpt. |
+| `edit_diff` | `path`, `added`, `removed`, `diff`: [string] | A write/edit was applied (added in 2.6, additive): `diff` is a capped ± preview of the change (`@@ line N @@` context markers, `-old`, `+new` lines), `added`/`removed` precomputed for slim headers. Emitted right after the corresponding `tool_result`. |
 | `plan` | `items`: [{`text`,`done`}] | The agent's live checklist; replaces the previous plan. |
 | `done` | `stats`: {`iterations`, `prompt_tokens`, `billed_prompt_tokens`, `output_tokens`, `duration_ms`, `tokens_per_sec`} | **Always ends a turn**, success or error. |
 

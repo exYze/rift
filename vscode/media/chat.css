@@ -290,8 +290,38 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
   max-height: 200px;
   overflow-y: auto;
 }
-.ask .diff-add { color: var(--vscode-gitDecoration-addedResourceForeground, #4a4); }
-.ask .diff-del { color: var(--vscode-gitDecoration-deletedResourceForeground, #d55); }
+.diff-add { color: var(--vscode-gitDecoration-addedResourceForeground, #4a4); }
+.diff-del { color: var(--vscode-gitDecoration-deletedResourceForeground, #d55); }
+.diff-meta { opacity: 0.55; }
+
+/* Applied-change card: what a write/edit actually did, red/green. */
+.diff-card {
+  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
+  border-radius: 5px;
+  overflow: hidden;
+}
+.diff-head {
+  font-size: 0.82em;
+  padding: 3px 8px;
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--vscode-editor-font-family, monospace);
+  background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.12));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diff-head:hover { opacity: 1; }
+.diff-body {
+  margin: 0;
+  padding: 4px 8px;
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+  white-space: pre;
+}
+.diff-body.hidden { display: none; }
 .ask .choices { display: flex; flex-wrap: wrap; gap: 6px; }
 .ask button {
   background: var(--vscode-button-background);
