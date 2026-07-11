@@ -246,8 +246,13 @@ async fn main() -> Result<()> {
     // built-in default — so `rift` with no flags uses your configured server.
     let cwd = std::env::current_dir()?;
     let loaded = Config::load(&cwd)?;
+    // `rift update` just swaps the binary — it doesn't use config, so the
+    // "config: …" provenance lines are noise there. Warnings still print.
+    let announce_config = !matches!(cli.cmd, Some(Cmd::Update));
     for p in &loaded.paths {
-        eprintln!("config: {}", p.display());
+        if announce_config {
+            eprintln!("config: {}", p.display());
+        }
     }
     for w in &loaded.warnings {
         eprintln!("warning: {w}");
@@ -316,7 +321,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some(Cmd::Update) => {
-            println!("{}", update::self_update(env!("CARGO_PKG_VERSION")).await?);
+            print!("{}", update::self_update(env!("CARGO_PKG_VERSION")).await?.cli_banner());
             return Ok(());
         }
         // Handled before the config load; a broken config must not block it.

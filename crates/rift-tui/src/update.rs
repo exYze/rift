@@ -121,14 +121,53 @@ pub async fn check_for_update(current: &str) -> Option<String> {
 /// Download the latest release binary for this platform and replace the
 /// running executable (write-then-rename: atomic, and a fresh inode so
 /// macOS's signature cache never sees a modified file).
-pub async fn self_update(current: &str) -> Result<String> {
+/// Result of a self-update, so each surface can present it its own way: the
+/// CLI paints a colored banner, the in-TUI `/update` shows a plain line (it
+/// renders as transcript text, where raw ANSI would be garbage).
+pub enum UpdateOutcome {
+    Updated { from: String, to: String, path: PathBuf },
+    AlreadyCurrent { version: String },
+}
+
+impl UpdateOutcome {
+    pub fn did_update(&self) -> bool {
+        matches!(self, UpdateOutcome::Updated { .. })
+    }
+
+    /// Plain, ANSI-free line for the in-TUI `/update` transcript.
+    pub fn plain(&self) -> String {
+        match self {
+            UpdateOutcome::Updated { from, to, .. } => format!("rift updated · v{from} → v{to}"),
+            UpdateOutcome::AlreadyCurrent { version } => format!("rift is already up to date (v{version})"),
+        }
+    }
+
+    /// Colored, multi-line banner for the terminal `rift update` command.
+    pub fn cli_banner(&self) -> String {
+        match self {
+            UpdateOutcome::Updated { from, to, path } => format!(
+                "\n  \x1b[38;5;44m\x1b[1m✦ rift\x1b[0m updated   \x1b[2mv{from}\x1b[0m \x1b[38;5;44m→\x1b[0m \x1b[1;38;5;48mv{to}\x1b[0m\n\
+                 \x1b[2m  ↳ {}\x1b[0m\n\
+                 \x1b[2m  restart rift or your editor to run the new version\x1b[0m\n",
+                path.display()
+            ),
+            UpdateOutcome::AlreadyCurrent { version } => {
+                format!("\n  \x1b[1;38;5;48m✓\x1b[0m rift is already on the latest release \x1b[2m(v{version})\x1b[0m\n")
+            }
+        }
+    }
+}
+
+pub async fn self_update(current: &str) -> Result<UpdateOutcome> {
     let target = release_target()
         .with_context(|| format!("no prebuilt binary for {}-{}; update via cargo or the install script", std::env::consts::OS, std::env::consts::ARCH))?;
 
     let latest_tag = fetch_latest_tag().await.context("cannot reach GitHub to check the latest release")?;
     let latest = latest_tag.trim_start_matches('v').to_string();
     match (parse_version(&latest), parse_version(current)) {
-        (Some(l), Some(c)) if l <= c => return Ok(format!("already up to date (v{current})")),
+        (Some(l), Some(c)) if l <= c => {
+            return Ok(UpdateOutcome::AlreadyCurrent { version: current.to_string() })
+        }
         _ => {}
     }
 
@@ -164,7 +203,7 @@ pub async fn self_update(current: &str) -> Result<String> {
     if let Err(e) = std::fs::rename(&staged, &exe) {
         bail!("cannot replace {}: {e} (is it in a directory you can write to?)", exe.display());
     }
-    Ok(format!("updated v{current} → v{latest} ({})", exe.display()))
+    Ok(UpdateOutcome::Updated { from: current.to_string(), to: latest, path: exe })
 }
 
 #[cfg(test)]
@@ -178,5 +217,28 @@ mod tests {
         assert_eq!(parse_version("v1.0.0-rc1"), Some((1, 0, 0)));
         assert!(parse_version("v0.10.0") > parse_version("v0.9.9"));
         assert!(parse_version("not a version").is_none());
+    }
+
+    #[test]
+    fn update_outcome_renders_plain_and_banner() {
+        let up = UpdateOutcome::Updated {
+            from: "2.3.0".into(),
+            to: "2.4.0".into(),
+            path: PathBuf::from("/usr/local/bin/rift"),
+        };
+        assert!(up.did_update());
+        // The in-TUI line is plain: versions present, no escape codes.
+        assert_eq!(up.plain(), "rift updated · v2.3.0 → v2.4.0");
+        assert!(!up.plain().contains('\x1b'));
+        // The CLI banner is colored and shows both versions and the path.
+        let banner = up.cli_banner();
+        assert!(banner.contains('\x1b'));
+        assert!(banner.contains("v2.3.0") && banner.contains("v2.4.0"));
+        assert!(banner.contains("/usr/local/bin/rift"));
+
+        let cur = UpdateOutcome::AlreadyCurrent { version: "2.4.0".into() };
+        assert!(!cur.did_update());
+        assert_eq!(cur.plain(), "rift is already up to date (v2.4.0)");
+        assert!(!cur.plain().contains('\x1b'));
     }
 }
