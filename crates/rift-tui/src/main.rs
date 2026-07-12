@@ -246,14 +246,9 @@ async fn main() -> Result<()> {
     // built-in default — so `rift` with no flags uses your configured server.
     let cwd = std::env::current_dir()?;
     let loaded = Config::load(&cwd)?;
-    // `rift update` just swaps the binary — it doesn't use config, so the
-    // "config: …" provenance lines are noise there. Warnings still print.
-    let announce_config = !matches!(cli.cmd, Some(Cmd::Update));
-    for p in &loaded.paths {
-        if announce_config {
-            eprintln!("config: {}", p.display());
-        }
-    }
+    // No "config: …" provenance line at startup — it's noise before every
+    // launch; `/config` in the TUI shows which files loaded. Warnings still
+    // print (a malformed config must not fail silently).
     for w in &loaded.warnings {
         eprintln!("warning: {w}");
     }

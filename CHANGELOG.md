@@ -3,6 +3,29 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.6.1 — 2026-07-12
+
+- **VS Code chat: ruled-line spam is gone for real**: the "phantom thin
+  lines" had one more source beyond v2.6.0's fixes — models (DeepSeek
+  especially) draw section separators and ASCII table borders as raw runs
+  of `-`/`─`/`═` characters, which rendered as literal full-width dash
+  lines. Any rule-only line now collapses to a single subtle horizontal
+  rule, consecutive rules dedupe, rules at a message's edges are dropped,
+  and fragments that render to nothing no longer open (or split) blocks.
+  Reproduced and verified against a scripted model with the exact failing
+  transcript shape. Note: chat rendering ships with the extension — update
+  the .vsix; `rift update` alone only updates the binary.
+- **`rift` startup no longer prints the `config:` line**: the provenance
+  line is noise before every launch; `/config` in the TUI still shows which
+  files loaded, and config warnings still print.
+- **Orchestration is the default, not an ask**: the deepseek and default
+  system prompts now tell the model to delegate to sub-agents on anything
+  that isn't a quick question or a trivial single-file change — no more
+  typing "use subagents" per request. Quick lookups, obvious one-file
+  edits, and follow-ups to in-conversation work stay direct. (The
+  gemma/qwen/glm/mistral family prompts are unchanged — small local models
+  orchestrate poorly, so delegation there stays opt-in.)
+
 ## v2.6.0 — 2026-07-11
 
 - **Turns wrap up instead of dying at the iteration cap**: a busy model
