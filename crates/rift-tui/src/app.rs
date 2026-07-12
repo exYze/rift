@@ -329,7 +329,13 @@ impl Pane {
             // multi-line strings and comments color correctly.
             let mut in_fence = false;
             let mut hl: Option<crate::highlight::BlockHighlighter> = None;
-            for raw_line in prefixed.lines() {
+            // Indexed loop: tables need lookahead (the |---| delimiter row
+            // is what makes the line above it a header).
+            let block_lines: Vec<&str> = prefixed.lines().collect();
+            let mut li = 0;
+            while li < block_lines.len() {
+                let raw_line = block_lines[li];
+                li += 1;
                 // A ``` line opens or closes the box (and is not itself drawn).
                 if block.kind == Kind::Assistant && raw_line.trim_start().starts_with("```") {
                     if in_fence {
@@ -380,6 +386,42 @@ impl Pane {
                         }
                     }
                     continue;
+                }
+                // Assistant prose: rules collapse to one clean line, pipe
+                // tables render as aligned columns instead of raw | walls.
+                if block.kind == Kind::Assistant {
+                    if md_is_rule(raw_line) {
+                        let rule = "─".repeat(w.min(48));
+                        // Dedup past blank lines too: `---`, blank, `---`
+                        // (a model tic) must still collapse to ONE rule.
+                        let last_visible =
+                            self.wrapped.iter().rev().find(|l| !l.text.trim().is_empty());
+                        if last_visible.is_none_or(|l| l.text != rule) {
+                            self.wrapped.push(WrappedLine {
+                                kind: Kind::Assistant,
+                                text: rule.clone(),
+                                spans: Some(vec![(t.muted, rule)]),
+                            });
+                        }
+                        continue;
+                    }
+                    if raw_line.contains('|')
+                        && li < block_lines.len()
+                        && md_is_table_delim(block_lines[li])
+                    {
+                        let mut end = li + 1;
+                        while end < block_lines.len()
+                            && block_lines[end].contains('|')
+                            && !block_lines[end].trim().is_empty()
+                        {
+                            end += 1;
+                        }
+                        for wl in md_render_table(raw_line, &block_lines[li + 1..end], w, t) {
+                            self.wrapped.push(wl);
+                        }
+                        li = end;
+                        continue;
+                    }
                 }
                 // Non-fenced content: diffs hard-cut, everything else wraps.
                 let kind = block.kind;
@@ -584,6 +626,128 @@ fn md_bullet(line: &str) -> String {
         }
     }
     line.to_string()
+}
+
+/// A thematic-break line: nothing but 3+ rule characters. Models (DeepSeek
+/// especially) also draw ASCII rules as long runs of -/─/═; both collapse
+/// to one clean horizontal rule instead of a raw dash wall.
+fn md_is_rule(line: &str) -> bool {
+    let s = line.trim();
+    s.chars().count() >= 3 && s.chars().all(|c| matches!(c, '-' | '─' | '—' | '━' | '═' | '_' | '=' | '*'))
+}
+
+/// A GFM table delimiter row (`|---|:--:|…`) — the line that makes the row
+/// above it a header.
+fn md_is_table_delim(line: &str) -> bool {
+    let s = line.trim();
+    s.contains('|')
+        && s.matches('-').count() >= 2
+        && s.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// Cells of one table row: split on `|`, outer pipes dropped, `` ` `` and
+/// `**` markers consumed (color is per-row here, not per-cell).
+fn md_table_cells(row: &str) -> Vec<String> {
+    let mut s = row.trim();
+    s = s.strip_prefix('|').unwrap_or(s);
+    s = s.strip_suffix('|').unwrap_or(s);
+    s.split('|').map(|c| c.trim().replace("**", "").replace('`', "")).collect()
+}
+
+/// Render a pipe table as aligned columns: heading-colored header, a ─ rule
+/// under it, cells padded (and `…`-truncated) to fit the pane width.
+fn md_render_table(header: &str, body: &[&str], w: usize, t: &theme::Theme) -> Vec<WrappedLine> {
+    const GAP: usize = 2;
+    const MIN_COL: usize = 4;
+    let rows: Vec<Vec<String>> =
+        std::iter::once(header).chain(body.iter().copied()).map(md_table_cells).collect();
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if cols == 0 {
+        return vec![];
+    }
+    let mut widths: Vec<usize> = (0..cols)
+        .map(|i| rows.iter().map(|r| r.get(i).map_or(0, |c| c.chars().count())).max().unwrap_or(0).max(MIN_COL))
+        .collect();
+    // Over-wide table: shave the widest column until it fits (or every
+    // column is at the floor — then the pane hard-clips, which is fine).
+    let fits = |ws: &[usize]| ws.iter().sum::<usize>() + GAP * (cols - 1) <= w;
+    while !fits(&widths) {
+        let Some((imax, _)) = widths.iter().enumerate().max_by_key(|(_, n)| **n) else { break };
+        if widths[imax] <= MIN_COL {
+            break;
+        }
+        widths[imax] -= 1;
+    }
+    let pad_row = |cells: &[String]| -> String {
+        let mut line = String::new();
+        for (i, width) in widths.iter().enumerate() {
+            let cell = cells.get(i).map(String::as_str).unwrap_or("");
+            let mut shown: String = cell.chars().take(*width).collect();
+            if shown.chars().count() < cell.chars().count() {
+                shown.pop();
+                shown.push('…');
+            }
+            let pad = width.saturating_sub(shown.chars().count());
+            line.push_str(&shown);
+            if i + 1 < cols {
+                line.push_str(&" ".repeat(pad + GAP));
+            }
+        }
+        line
+    };
+    let total: usize = widths.iter().sum::<usize>() + GAP * (cols - 1);
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    out.push(WrappedLine {
+        kind: Kind::Assistant,
+        text: pad_row(&rows[0]),
+        spans: Some(vec![(t.accent, pad_row(&rows[0]))]),
+    });
+    out.push(WrappedLine {
+        kind: Kind::Assistant,
+        text: "─".repeat(total.min(w)),
+        spans: Some(vec![(t.muted, "─".repeat(total.min(w)))]),
+    });
+    for cells in &rows[1..] {
+        out.push(WrappedLine::plain(Kind::Assistant, pad_row(cells)));
+    }
+    out
+}
+
+/// Compact display of a tool call for the activity log: the salient
+/// argument first (path, command, pattern…), remaining args as k=v, JSON
+/// braces and quotes dropped. Falls back to the raw JSON head when the
+/// arguments don't parse.
+fn tool_call_summary(name: &str, args_json: &str) -> String {
+    let clip = |s: &str, max: usize| -> String {
+        let flat = s.replace('\n', " ");
+        let mut out: String = flat.chars().take(max).collect();
+        if out.chars().count() < flat.chars().count() {
+            out.push('…');
+        }
+        out
+    };
+    let scalar = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(args_json)
+    else {
+        return format!("→ {name} {}", clip(args_json, 120));
+    };
+    const SALIENT: &[&str] = &["path", "command", "pattern", "url", "query", "condition"];
+    let salient = SALIENT.iter().find(|k| map.contains_key(**k)).copied();
+    let mut out = format!("→ {name}");
+    if let Some(key) = salient {
+        out.push(' ');
+        out.push_str(&clip(&scalar(&map[key]), 90));
+    }
+    for (key, value) in &map {
+        if Some(key.as_str()) == salient {
+            continue;
+        }
+        out.push_str(&format!(" {key}={}", clip(&scalar(value), 40)));
+    }
+    out
 }
 
 /// Split one line into colored spans: `` `code` `` gets the code color,
@@ -1088,6 +1252,68 @@ mod tests {
     }
 
     #[test]
+    fn rules_and_table_delims_detect() {
+        assert!(md_is_rule("---"));
+        assert!(md_is_rule("  ────────────  "));
+        assert!(md_is_rule(&"-".repeat(72)));
+        assert!(md_is_rule("========"));
+        assert!(!md_is_rule("--"));
+        assert!(!md_is_rule("- item"));
+        assert!(!md_is_rule("a---b"));
+
+        assert!(md_is_table_delim("|---|---|"));
+        assert!(md_is_table_delim("| :--- | :--: |"));
+        assert!(!md_is_table_delim("| File | Purpose |"));
+        assert!(!md_is_table_delim("just text"));
+    }
+
+    #[test]
+    fn tables_render_as_aligned_columns() {
+        let lines = md_render_table(
+            "| File | Purpose |",
+            &["| `README.md` | Project overview |", "| main.py | FastAPI entry point |"],
+            60,
+            &theme::DARK,
+        );
+        // header + rule + 2 body rows
+        assert_eq!(lines.len(), 4);
+        // Backticks are consumed, columns align at the same offset.
+        assert!(lines[2].text.starts_with("README.md"));
+        assert!(!lines[2].text.contains('`') && !lines[2].text.contains('|'));
+        let col2 = |s: &str| s.find("Purpose").or_else(|| s.find("Project")).or_else(|| s.find("FastAPI")).unwrap();
+        assert_eq!(col2(&lines[0].text), col2(&lines[2].text));
+        assert_eq!(col2(&lines[2].text), col2(&lines[3].text));
+        assert!(lines[1].text.starts_with('─'), "rule under the header");
+
+        // Over-wide tables shrink and truncate with … instead of wrapping.
+        let narrow = md_render_table(
+            "| A | B |",
+            &["| averyveryverylongcellvaluethatcannotfit | second |"],
+            20,
+            &theme::DARK,
+        );
+        assert!(narrow.iter().all(|l| l.text.chars().count() <= 20));
+        assert!(narrow[2].text.contains('…'));
+    }
+
+    #[test]
+    fn tool_call_summaries_lead_with_the_salient_arg() {
+        assert_eq!(
+            tool_call_summary("read", r#"{"path":"backend/main.py"}"#),
+            "→ read backend/main.py"
+        );
+        let s = tool_call_summary(
+            "edit",
+            r#"{"path":"stats.py","old_string":"a\nb","new_string":"c"}"#,
+        );
+        assert!(s.starts_with("→ edit stats.py"), "got: {s}");
+        assert!(s.contains("old_string=a b"), "newlines flatten: {s}");
+        // Unparseable args fall back to the raw head, capped.
+        let raw = tool_call_summary("bash", "not-json");
+        assert_eq!(raw, "→ bash not-json");
+    }
+
+    #[test]
     fn fenced_code_renders_as_a_labeled_box() {
         let mut p = Pane::new();
         p.set_syntax(None); // flat colors -> deterministic text assertions
@@ -1466,10 +1692,8 @@ impl App {
                         self.transcript.push_block(Kind::Assistant, msg.content.clone());
                     }
                     for tc in &msg.tool_calls {
-                        self.log.push_block(
-                            Kind::Tool,
-                            format!("→ {} {}", tc.function.name, serde_json::to_string(&tc.function.arguments).unwrap_or_default()),
-                        );
+                        let args = serde_json::to_string(&tc.function.arguments).unwrap_or_default();
+                        self.log.push_block(Kind::Tool, tool_call_summary(&tc.function.name, &args));
                     }
                 }
                 Role::Tool => {
@@ -1616,8 +1840,7 @@ impl App {
             }
             AgentEvent::ToolStart { name, args } => {
                 self.session_stats.tool_calls += 1;
-                let args: String = args.chars().take(160).collect();
-                self.log.push_block(Kind::Tool, format!("→ {name} {args}"));
+                self.log.push_block(Kind::Tool, tool_call_summary(&name, &args));
                 self.status = format!("running {name}…");
             }
             AgentEvent::ToolResult { name, ok, preview } => {
@@ -1630,9 +1853,14 @@ impl App {
                 );
             }
             // The TUI's diff pane (Tab) already shows the working-tree diff;
-            // the per-edit preview just marks the applied change in the log.
+            // the per-edit preview marks the applied change in the log, with
+            // real ± coloring line by line.
             AgentEvent::EditDiff { path, diff } => {
-                self.log.push_block(Kind::Tool, format!("✎ {path}\n{}", diff.join("\n")));
+                self.log.push_line(Kind::Tool, format!("✎ {path}"));
+                for l in &diff {
+                    self.log.push_line(diff_kind(l), l.clone());
+                }
+                self.log.push_line(Kind::Info, String::new());
             }
             AgentEvent::Info(i) => {
                 if i.starts_with("compacted") {
@@ -2914,6 +3142,10 @@ pub struct TuiOptions {
     pub ask_rx: mpsc::UnboundedReceiver<AskRequest>,
     pub skills: Vec<Skill>,
     pub host: String,
+    /// The host/model came from a CLI flag or env var (not config), so a
+    /// /restart must pin it again — config alone must not override it.
+    pub host_pinned: bool,
+    pub model_pinned: bool,
     pub providers: std::collections::HashMap<String, rift_core::ProviderConfig>,
     /// Config `pricing` map for the cost display (built-ins live in
     /// crate::pricing).
@@ -2921,16 +3153,20 @@ pub struct TuiOptions {
     pub theme: theme::Theme,
 }
 
-/// How to relaunch after /restart: the addressable model name (provider
-/// prefix intact), the server, and the exact session file to resume.
+/// How to relaunch after /restart: the exact session file to resume, plus
+/// the host/model to pin via CLI flags — but ONLY when they were pinned at
+/// launch (a --host/--model flag) or switched mid-session (/host, /model).
+/// None = omit the flag so the relaunch re-reads config: "edit config, then
+/// /restart" must pick up the edit instead of silently re-pinning the old
+/// value (the flag outranks the file).
 pub struct RestartSpec {
-    pub model: String,
-    pub host: String,
+    pub model: Option<String>,
+    pub host: Option<String>,
     pub session: std::path::PathBuf,
 }
 
 pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpec>> {
-    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, providers, pricing, theme } = opts;
+    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, host_pinned, model_pinned, providers, pricing, theme } = opts;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<UiMsg>();
@@ -2955,6 +3191,10 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     // restart relaunches against the current server, not the startup one.
     let restart_session = store.path().to_path_buf();
     let mut restart_host = host.clone();
+    // Startup values: a /restart re-pins host/model only when they differ
+    // from these (mid-session /host, /model switch) or were CLI-pinned.
+    let startup_host = host.clone();
+    let startup_model = model.clone();
     // UI-side effect sender: for commands the UI handles itself (/copy log).
     let fx_ui = fx_tx.clone();
     // Background-task events must reach the UI outside any turn — give the
@@ -4118,8 +4358,8 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     agent_task.abort();
     result.map(|()| {
         app.restart.then(|| RestartSpec {
-            model: app.model.clone(),
-            host: restart_host,
+            model: (model_pinned || app.model != startup_model).then(|| app.model.clone()),
+            host: (host_pinned || restart_host != startup_host).then_some(restart_host),
             session: restart_session,
         })
     })

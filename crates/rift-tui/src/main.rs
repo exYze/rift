@@ -700,6 +700,8 @@ async fn main() -> Result<()> {
                     ask_rx,
                     skills,
                     host: host.clone(),
+                    host_pinned: cli.host.is_some(),
+                    model_pinned: cli.model.is_some(),
                     providers: config.providers.clone(),
                     pricing: config.pricing.clone(),
                     theme: ui_theme,
@@ -717,16 +719,29 @@ async fn main() -> Result<()> {
 /// The tail end of /restart: relaunch the (possibly just-updated) binary
 /// resuming the same session. A true exec on Unix (same PID and terminal);
 /// spawn-and-wait elsewhere so the shell keeps normal job semantics.
+/// The relaunch arguments for a restart spec. Host/model flags appear only
+/// when pinned (see RestartSpec) — otherwise the relaunch re-reads config,
+/// so "edit config, /restart" applies the edit.
+fn restart_args(spec: &app::RestartSpec) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![];
+    if let Some(host) = &spec.host {
+        args.push("--host".into());
+        args.push(host.into());
+    }
+    if let Some(model) = &spec.model {
+        args.push("--model".into());
+        args.push(model.into());
+    }
+    args.push("--resume".into());
+    args.push(spec.session.clone().into());
+    args
+}
+
 fn restart_process(spec: app::RestartSpec) -> Result<()> {
     let exe = std::env::current_exe()?;
     eprintln!("restarting rift — resuming {}", spec.session.display());
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--host")
-        .arg(&spec.host)
-        .arg("--model")
-        .arg(&spec.model)
-        .arg("--resume")
-        .arg(&spec.session);
+    cmd.args(restart_args(&spec));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1095,4 +1110,32 @@ async fn run_headless(
         eprintln!("\x1b[2mrift v{latest} is available (current v{}) — run `rift update`\x1b[0m", env!("CARGO_PKG_VERSION"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_pins_host_and_model_only_when_set() {
+        // Nothing pinned: the relaunch re-reads config (the "edit config,
+        // then /restart" flow) — only --resume is passed.
+        let spec = app::RestartSpec { model: None, host: None, session: "s.json".into() };
+        let args = restart_args(&spec);
+        assert_eq!(args, vec![std::ffi::OsString::from("--resume"), "s.json".into()]);
+
+        // Pinned (CLI flag at launch, or /host - /model mid-session): the
+        // flags ride along and outrank config, as before.
+        let spec = app::RestartSpec {
+            model: Some("vllm/deepseek".into()),
+            host: Some("http://x:11434".into()),
+            session: "s.json".into(),
+        };
+        let args = restart_args(&spec);
+        assert_eq!(args[0], std::ffi::OsString::from("--host"));
+        assert_eq!(args[1], std::ffi::OsString::from("http://x:11434"));
+        assert_eq!(args[2], std::ffi::OsString::from("--model"));
+        assert_eq!(args[3], std::ffi::OsString::from("vllm/deepseek"));
+        assert_eq!(args[4], std::ffi::OsString::from("--resume"));
+    }
 }

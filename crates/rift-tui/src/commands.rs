@@ -296,23 +296,44 @@ async fn cmd_model(
             bail!("no models installed on {}", agent.client().base_url());
         }
         let count = models.len();
-        // Configured roles first — the named tiers of a multi-model setup.
-        let mut items: Vec<PickerItem> = agent
-            .ctx()
-            .subagent_handle()
-            .map(|h| {
-                let mut roles: Vec<(String, String)> = h.roles.into_iter().collect();
-                roles.sort();
-                roles
-                    .into_iter()
-                    .map(|(role, model)| PickerItem {
+        // Configured roles first — the named tiers of a multi-model setup —
+        // but only roles whose model is actually served RIGHT NOW. A role
+        // pointing at an offline server, or at a model the current server
+        // doesn't have, is a guaranteed-broken pick (the config can lag
+        // reality); verify each role against its own provider's live list.
+        let current_names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
+        let mut served_by: std::collections::HashMap<String, Option<Vec<String>>> =
+            std::collections::HashMap::from([(agent.client().base_url().to_string(), Some(current_names))]);
+        let mut items: Vec<PickerItem> = vec![];
+        let mut hidden_roles = 0usize;
+        if let Some(h) = agent.ctx().subagent_handle() {
+            let mut roles: Vec<(String, String)> = h.roles.into_iter().collect();
+            roles.sort();
+            for (role, model) in roles {
+                let (client, actual) = crate::build_provider(&model, &cx.host, &cx.providers);
+                let base = client.base_url().to_string();
+                if !served_by.contains_key(&base) {
+                    // Short timeout: an offline role server must not wedge
+                    // the picker; unreachable = its roles are hidden.
+                    let fetched =
+                        tokio::time::timeout(std::time::Duration::from_millis(2500), client.tags())
+                            .await;
+                    let names = match fetched {
+                        Ok(Ok(list)) => Some(list.into_iter().map(|m| m.name).collect::<Vec<_>>()),
+                        _ => None,
+                    };
+                    served_by.insert(base.clone(), names);
+                }
+                match &served_by[&base] {
+                    Some(names) if names.iter().any(|n| n == &actual) => items.push(PickerItem {
                         value: model.clone(),
                         label: format!("{role} → {model}"),
                         detail: "configured role".into(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    }),
+                    _ => hidden_roles += 1,
+                }
+            }
+        }
         items.extend(models.into_iter().map(|m| {
             let detail = if m.name == agent.cfg.model {
                 "current".to_string()
@@ -326,7 +347,13 @@ async fn cmd_model(
             items,
             template: "/model {}".into(),
         });
-        return Ok(format!("{count} model(s) — ↑↓ select, Enter switch, Esc cancel"));
+        let mut status = format!("{count} model(s) — ↑↓ select, Enter switch, Esc cancel");
+        if hidden_roles > 0 {
+            status.push_str(&format!(
+                " · {hidden_roles} configured role(s) hidden — model not served by a reachable server"
+            ));
+        }
+        return Ok(status);
     }
 
     // Route `provider/model` through a configured provider; a bare name uses

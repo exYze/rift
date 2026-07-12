@@ -18,6 +18,33 @@ All notable changes to rift. Versions follow the roadmap phases in
 - **`rift` startup no longer prints the `config:` line**: the provenance
   line is noise before every launch; `/config` in the TUI still shows which
   files loaded, and config warnings still print.
+- **TUI transcript: real markdown tables and rules**: GFM pipe tables now
+  render as aligned, truncation-aware columns with a highlighted header row
+  and a rule beneath it, instead of raw `| a | b |` walls; `---` thematic
+  breaks (and the long `-----`/`─────` rules models draw as separators)
+  collapse to one clean horizontal rule. README demo GIFs re-recorded.
+- **TUI activity pane: readable tool traffic**: tool calls now show the
+  salient argument first with the JSON stripped (`→ bash python3 stats.py`,
+  `→ edit stats.py old_string=… new_string=…`); bulky results summarize
+  (`✓ read: 120 lines`, `✓ ls: 14 entries`, bash shows its first output
+  line) instead of dumping flattened file contents; applied-edit previews
+  color their +/− lines like a real diff.
+- **`/model` only offers roles that are actually served**: configured roles
+  (`models` in config, e.g. `fast`/`smart`) used to appear in the picker
+  unconditionally — including roles whose model lives on a server that is
+  offline or doesn't serve it anymore, a guaranteed-broken pick. Each
+  role's own provider is now queried live (short timeout, one query per
+  server); roles whose model isn't in a reachable server's list are hidden,
+  with a count in the status line. The server's own model list was already
+  live. The VS Code model dropdown already worked this way.
+- **"Edit config, then `/restart`" now applies the edit**: `/restart` used
+  to always relaunch with `--host <current>` `--model <current>`, and those
+  flags outrank the config file — so a host or model you had just changed
+  in the config was silently overridden by the old values, with a confusing
+  "cannot reach …" for a server you no longer use. The restart now re-pins
+  host/model only when they were pinned at launch (a CLI flag / env var) or
+  switched mid-session (`/host`, `/model`); otherwise the relaunch re-reads
+  config fresh.
 - **Orchestration is the default, not an ask**: the deepseek and default
   system prompts now tell the model to delegate to sub-agents on anything
   that isn't a quick question or a trivial single-file change — no more

@@ -728,7 +728,7 @@ impl Agent {
                 let _ = tx.send(AgentEvent::ToolResult {
                     name: canonical.clone(),
                     ok,
-                    preview: preview(&result, 200),
+                    preview: tool_preview(&canonical, ok, &result),
                 });
                 if canonical == "plan" && ok {
                     let _ = tx.send(AgentEvent::Plan(self.ctx.plan_snapshot()));
@@ -849,6 +849,31 @@ fn strip_template_tokens(s: &str) -> String {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"<\|[^<>]{0,48}>").unwrap());
     re.replace_all(s, "").trim().to_string()
+}
+
+/// Activity-feed preview of a tool result. Bulky read-style outputs
+/// summarize to counts (the model still gets the full text — this is only
+/// what the frontends' activity logs show); bash shows its first output
+/// line; errors and everything else show the raw head.
+fn tool_preview(name: &str, ok: bool, result: &str) -> String {
+    if !ok || result.trim().is_empty() || result.starts_with("no ") {
+        return preview(result, 200);
+    }
+    match name {
+        "read" | "outline" => format!("{} lines", result.lines().count()),
+        "ls" => format!("{} entries", result.split_whitespace().count()),
+        "grep" => format!("{} matching line(s)", result.lines().count()),
+        "glob" => format!("{} file(s)", result.lines().count()),
+        "bash" => {
+            let mut lines = result.lines().filter(|l| !l.trim().is_empty());
+            let first = lines.next().unwrap_or("(no output)");
+            match lines.count() {
+                0 => preview(first, 120),
+                more => format!("{} (+{more} more lines)", preview(first, 120)),
+            }
+        }
+        _ => preview(result, 200),
+    }
 }
 
 fn preview(s: &str, max: usize) -> String {
