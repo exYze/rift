@@ -18,6 +18,14 @@ All notable changes to rift. Versions follow the roadmap phases in
 - **`rift` startup no longer prints the `config:` line**: the provenance
   line is noise before every launch; `/config` in the TUI still shows which
   files loaded, and config warnings still print.
+- **"Edit config, then `/restart`" now applies the edit**: `/restart` used
+  to always relaunch with `--host <current>` `--model <current>`, and those
+  flags outrank the config file — so a host or model you had just changed
+  in the config was silently overridden by the old values, with a confusing
+  "cannot reach …" for a server you no longer use. The restart now re-pins
+  host/model only when they were pinned at launch (a CLI flag / env var) or
+  switched mid-session (`/host`, `/model`); otherwise the relaunch re-reads
+  config fresh.
 - **Orchestration is the default, not an ask**: the deepseek and default
   system prompts now tell the model to delegate to sub-agents on anything
   that isn't a quick question or a trivial single-file change — no more

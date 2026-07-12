@@ -2914,6 +2914,10 @@ pub struct TuiOptions {
     pub ask_rx: mpsc::UnboundedReceiver<AskRequest>,
     pub skills: Vec<Skill>,
     pub host: String,
+    /// The host/model came from a CLI flag or env var (not config), so a
+    /// /restart must pin it again — config alone must not override it.
+    pub host_pinned: bool,
+    pub model_pinned: bool,
     pub providers: std::collections::HashMap<String, rift_core::ProviderConfig>,
     /// Config `pricing` map for the cost display (built-ins live in
     /// crate::pricing).
@@ -2921,16 +2925,20 @@ pub struct TuiOptions {
     pub theme: theme::Theme,
 }
 
-/// How to relaunch after /restart: the addressable model name (provider
-/// prefix intact), the server, and the exact session file to resume.
+/// How to relaunch after /restart: the exact session file to resume, plus
+/// the host/model to pin via CLI flags — but ONLY when they were pinned at
+/// launch (a --host/--model flag) or switched mid-session (/host, /model).
+/// None = omit the flag so the relaunch re-reads config: "edit config, then
+/// /restart" must pick up the edit instead of silently re-pinning the old
+/// value (the flag outranks the file).
 pub struct RestartSpec {
-    pub model: String,
-    pub host: String,
+    pub model: Option<String>,
+    pub host: Option<String>,
     pub session: std::path::PathBuf,
 }
 
 pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpec>> {
-    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, providers, pricing, theme } = opts;
+    let TuiOptions { model, store, resumed, mcp, config_path, mut ask_rx, skills, host, host_pinned, model_pinned, providers, pricing, theme } = opts;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (fx_tx, mut fx_rx) = mpsc::unbounded_channel::<UiEffect>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<UiMsg>();
@@ -2955,6 +2963,10 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     // restart relaunches against the current server, not the startup one.
     let restart_session = store.path().to_path_buf();
     let mut restart_host = host.clone();
+    // Startup values: a /restart re-pins host/model only when they differ
+    // from these (mid-session /host, /model switch) or were CLI-pinned.
+    let startup_host = host.clone();
+    let startup_model = model.clone();
     // UI-side effect sender: for commands the UI handles itself (/copy log).
     let fx_ui = fx_tx.clone();
     // Background-task events must reach the UI outside any turn — give the
@@ -4118,8 +4130,8 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     agent_task.abort();
     result.map(|()| {
         app.restart.then(|| RestartSpec {
-            model: app.model.clone(),
-            host: restart_host,
+            model: (model_pinned || app.model != startup_model).then(|| app.model.clone()),
+            host: (host_pinned || restart_host != startup_host).then_some(restart_host),
             session: restart_session,
         })
     })
