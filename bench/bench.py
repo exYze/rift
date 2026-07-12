@@ -27,6 +27,9 @@ import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TOKEN_LOG = "/tmp/rift-bench-tokens.jsonl"
+# Overridden by --proxy. A /v1 suffix makes rift speak the OpenAI
+# protocol through the proxy (vLLM/LM Studio upstreams); a bare host
+# keeps the native Ollama protocol.
 PROXY = "http://127.0.0.1:11435"
 RIFT = os.environ.get("RIFT_BIN", os.path.join(ROOT, "..", "target", "release", "rift"))
 MODEL = "gemma4:26b"
@@ -40,7 +43,7 @@ def opencode_config(model):
             "benchprox": {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Bench proxy",
-                "options": {"baseURL": f"{PROXY}/v1"},
+                "options": {"baseURL": PROXY.rstrip("/") if PROXY.rstrip("/").endswith("/v1") else PROXY.rstrip("/") + "/v1"},
                 "models": {model: {"name": model}},
             }
         },
@@ -181,6 +184,7 @@ def summarize(results, agents, models):
 
 
 def main():
+    global PROXY
     ap = argparse.ArgumentParser(description="Rift benchmark harness")
     ap.add_argument("agents", nargs="*", default=None,
                     help="agents to run (default: rift opencode)")
@@ -194,11 +198,17 @@ def main():
     ap.add_argument("--runs", type=int, default=1,
                     help="repetitions per task — nondeterministic models need "
                          "multi-run variance, not single-run point estimates")
+    ap.add_argument("--proxy", default=PROXY,
+                    help="recording-proxy URL agents talk to (start proxy.py "
+                         "first). Append /v1 when the upstream is an "
+                         "OpenAI-style server (vLLM, LM Studio): rift then "
+                         "speaks the OpenAI protocol through the proxy")
     ap.add_argument("--schema", choices=["rich", "lean"], default="rich",
                     help="tool-schema variant for rift runs (RIFT_TOOL_SCHEMA): "
                          "lean = first-sentence descriptions, no per-param docs — "
                          "the schema A/B for the model matrix")
     args = ap.parse_args()
+    PROXY = args.proxy.rstrip("/")
     os.environ["RIFT_TOOL_SCHEMA"] = args.schema
     agents = args.agents or ["rift", "opencode"]
     models = [m.strip() for m in args.models.split(",") if m.strip()]

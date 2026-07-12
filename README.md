@@ -1,6 +1,6 @@
 # Rift
 
-A fast, flicker-free terminal coding agent built in Rust for **local models via Ollama's native API** — no Node, no Python, one 9.5MB binary.
+A fast, flicker-free terminal coding agent built in Rust for **local models** — Ollama's native API and OpenAI-compatible servers (vLLM, LM Studio, llama.cpp) are first-class targets, cloud providers (Anthropic, OpenAI, OpenRouter) optional — no Node, no Python, one ~14MB binary.
 
 ![rift demo — fixing a bug, applying the diff, and verifying it in one turn](docs/assets/demo.gif)
 
@@ -13,7 +13,7 @@ A fast, flicker-free terminal coding agent built in Rust for **local models via 
 Rift is a ground-up Rust answer to opencode/Crush-style agents, designed around the three failure modes that plague them with local models:
 
 1. **Broken scrolling/streaming UX** → pre-wrapped line buffer with bottom-anchored scrolling; streaming never fights your scroll position.
-2. **Context blowout** → explicit `num_ctx` on every request, silent-truncation detection via `prompt_eval_count`, token-capped tool outputs, AST-based context compaction (Compactor subsystem).
+2. **Context blowout** → explicit `num_ctx` on every request, silent-truncation detection via `prompt_eval_count`, token-capped tool outputs, two-stage compaction (old tool outputs pruned first, then LLM history summarization) driven by a continuously calibrated token estimator.
 3. **Local tool-calling fragility** → native `/api/chat` protocol (not the OpenAI-compat shim), textual-tool-call recovery, hallucinated-tool-name aliasing, error-as-tool-result self-correction, doom-loop guard.
 
 Plus **WarpDrive**: parallel agent exploration in isolated git worktrees with side-by-side diff merge.
@@ -129,7 +129,7 @@ rift --prompt "Fix the failing test in src/lib.rs"
 
 ```sh
 # WarpDrive: race models on a task in isolated git worktrees, then merge the winner
-rift swarm "Refactor the auth middleware" --models gemma4:26b,anthropic/claude-sonnet-4-6
+rift swarm "Refactor the auth middleware" --models gemma4:26b,anthropic/claude-sonnet-5
 rift swarm "Fix the failing test" --models gemma4:26b,qwen3.6:35b --judge ornith:35b
 rift merge 0-gemma4-26b --cleanup
 ```
@@ -140,7 +140,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 
 | command | what it does |
 |---|---|
-| `/model [name]` | interactive model picker (↑↓/Enter), or switch directly by name |
+| `/model [name]` | interactive model picker (↑↓/Enter), or switch directly by name — lists the current server's live model list, plus configured roles (only when their model is actually served by a reachable server) |
 | `/clear` | wipe the conversation |
 | `/config [edit]` | show or edit `.rift.json` in `$EDITOR` (permissions hot-reload) |
 | `/approve [on\|off]` | toggle approval mode without touching the config |
@@ -290,14 +290,15 @@ In interactive sessions the model gets an `ask_user` tool: when a task is ambigu
 
 ## Sub-agents & background tasks
 
-The model can delegate with its `agent` tool: 1–4 self-contained tasks run as **concurrent sub-agents**, each with its own context window and full tool set (results come back as the tool result; nesting is blocked, and `/model`/`/host` switches carry over). Long commands don't block the conversation either: `bash run_in_background=true` (and `agent background=true`) start **background tasks** that keep running while you keep chatting — the status bar shows the live count, `/tasks` lists them (`/tasks kill <id>` stops one), the model polls them with its `task` tool, and when one finishes on its own a `[task notification]` turn hands the result back to the model so it can react. Background tasks end with the rift process — nothing is orphaned.
+The model can delegate with its `agent` tool: 1–4 self-contained tasks run as **concurrent sub-agents**, each with its own context window, tool set, and iteration budget (results come back as the tool result; nesting is blocked, and `/model`/`/host` switches carry over). On the deepseek and default prompt targets, orchestration is the **default posture** — anything beyond a quick question or a trivial single-file change gets split across sub-agents without being asked. Long commands don't block the conversation either: `bash run_in_background=true` (and `agent background=true`) start **background tasks** that keep running while you keep chatting — the status bar shows the live count, `/tasks` lists them (`/tasks kill <id>` stops one), the model polls them with its `task` tool, and when one finishes on its own a `[task notification]` turn hands the result back to the model so it can react. Background tasks end with the rift process — nothing is orphaned.
 
 ## Workspace layout
 
 - `crates/rift-provider` — the `Provider` trait plus the neutral wire types (messages, tool calls, stream deltas) every backend maps to.
 - `crates/rift-ollama` — native Ollama client: NDJSON streaming, tool calls, thinking, capability detection, truncation detection.
 - `crates/rift-openai` — OpenAI-compatible client: SSE streaming, tool-call correlation by id, string-encoded arguments (vLLM, LM Studio, llama.cpp, OpenRouter, LiteLLM, Ollama `/v1`).
-- `crates/rift-core` — agent engine: tool registry (read/write/edit/bash/ls/grep/glob/task/agent), agent loop, sub-agents, background tasks, local-model hardening.
-- `crates/rift-tui` — `rift` binary: ratatui frontend + headless mode.
+- `crates/rift-anthropic` — Anthropic-format client: content blocks, `tool_use`/`tool_result` mapping, prompt caching, adaptive thinking.
+- `crates/rift-core` — agent engine: tool registry (read/write/edit/bash/ls/grep/glob/outline/repo_map/plan/task/agent/fetch/web_search/remember + `ask_user` and `skill` in interactive sessions), agent loop, per-family prompt targets, compaction, sub-agents, background tasks, sessions, permissions, local-model hardening.
+- `crates/rift-tui` — `rift` binary: ratatui frontend, `--serve` protocol for editor integrations, headless mode.
 
 See `docs/PROJECT.md` for status and roadmap, `docs/RESEARCH.md` for the protocol/architecture research this is built on.
