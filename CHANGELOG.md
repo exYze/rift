@@ -3,6 +3,16 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.6.2 — 2026-07-12
+
+- **README accuracy pass**: the tagline now reflects the multi-server
+  reality (Ollama native + OpenAI-compatible servers first-class, cloud
+  providers optional) and the actual ~14MB binary size; compaction is
+  described as the shipped two-stage design rather than the aspirational
+  "AST-based Compactor"; the workspace map gains the missing
+  `rift-anthropic` crate and the full tool list; the sub-agents section
+  documents orchestrate-by-default; stale model names updated.
+
 ## v2.6.1 — 2026-07-12
 
 - **VS Code chat: ruled-line spam is gone for real**: the "phantom thin
