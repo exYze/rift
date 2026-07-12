@@ -100,7 +100,15 @@
     return `<table class="md-table"><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
   }
 
-  // Minimal markdown: fenced code, inline code, bold, headings, bullets, tables.
+  // A rendered thematic break. Models (DeepSeek especially) draw section
+  // separators and ASCII table rules as raw runs of -/─/═/_ characters; as
+  // literal text those paint the transcript with phantom ruled lines, so
+  // any rule-only line collapses to one subtle <hr> instead.
+  const HR = '<hr class="md-rule">';
+  const RULE_LINE = /^\s*[-─—━═_=*]{3,}\s*$/;
+
+  // Minimal markdown: fenced code, inline code, bold, headings, bullets,
+  // tables, thematic breaks.
   function md(text) {
     const out = [];
     const lines = text.split('\n');
@@ -154,6 +162,11 @@
         i = j - 1;
         continue;
       }
+      if (RULE_LINE.test(raw)) {
+        flush();
+        if (out[out.length - 1] !== HR) out.push(HR); // runs collapse to one
+        continue;
+      }
       let line = inline(raw);
       const h = line.match(/^(#{1,3})\s+(.*)$/);
       if (h) {
@@ -170,6 +183,10 @@
     }
     flush();
     if (inFence) closeFence(); // still streaming — render what's arrived
+    // A rule is only meaningful BETWEEN content: edge rules (a model tic
+    // around tool calls) would render as stray lines, so drop them.
+    while (out.length && out[0] === HR) out.shift();
+    while (out.length && out[out.length - 1] === HR) out.pop();
     return out.join('').replace(/<\/ul><ul>/g, '');
   }
 
@@ -357,22 +374,24 @@
   function assistantBlock(text, streaming) {
     if (streaming) {
       assistantRaw += text;
-      // Whitespace-only deltas between tool calls must not open a block:
-      // each empty block eats a flex-gap slot (a phantom blank row) and
-      // needlessly breaks the current tool-activity box.
+      // Deltas that render to nothing (whitespace, stray fences, bare ---
+      // rules) must not open a block: each empty block eats a flex-gap slot
+      // (a phantom blank row) and needlessly breaks the tool-activity box.
+      const html = md(assistantRaw);
       if (!assistantEl) {
-        if (!assistantRaw.trim()) return;
+        if (!html) return;
         assistantEl = add(Object.assign(document.createElement('div'), { className: 'msg assistant' }));
       }
       const stick = atBottom();
-      assistantEl.innerHTML = md(assistantRaw);
+      assistantEl.innerHTML = html;
       if (stick) messages.scrollTop = messages.scrollHeight;
       return;
     }
-    if (!text.trim()) return;
+    const html = md(text);
+    if (!html) return;
     const el = document.createElement('div');
     el.className = 'msg assistant';
-    el.innerHTML = md(text);
+    el.innerHTML = html;
     add(el);
   }
 

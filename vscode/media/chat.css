@@ -168,6 +168,13 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
 }
 .msg.assistant p { margin: 4px 0; }
 .msg.assistant ul { margin: 4px 0; padding-left: 18px; }
+/* Thematic break — one subtle rule, however many dashes the model drew. */
+.md-rule {
+  border: none;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
+  margin: 10px 24px;
+  opacity: 0.6;
+}
 
 .thinking {
   font-style: italic;
