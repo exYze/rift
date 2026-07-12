@@ -1,6 +1,6 @@
 # Rift
 
-A fast, flicker-free terminal coding agent built in Rust for **local models via Ollama's native API** — no Node, no Python, one 9.5MB binary.
+A fast, flicker-free terminal coding agent built in Rust for **local models** — Ollama's native API and OpenAI-compatible servers (vLLM, LM Studio, llama.cpp) are first-class targets, cloud providers (Anthropic, OpenAI, OpenRouter) optional — no Node, no Python, one ~14MB binary.
 
 ![rift demo — fixing a bug, applying the diff, and verifying it in one turn](docs/assets/demo.gif)
 
