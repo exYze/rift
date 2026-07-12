@@ -1,0 +1,7 @@
+# Keep GitHub's language stats about the product, not the tooling: the
+# Python here is benchmark fixtures (planted-bug programs the agents fix),
+# the measurement harness, and dev scripts — none of it ships in the
+# binary or is needed to run rift.
+bench/** linguist-vendored
+scripts/** linguist-vendored
+vscode/media/highlight.min.js linguist-vendored
