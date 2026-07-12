@@ -18,6 +18,14 @@ All notable changes to rift. Versions follow the roadmap phases in
 - **`rift` startup no longer prints the `config:` line**: the provenance
   line is noise before every launch; `/config` in the TUI still shows which
   files loaded, and config warnings still print.
+- **`/model` only offers roles that are actually served**: configured roles
+  (`models` in config, e.g. `fast`/`smart`) used to appear in the picker
+  unconditionally — including roles whose model lives on a server that is
+  offline or doesn't serve it anymore, a guaranteed-broken pick. Each
+  role's own provider is now queried live (short timeout, one query per
+  server); roles whose model isn't in a reachable server's list are hidden,
+  with a count in the status line. The server's own model list was already
+  live. The VS Code model dropdown already worked this way.
 - **"Edit config, then `/restart`" now applies the edit**: `/restart` used
   to always relaunch with `--host <current>` `--model <current>`, and those
   flags outrank the config file — so a host or model you had just changed
