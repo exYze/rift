@@ -475,7 +475,7 @@ pub async fn run_serve(
                             "path": req.path.display().to_string(),
                             "old": req.old,
                             "new": req.new,
-                            // rift's own hunking (added in 2.7, additive):
+                            // rift's own hunking (added in 2.6.3, additive):
                             // consumers review per-segment instead of
                             // re-deriving a diff from old/new themselves.
                             "segments": segments_json(&req.old, &req.new),
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(PROTOCOL_VERSION, 1);
     }
 
-    /// edit_review's `segments` field (added 2.7, additive): alternating
+    /// edit_review's `segments` field (added 2.6.3, additive): alternating
     /// {"same":true,"lines":[…]} / {"same":false,"old":[…],"new":[…]} runs.
     /// The VS Code reviewer reassembles accepted-hunk content from exactly
     /// this shape — a drift here silently corrupts applied edits.

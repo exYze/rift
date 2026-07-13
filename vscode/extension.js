@@ -60,7 +60,7 @@ function riftArgs() {
 // back as an edit_decision and only then does rift write the file.
 
 /** Reviewable segments for an edit_review event. rift ships its own
- *  authoritative hunking on the event (`segments`, rift ≥ 2.7) — use it
+ *  authoritative hunking on the event (`segments`, rift ≥ 2.6.3) — use it
  *  verbatim. An older rift without it degrades to one whole-file hunk:
  *  review still works, just without per-hunk granularity. */
 function reviewSegments(ev) {

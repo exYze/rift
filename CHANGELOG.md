@@ -3,7 +3,7 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
-## v2.7.0 — unreleased
+## v2.6.3 — 2026-07-12
 
 - **Serve protocol: rift owns model discovery and switching** (additive,
   still protocol v1 — docs/SERVE.md):
