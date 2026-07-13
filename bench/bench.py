@@ -15,6 +15,12 @@ With --models the whole suite runs once per model and the summary diffs
 pass rate / prompt tokens / wall time per model — the fitness function for
 per-model prompt and schema experiments (docs/ROADMAP.md, "Model targets").
 Rift runs always record per-turn JSONL traces under bench/traces/.
+
+Windows notes (each of these cost a full suite run to learn):
+- run from Git Bash, not PowerShell — verify.sh needs Git's bash, and
+  PowerShell resolves `bash` to WSL's (find_bash() below compensates)
+- npm's `opencode` shim isn't CreateProcess-launchable; point OPENCODE_BIN
+  at the real exe (node_modules/opencode-*/bin/opencode.exe)
 """
 import argparse
 import json
@@ -22,18 +28,57 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-TOKEN_LOG = "/tmp/rift-bench-tokens.jsonl"
+# Shared with proxy.py (same env var / same default) — a drive-relative
+# "/tmp" diverges between processes on Windows.
+TOKEN_LOG = os.environ.get("RIFT_BENCH_TOKENS") or os.path.join(
+    tempfile.gettempdir(), "rift-bench-tokens.jsonl"
+)
 # Overridden by --proxy. A /v1 suffix makes rift speak the OpenAI
 # protocol through the proxy (vLLM/LM Studio upstreams); a bare host
 # keeps the native Ollama protocol.
 PROXY = "http://127.0.0.1:11435"
-RIFT = os.environ.get("RIFT_BIN", os.path.join(ROOT, "..", "target", "release", "rift"))
+RIFT = os.environ.get(
+    "RIFT_BIN",
+    os.path.join(ROOT, "..", "target", "release", "rift.exe" if os.name == "nt" else "rift"),
+)
+OPENCODE = os.environ.get("OPENCODE_BIN", "opencode")
 MODEL = "gemma4:26b"
 TIMEOUT = 600
+KEEP_DIRS = False  # set by --keep-dirs; default is to clean task dirs up
+
+
+def find_bash():
+    """The bash that runs verify.sh. On Windows, `bash` on PATH is often
+    WSL's (System32) — which can't run the task scripts — so prefer the one
+    Git for Windows ships next to git itself."""
+    if os.name != "nt":
+        return "bash"
+    git = shutil.which("git")
+    if git:
+        cand = os.path.join(os.path.dirname(os.path.dirname(git)), "usr", "bin", "bash.exe")
+        if os.path.isfile(cand):
+            return cand
+    return shutil.which("bash") or "bash"
+
+
+BASH = find_bash()
+
+
+def clean_dir(path):
+    """Best-effort rmtree that shrugs off Windows read-only files (git
+    objects) — 300 leftover task dirs once filled a whole drive."""
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                os.chmod(os.path.join(root, f), 0o700)
+            except OSError:
+                pass
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def opencode_config(model):
@@ -61,7 +106,7 @@ def agent_cmd(agent, prompt, model):
         return [RIFT, "--host", PROXY, "--model", model,
                 "--trace", trace_path(model), "--prompt", prompt]
     if agent == "opencode":
-        return ["opencode", "run", "-m", f"benchprox/{model}", prompt]
+        return [OPENCODE, "run", "-m", f"benchprox/{model}", prompt]
     raise SystemExit(f"unknown agent {agent}")
 
 
@@ -138,8 +183,12 @@ def run_task(agent, task, model, tasks_dir="tasks"):
     t0 = time.time()
     timed_out = False
     try:
+        # Explicit utf-8 on the pipes: Windows defaults text mode to cp1252,
+        # and one un-decodable byte kills the reader thread — which then
+        # deadlocks the child on a full pipe until the timeout.
         proc = subprocess.run(
             agent_cmd(agent, prompt, model), cwd=tmp, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=TIMEOUT, env=env, stdin=subprocess.DEVNULL,
         )
         rc = proc.returncode
@@ -148,11 +197,13 @@ def run_task(agent, task, model, tasks_dir="tasks"):
         rc, tail, timed_out = -1, "(timeout)", True
     secs = round(time.time() - t0, 1)
 
-    ok = subprocess.run(["bash", os.path.join(src, "verify.sh")], cwd=tmp,
+    ok = subprocess.run([BASH, os.path.join(src, "verify.sh")], cwd=tmp,
                         capture_output=True).returncode == 0
     res = {"agent": agent, "model": model, "task": task, "ok": ok, "secs": secs,
            "rc": rc, "timeout": timed_out, **tokens_since(TOKEN_LOG, mark), "dir": tmp}
     res["tail"] = tail
+    if not KEEP_DIRS:
+        clean_dir(tmp)  # opencode's per-task HOME once filled a whole drive
     return res
 
 
@@ -212,7 +263,12 @@ def main():
                     help="tool-schema variant for rift runs (RIFT_TOOL_SCHEMA): "
                          "lean = first-sentence descriptions, no per-param docs — "
                          "the schema A/B for the model matrix")
+    ap.add_argument("--keep-dirs", action="store_true",
+                    help="keep each task's temp dir for post-mortems (default: "
+                         "cleaned after verify — 300 kept dirs once filled a drive)")
     args = ap.parse_args()
+    global KEEP_DIRS
+    KEEP_DIRS = args.keep_dirs
     PROXY = args.proxy.rstrip("/")
     os.environ["RIFT_TOOL_SCHEMA"] = args.schema
     agents = args.agents or ["rift", "opencode"]
