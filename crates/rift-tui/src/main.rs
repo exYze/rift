@@ -100,6 +100,50 @@ pub(crate) fn provider_factory(
     let providers = providers.clone();
     Arc::new(move |model: &str| Ok(build_provider(model, &host, &providers)))
 }
+
+/// Switch the running agent to `arg` (possibly provider-prefixed): preflight
+/// the target client (tools capability, thinking support, num_ctx
+/// clamp/adopt — the same checks as startup), then swap it in. Returns the
+/// note describing any context-budget adjustment ("" when none). Shared by
+/// the TUI's /model and serve's set_model so the two paths can't drift.
+pub(crate) async fn switch_model(
+    agent: &mut rift_core::Agent,
+    arg: &str,
+    host: &str,
+    providers: &HashMap<String, ProviderConfig>,
+) -> anyhow::Result<String> {
+    use anyhow::{anyhow, bail};
+    let (client, actual) = build_provider(arg, host, providers);
+    let show = client
+        .show(&actual)
+        .await
+        .map_err(|e| anyhow!("model '{arg}' not usable: {e}"))?;
+    if !show.supports("tools") {
+        bail!("model '{arg}' does not have the 'tools' capability");
+    }
+    agent.cfg.think = if show.supports("thinking") { None } else { Some(false) };
+    let mut note = String::new();
+    if let Some(max) = show.context_length() {
+        // Mirrors startup: provider-routed models don't send num_ctx to the
+        // server, so a bigger reported context is adopted as the working
+        // budget (capped — huge hosted contexts would bloat every request).
+        const ADOPT_CTX_MAX: u64 = 131_072;
+        let provider_routed = actual != arg;
+        if agent.cfg.num_ctx > max {
+            note = format!(" (num_ctx clamped {} → {max})", agent.cfg.num_ctx);
+            agent.cfg.num_ctx = agent.cfg.num_ctx.min(max);
+        } else if provider_routed && max > agent.cfg.num_ctx {
+            let adopted = max.min(ADOPT_CTX_MAX);
+            if adopted > agent.cfg.num_ctx {
+                note = format!(" (context budget {} → {adopted}; /ctx overrides)", agent.cfg.num_ctx);
+                agent.cfg.num_ctx = adopted;
+            }
+        }
+    }
+    agent.cfg.model = actual;
+    agent.set_client(client);
+    Ok(note)
+}
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -657,8 +701,18 @@ async fn main() -> Result<()> {
         let pending_plugins = rift_core::plugins::pending_project_tools(&plugins, &|p| {
             rift_core::config::hook_trusted(&rift_core::plugins::trust_key(p))
         });
-        return serve::run_serve(agent, store, ask_rx, model_addr, resumed_messages, skills, pending_plugins)
-            .await;
+        return serve::run_serve(
+            agent,
+            store,
+            ask_rx,
+            model_addr,
+            resumed_messages,
+            skills,
+            pending_plugins,
+            host,
+            config.providers.clone(),
+        )
+        .await;
     }
 
     match cli.prompt {
