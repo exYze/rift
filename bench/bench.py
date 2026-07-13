@@ -80,7 +80,12 @@ def tokens_since(path, mark):
             for i, line in enumerate(f):
                 if i < mark:
                     continue
-                e = json.loads(line)
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    # concurrent proxy appends can interleave a blank/partial
+                    # line; skip it rather than lose the whole suite
+                    continue
                 prompt += e.get("prompt", 0)
                 output += e.get("output", 0)
                 calls += 1
@@ -222,6 +227,11 @@ def main():
         if missing:
             raise SystemExit(f"unknown tasks: {', '.join(missing)}")
         tasks = wanted
+    out = os.path.join(ROOT, "results.json")
+    existing = []
+    if os.path.exists(out):
+        with open(out) as f:
+            existing = json.load(f)
     results = []
     for model in models:
         for agent in agents:
@@ -235,14 +245,10 @@ def main():
                     print(f"    ok={r['ok']} {r['secs']}s prompt={r['prompt_tok']} "
                           f"out={r['output_tok']} calls={r['llm_calls']}", flush=True)
                     results.append(r)
-
-    out = os.path.join(ROOT, "results.json")
-    existing = []
-    if os.path.exists(out):
-        with open(out) as f:
-            existing = json.load(f)
-    with open(out, "w") as f:
-        json.dump(existing + results, f, indent=2)
+                    # flush after every task: a crash mid-suite must not
+                    # lose the results already collected
+                    with open(out, "w") as f:
+                        json.dump(existing + results, f, indent=2)
 
     summarize(results, agents, models)
 
