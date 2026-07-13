@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Render docs/assets/benchmark-50.svg from bench/results.json.
+"""Render a rift-vs-opencode benchmark SVG from bench/results.json.
 
 A repo-friendly dark-theme SVG: headline cards (success, prompt tokens,
-wall time) with proportional bars for each agent.
+wall time) with proportional bars for each agent. results.json accumulates
+runs across models, so pass --model to chart one model's suite.
 """
+import argparse
 import json
 import os
-import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-RESULTS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "results.json")
-OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "..", "docs", "assets", "benchmark-50.svg")
+RESULTS = os.path.join(ROOT, "results.json")
+OUT = os.path.join(ROOT, "..", "docs", "assets", "benchmark-50.svg")
 
 BG, CARD, BORDER = "#0d1117", "#161b22", "#30363d"
 FG, DIM = "#e6edf3", "#8b949e"
@@ -30,7 +31,15 @@ def agg(results, agent):
 
 
 def fmt_tok(n):
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
     return f"{n/1000:.0f}k" if n >= 10000 else str(n)
+
+
+def fmt_time(secs):
+    if secs >= 90 * 60:
+        return f"{secs//3600:.0f}h {secs%3600/60:.0f}m"
+    return f"{secs/60:.0f}m {secs%60:.0f}s"
 
 
 def bar(x, y, w_frac, width, color, label, value):
@@ -43,8 +52,18 @@ def bar(x, y, w_frac, width, color, label, value):
 
 
 def main():
-    with open(RESULTS) as f:
+    ap = argparse.ArgumentParser(description="Render benchmark SVG")
+    ap.add_argument("results", nargs="?", default=RESULTS)
+    ap.add_argument("out", nargs="?", default=OUT)
+    ap.add_argument("--model", default="gemma4:26b",
+                    help="chart only this model's entries from results.json")
+    ap.add_argument("--server", default="Ollama",
+                    help="server named in the subtitle (Ollama, vLLM, ...)")
+    args = ap.parse_args()
+
+    with open(args.results) as f:
         results = json.load(f)
+    results = [r for r in results if r.get("model") == args.model]
     rift, oc = agg(results, "rift"), agg(results, "opencode")
     n = rift["n"]
 
@@ -59,7 +78,7 @@ def main():
          rift["prompt"] / max(rift["prompt"], oc["prompt"]),
          oc["prompt"] / max(rift["prompt"], oc["prompt"]),
          f'−{tok_save:.0f}% tokens'),
-        ("wall time", f'{rift["secs"]/60:.0f}m {rift["secs"]%60:.0f}s', f'{oc["secs"]/60:.0f}m {oc["secs"]%60:.0f}s',
+        ("wall time", fmt_time(rift["secs"]), fmt_time(oc["secs"]),
          rift["secs"] / max(rift["secs"], oc["secs"]),
          oc["secs"] / max(rift["secs"], oc["secs"]),
          f'{speedup:.1f}× faster'),
@@ -71,7 +90,7 @@ def main():
         f'font-family="-apple-system, \'Segoe UI\', Helvetica, Arial, sans-serif">',
         f'<rect width="{W}" height="{H}" rx="14" fill="{BG}"/>',
         f'<text x="55" y="56" font-size="28" font-weight="700" fill="{FG}">rift <tspan fill="{RIFT_C}">vs opencode</tspan> — {n}-task suite</text>',
-        f'<text x="55" y="84" font-size="14" fill="{DIM}">same model (gemma4:26b) · same Ollama server · same prompts · tokens measured on the wire by a recording proxy</text>',
+        f'<text x="55" y="84" font-size="14" fill="{DIM}">same model ({args.model}) · same {args.server} server · same prompts · tokens measured on the wire by a recording proxy</text>',
         f'<text x="{W-55}" y="56" font-size="13" fill="{DIM}" text-anchor="end">github.com/exYze/rift</text>',
     ]
 
@@ -99,10 +118,10 @@ def main():
     )
     parts.append("</svg>")
 
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w") as f:
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    with open(args.out, "w", encoding="utf-8") as f:
         f.write("\n".join(parts) + "\n")
-    print(f"wrote {OUT}")
+    print(f"wrote {args.out}")
     print(f"rift:     {rift}")
     print(f"opencode: {oc}")
 
