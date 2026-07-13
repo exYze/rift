@@ -1,0 +1,37 @@
+<svg viewBox="0 0 1280 560" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect width="1280" height="560" rx="14" fill="#0d1117"/>
+<text x="55" y="56" font-size="28" font-weight="700" fill="#e6edf3">rift <tspan fill="#39c5cf">vs opencode</tspan> — 150-task suite</text>
+<text x="55" y="84" font-size="14" fill="#8b949e">same model (deepseek-v4-flash-dspark) · same vLLM server · same prompts · tokens measured on the wire by a recording proxy</text>
+<text x="1225" y="56" font-size="13" fill="#8b949e" text-anchor="end">github.com/exYze/rift</text>
+<rect x="40.0" y="120" width="380" height="330" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<text x="64.0" y="158" font-size="15" font-weight="600" fill="#e6edf3">tasks solved</text>
+<text x="64.0" y="222" font-size="40" font-weight="700" fill="#39c5cf">150/150</text>
+<text x="64.0" y="246" font-size="13" fill="#8b949e">rift</text>
+<text x="396.0" y="222" font-size="28" font-weight="600" fill="#8b949e" text-anchor="end">149/150</text>
+<text x="396.0" y="246" font-size="13" fill="#8b949e" text-anchor="end">opencode</text>
+<text x="64.0" y="291" font-size="13" fill="#8b949e">rift</text><rect x="150.0" y="280" width="180" height="16" rx="4" fill="#39c5cf"/><text x="338.0" y="293" font-size="13" font-weight="600" fill="#e6edf3">150/150</text>
+<text x="64.0" y="321" font-size="13" fill="#8b949e">opencode</text><rect x="150.0" y="310" width="178" height="16" rx="4" fill="#8b949e"/><text x="336.0" y="323" font-size="13" font-weight="600" fill="#e6edf3">149/150</text>
+<rect x="64.0" y="360" width="332" height="40" rx="8" fill="#0d1117" stroke="#3fb950" stroke-width="1"/>
+<text x="230.0" y="386" font-size="17" font-weight="700" fill="#3fb950" text-anchor="middle">+1 tasks</text>
+<rect x="450.0" y="120" width="380" height="330" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<text x="474.0" y="158" font-size="15" font-weight="600" fill="#e6edf3">prompt tokens (wire-measured)</text>
+<text x="474.0" y="222" font-size="40" font-weight="700" fill="#39c5cf">3.33M</text>
+<text x="474.0" y="246" font-size="13" fill="#8b949e">rift</text>
+<text x="806.0" y="222" font-size="28" font-weight="600" fill="#8b949e" text-anchor="end">7.69M</text>
+<text x="806.0" y="246" font-size="13" fill="#8b949e" text-anchor="end">opencode</text>
+<text x="474.0" y="291" font-size="13" fill="#8b949e">rift</text><rect x="560.0" y="280" width="78" height="16" rx="4" fill="#39c5cf"/><text x="646.0" y="293" font-size="13" font-weight="600" fill="#e6edf3">3.33M</text>
+<text x="474.0" y="321" font-size="13" fill="#8b949e">opencode</text><rect x="560.0" y="310" width="180" height="16" rx="4" fill="#8b949e"/><text x="748.0" y="323" font-size="13" font-weight="600" fill="#e6edf3">7.69M</text>
+<rect x="474.0" y="360" width="332" height="40" rx="8" fill="#0d1117" stroke="#3fb950" stroke-width="1"/>
+<text x="640.0" y="386" font-size="17" font-weight="700" fill="#3fb950" text-anchor="middle">−57% tokens</text>
+<rect x="860.0" y="120" width="380" height="330" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<text x="884.0" y="158" font-size="15" font-weight="600" fill="#e6edf3">wall time</text>
+<text x="884.0" y="222" font-size="40" font-weight="700" fill="#39c5cf">37m 53s</text>
+<text x="884.0" y="246" font-size="13" fill="#8b949e">rift</text>
+<text x="1216.0" y="222" font-size="28" font-weight="600" fill="#8b949e" text-anchor="end">7h 47m</text>
+<text x="1216.0" y="246" font-size="13" fill="#8b949e" text-anchor="end">opencode</text>
+<text x="884.0" y="291" font-size="13" fill="#8b949e">rift</text><rect x="970.0" y="280" width="14" height="16" rx="4" fill="#39c5cf"/><text x="992.0" y="293" font-size="13" font-weight="600" fill="#e6edf3">37m 53s</text>
+<text x="884.0" y="321" font-size="13" fill="#8b949e">opencode</text><rect x="970.0" y="310" width="180" height="16" rx="4" fill="#8b949e"/><text x="1158.0" y="323" font-size="13" font-weight="600" fill="#e6edf3">7h 47m</text>
+<rect x="884.0" y="360" width="332" height="40" rx="8" fill="#0d1117" stroke="#3fb950" stroke-width="1"/>
+<text x="1050.0" y="386" font-size="17" font-weight="700" fill="#3fb950" text-anchor="middle">12.7× faster</text>
+<text x="640.0" y="530" font-size="12.5" fill="#8b949e" text-anchor="middle">150 tasks: planted bugs, missing features, multi-file fixes, refactors — pass/fail decided by per-task verification scripts · rift 910 LLM calls vs opencode 933 · full methodology in docs/BENCHMARKS.md</text>
+</svg>

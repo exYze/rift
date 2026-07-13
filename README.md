@@ -10,6 +10,10 @@ A fast, flicker-free terminal coding agent built in Rust for **local models** �
 
 ![rift vs opencode — 50-task suite](docs/assets/benchmark-50.svg)
 
+**150-run suite on deepseek-v4-flash-dspark** (July 2026, 50 tasks × 3 runs, same suite on a vLLM server): **150/150 solved vs opencode's 149/150, 57% fewer prompt tokens, 12.7× faster wall time**.
+
+![rift vs opencode — 150-run suite on deepseek-v4-flash-dspark](docs/assets/benchmark-150-deepseek.svg)
+
 Rift is a ground-up Rust answer to opencode/Crush-style agents, designed around the three failure modes that plague them with local models:
 
 1. **Broken scrolling/streaming UX** → pre-wrapped line buffer with bottom-anchored scrolling; streaming never fights your scroll position.
