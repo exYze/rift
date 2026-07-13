@@ -12,14 +12,18 @@
 //! Commands:  {"cmd":"hello","edit_review":bool} | {"cmd":"prompt","text":…}
 //!            | {"cmd":"answer","id":…,"text":…} | {"cmd":"cancel"} | {"cmd":"undo"}
 //!            | {"cmd":"edit_decision","id":…,"apply":bool,"content":…}
-//! Events:    ready, capabilities (acks hello), history, iteration,
+//!            | {"cmd":"list_sessions"} | {"cmd":"list_models"}
+//!            | {"cmd":"set_model","model":…}
+//! Events:    ready (carries `commands` so consumers can feature-detect),
+//!            capabilities (acks hello), history, iteration,
 //!            thinking, content, tool_start, tool_result, info, warning,
 //!            plan, subagent_started, subagent, subagent_finished,
 //!            task_started, task_finished, ask (answer it by id),
 //!            edit_review (decide it by id), edit_review_closed,
 //!            done (always ends a turn), context ({used, limit} —
 //!            context-window occupancy, sent at startup and after each
-//!            turn's idle compaction).
+//!            turn's idle compaction), models (answers list_models),
+//!            model_changed (acks a successful set_model).
 //!
 //! Inline diff review is a capability the consumer opts into with
 //! `{"cmd":"hello","edit_review":true}` (the VS Code extension sends it at
@@ -32,7 +36,10 @@
 //! approval prompts, so older frontends are unaffected.
 
 use anyhow::Result;
-use rift_core::{Agent, AgentEvent, AskRequest, EditReviewReply, EditReviewRequest, SessionStore, TurnStats};
+use rift_core::{
+    Agent, AgentEvent, AskRequest, EditReviewReply, EditReviewRequest, ProviderConfig,
+    SessionStore, TurnStats,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::io::AsyncBufReadExt;
@@ -42,6 +49,14 @@ use tokio_util::sync::CancellationToken;
 /// The serve protocol version, carried in `ready` and `capabilities`.
 /// Bumped ONLY on breaking changes (docs/SERVE.md has the rules).
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The command set this build understands, advertised in `ready` so
+/// consumers feature-detect instead of probing (an unknown command would
+/// land a user-visible warning in their chat).
+const COMMANDS: &[&str] = &[
+    "hello", "prompt", "answer", "edit_decision", "cancel", "undo", "list_sessions",
+    "list_models", "set_model",
+];
 
 /// One event object per stdout line, flushed immediately — the consumer on
 /// the other side of the pipe renders in real time.
@@ -107,6 +122,46 @@ fn event_json(ev: &AgentEvent) -> Value {
     }
 }
 
+/// The authoritative hunking for an edit_review event: rift's own line diff
+/// as alternating same/change segments, so consumers render and reassemble
+/// accepted-hunk content without re-deriving a diff of their own.
+fn segments_json(old: &str, new: &str) -> Vec<Value> {
+    rift_core::diff_segments(old, new)
+        .into_iter()
+        .map(|s| match s {
+            rift_core::DiffSegment::Same(lines) => json!({"same": true, "lines": lines}),
+            rift_core::DiffSegment::Change { old, new } => {
+                json!({"same": false, "old": old, "new": new})
+            }
+        })
+        .collect()
+}
+
+/// Every model rift can currently reach, exactly as the `/model` argument
+/// expects it: the default host's list (bare names), then each configured
+/// provider's list as `provider/model`. Unreachable servers are skipped
+/// (short timeout — an offline provider must not wedge the picker). This is
+/// what lets consumers drop their own provider-routing reimplementations.
+async fn discover_models(host: &str, providers: &HashMap<String, ProviderConfig>) -> Vec<String> {
+    const PROBE: std::time::Duration = std::time::Duration::from_millis(2500);
+    let mut out = Vec::new();
+    // build_provider's bare-name path: the model string doesn't matter, the
+    // client is the default host's.
+    let (client, _) = crate::build_provider("_", host, providers);
+    if let Ok(Ok(models)) = tokio::time::timeout(PROBE, client.tags()).await {
+        out.extend(models.into_iter().map(|m| m.name));
+    }
+    let mut names: Vec<&String> = providers.keys().collect();
+    names.sort();
+    for name in names {
+        let (client, _) = crate::build_provider(&format!("{name}/_"), host, providers);
+        if let Ok(Ok(models)) = tokio::time::timeout(PROBE, client.tags()).await {
+            out.extend(models.into_iter().map(|m| format!("{name}/{}", m.name)));
+        }
+    }
+    out
+}
+
 /// Metadata for the past-chats picker: every saved session, newest first,
 /// each labelled by its first real user message so the consumer can show a
 /// human title. Best-effort — unreadable or corrupt files are skipped, never
@@ -150,8 +205,13 @@ enum ServeCmd {
     /// persist the approval and register the plugin's tools (and hooks)
     /// into the running agent. Runs on the agent task, which owns both.
     TrustPlugin(rift_core::Plugin),
+    /// Live model switch (the same preflight-and-swap as the TUI's /model).
+    /// Runs on the agent task because it mutates the agent's client/config;
+    /// queueing keeps it serialized with turns.
+    SetModel(String),
 }
 
+#[allow(clippy::too_many_arguments)] // one call site (main); a struct would just relocate the list
 pub async fn run_serve(
     mut agent: Agent,
     store: SessionStore,
@@ -160,6 +220,8 @@ pub async fn run_serve(
     resumed: Vec<rift_ollama::Message>,
     skills: Vec<rift_core::Skill>,
     pending_plugins: Vec<rift_core::Plugin>,
+    host: String,
+    providers: HashMap<String, ProviderConfig>,
 ) -> Result<()> {
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<ServeCmd>();
@@ -173,6 +235,11 @@ pub async fn run_serve(
     let cwd = std::env::current_dir()?.display().to_string();
     let session_path = store.path().display().to_string();
 
+    // The ADDRESSABLE model name (provider prefix intact): what set_model
+    // updates and the models event marks as current. Shared with the agent
+    // task, which owns the actual switch.
+    let model_addr = std::sync::Arc::new(std::sync::Mutex::new(model.clone()));
+
     // Turns run on their own task (same shape as the TUI) so stdin stays
     // responsive mid-turn for cancel and ask answers.
     let turn_ev = ev_tx.clone();
@@ -180,6 +247,9 @@ pub async fn run_serve(
     // Captured before the agent moves: the ready event carries num_ctx and
     // an initial gauge so resumed sessions show their fill level up front.
     let (initial_used, num_ctx) = agent.context_usage();
+    let switch_host = host.clone();
+    let switch_providers = providers.clone();
+    let switch_addr = model_addr.clone();
     let agent_task = tokio::spawn(async move {
         while let Some(cmd) = prompt_rx.recv().await {
             match cmd {
@@ -226,6 +296,33 @@ pub async fn run_serve(
                         names.join(", ")
                     )));
                 }
+                // The same preflight-and-swap as the TUI's /model. Emitted
+                // straight to stdout (not through the event channel) because
+                // model_changed isn't turn traffic — but it still runs here,
+                // serialized after any in-flight turn, since it mutates the
+                // agent.
+                ServeCmd::SetModel(arg) => {
+                    match crate::switch_model(&mut agent, &arg, &switch_host, &switch_providers).await {
+                        Ok(note) => {
+                            if let Ok(mut m) = switch_addr.lock() {
+                                *m = arg.clone();
+                            }
+                            emit(json!({
+                                "event": "model_changed",
+                                "model": arg,
+                                "num_ctx": agent.cfg.num_ctx,
+                                "note": note.trim(),
+                            }));
+                            // The switch may have adopted/clamped the budget:
+                            // refresh the consumer's context gauge.
+                            let (used, limit) = agent.context_usage();
+                            let _ = turn_ev.send(AgentEvent::Context { used, limit });
+                        }
+                        Err(e) => {
+                            let _ = turn_ev.send(AgentEvent::Warning(format!("model switch failed: {e:#}")));
+                        }
+                    }
+                }
                 // Same semantics as the TUI's /undo: revert the write/edit
                 // journal's most recent turn; conversation stays intact.
                 ServeCmd::Undo => {
@@ -261,6 +358,10 @@ pub async fn run_serve(
         // Skills + plugin commands invocable via a "/skill:<name> [task]"
         // prompt — listed so consumers can offer completion (additive v1).
         "skills": skills.iter().map(|s| json!({"name": s.name, "description": s.description})).collect::<Vec<_>>(),
+        // Feature detection (additive v1): the command set this build
+        // accepts, so consumers gate UI on what's actually there instead
+        // of probing (unknown commands warn into the user's chat).
+        "commands": COMMANDS,
     }));
     emit(json!({"event": "context", "used": initial_used, "limit": num_ctx}));
     if !resumed.is_empty() {
@@ -374,6 +475,10 @@ pub async fn run_serve(
                             "path": req.path.display().to_string(),
                             "old": req.old,
                             "new": req.new,
+                            // rift's own hunking (added in 2.6.3, additive):
+                            // consumers review per-segment instead of
+                            // re-deriving a diff from old/new themselves.
+                            "segments": segments_json(&req.old, &req.new),
                         }));
                         pending_reviews.insert(ask_seq, (req.reply, req.new));
                     }
@@ -491,7 +596,33 @@ pub async fn run_serve(
                     Some("list_sessions") => {
                         emit(json!({"event": "sessions", "items": session_list()}));
                     }
-                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/edit_decision/cancel/undo/list_sessions)"})),
+                    // Model picker: read-only network probes, so it runs on
+                    // its own task — discovery must not block the select
+                    // loop (or a turn) while servers time out.
+                    Some("list_models") => {
+                        let host = host.clone();
+                        let providers = providers.clone();
+                        let addr = model_addr.clone();
+                        tokio::spawn(async move {
+                            let models = discover_models(&host, &providers).await;
+                            let current = addr.lock().map(|m| m.clone()).unwrap_or_default();
+                            emit(json!({"event": "models", "models": models, "current": current}));
+                        });
+                    }
+                    Some("set_model") => {
+                        let Some(name) = v["model"].as_str().filter(|s| !s.trim().is_empty()) else {
+                            emit(json!({"event": "warning", "text": "set_model needs a 'model' field"}));
+                            continue;
+                        };
+                        // Mid-turn switches would change the model under the
+                        // running turn's feet; the TUI has the same guard.
+                        if busy {
+                            emit(json!({"event": "warning", "text": "turn in progress — cancel it or wait before switching models"}));
+                            continue;
+                        }
+                        let _ = prompt_tx.send(ServeCmd::SetModel(name.trim().to_string()));
+                    }
+                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/edit_decision/cancel/undo/list_sessions/list_models/set_model)"})),
                 }
             }
         }
@@ -579,5 +710,31 @@ mod tests {
     #[test]
     fn protocol_version_is_one_until_a_deliberate_break() {
         assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    /// edit_review's `segments` field (added 2.6.3, additive): alternating
+    /// {"same":true,"lines":[…]} / {"same":false,"old":[…],"new":[…]} runs.
+    /// The VS Code reviewer reassembles accepted-hunk content from exactly
+    /// this shape — a drift here silently corrupts applied edits.
+    #[test]
+    fn edit_review_segments_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(segments_json("a\nb\nc", "a\nB\nc")).unwrap(),
+            json!([
+                {"same": true, "lines": ["a"]},
+                {"same": false, "old": ["b"], "new": ["B"]},
+                {"same": true, "lines": ["c"]},
+            ])
+        );
+    }
+
+    /// `commands` in ready is the consumer's feature-detection surface:
+    /// entries may be added within v1, never removed or renamed.
+    #[test]
+    fn ready_commands_cover_the_v1_set() {
+        for cmd in ["hello", "prompt", "answer", "edit_decision", "cancel", "undo",
+                    "list_sessions", "list_models", "set_model"] {
+            assert!(COMMANDS.contains(&cmd), "command '{cmd}' missing from ready.commands");
+        }
     }
 }

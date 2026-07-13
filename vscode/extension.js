@@ -24,64 +24,9 @@ function riftConfigPath() {
       : path.join(os.homedir(), '.config');
   return path.join(base, 'rift', 'config.json');
 }
-
-function readRiftConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(riftConfigPath(), 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-async function fetchJson(url, headers = {}) {
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(4000) });
-  if (!res.ok) throw new Error(`${res.status}`);
-  return res.json();
-}
-
-/** Every model rift can currently reach: the default host's list (Ollama
- *  /api/tags, or /v1/models for OpenAI-style hosts like vLLM), plus each
- *  configured provider's /v1/models as "provider/model" entries — the same
- *  prefix routing rift itself uses. Unreachable servers are skipped. */
-async function discoverModels() {
-  const rc = readRiftConfig();
-  const models = [];
-  const host = (config().get('host') || rc.host || 'http://localhost:11434').replace(/\/+$/, '');
-  try {
-    if (host.endsWith('/v1')) {
-      const d = await fetchJson(`${host}/models`);
-      for (const m of d.data || []) models.push(m.id);
-    } else {
-      const d = await fetchJson(`${host}/api/tags`);
-      for (const m of d.models || []) models.push(m.name);
-    }
-  } catch {
-    /* default host down — provider entries below may still work */
-  }
-  for (const [name, p] of Object.entries(rc.providers || {})) {
-    if (!p || !p.base_url) continue;
-    try {
-      const base = p.base_url.replace(/\/+$/, '');
-      const key = p.api_key || (p.api_key_env ? process.env[p.api_key_env] : undefined);
-      let ids = [];
-      if (p.kind === 'anthropic') {
-        const d = await fetchJson(`${base}/v1/models`, {
-          'x-api-key': key || '',
-          'anthropic-version': '2023-06-01',
-        });
-        ids = (d.data || []).map((m) => m.id);
-      } else {
-        const url = base.endsWith('/v1') ? `${base}/models` : `${base}/v1/models`;
-        const d = await fetchJson(url, key ? { Authorization: `Bearer ${key}` } : {});
-        ids = (d.data || []).map((m) => m.id);
-      }
-      for (const id of ids) models.push(`${name}/${id}`);
-    } catch {
-      /* provider unreachable — skip */
-    }
-  }
-  return models;
-}
+// Model discovery and provider routing live in rift now (the `list_models`
+// serve command) — one source of truth instead of a JS re-implementation
+// reading rift's config and probing servers itself.
 
 function workspaceRoot() {
   const folders = vscode.workspace.workspaceFolders;
@@ -114,79 +59,19 @@ function riftArgs() {
 // accept/reject individual hunks via CodeLens; the assembled result goes
 // back as an edit_decision and only then does rift write the file.
 
-/** Line-based Myers diff of a → b as an op list ('same' | 'del' | 'ins').
- *  Falls back to one whole-file change when the edit distance exceeds the
- *  cap — review still works, just as a single hunk. */
-function diffOps(a, b) {
-  const n = a.length;
-  const m = b.length;
-  if (!n) return b.map(() => 'ins');
-  if (!m) return a.map(() => 'del');
-  const maxD = Math.min(n + m, 2000);
-  const offset = maxD;
-  let v = new Array(2 * maxD + 1).fill(0);
-  const trace = [];
-  let found = -1;
-  for (let d = 0; d <= maxD && found < 0; d++) {
-    trace.push(v.slice());
-    for (let k = -d; k <= d; k += 2) {
-      let x;
-      if (k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])) x = v[offset + k + 1];
-      else x = v[offset + k - 1] + 1;
-      let y = x - k;
-      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
-      v[offset + k] = x;
-      if (x >= n && y >= m) {
-        found = d;
-        break;
-      }
-    }
+/** Reviewable segments for an edit_review event. rift ships its own
+ *  authoritative hunking on the event (`segments`, rift ≥ 2.6.3) — use it
+ *  verbatim. An older rift without it degrades to one whole-file hunk:
+ *  review still works, just without per-hunk granularity. */
+function reviewSegments(ev) {
+  if (Array.isArray(ev.segments)) {
+    return ev.segments.map((s) =>
+      s.same
+        ? { same: true, lines: s.lines || [] }
+        : { same: false, oldLines: s.old || [], newLines: s.new || [] }
+    );
   }
-  if (found < 0) return [...a.map(() => 'del'), ...b.map(() => 'ins')];
-  const ops = [];
-  let x = n;
-  let y = m;
-  for (let d = found; d > 0; d--) {
-    const vp = trace[d];
-    const k = x - y;
-    const prevK = k === -d || (k !== d && vp[offset + k - 1] < vp[offset + k + 1]) ? k + 1 : k - 1;
-    const prevX = vp[offset + prevK];
-    const prevY = prevX - prevK;
-    while (x > prevX && y > prevY) { x--; y--; ops.push('same'); }
-    if (x === prevX) { y--; ops.push('ins'); }
-    else { x--; ops.push('del'); }
-  }
-  while (x > 0 && y > 0) { x--; y--; ops.push('same'); }
-  while (x > 0) { x--; ops.push('del'); }
-  while (y > 0) { y--; ops.push('ins'); }
-  return ops.reverse();
-}
-
-/** Group old/new text into alternating unchanged/changed segments — each
- *  changed segment is one reviewable hunk. */
-function diffSegments(oldText, newText) {
-  const a = oldText.split('\n');
-  const b = newText.split('\n');
-  const segs = [];
-  let ai = 0;
-  let bi = 0;
-  for (const op of diffOps(a, b)) {
-    const last = segs[segs.length - 1];
-    if (op === 'same') {
-      if (last && last.same) last.lines.push(a[ai]);
-      else segs.push({ same: true, lines: [a[ai]] });
-      ai++; bi++;
-    } else {
-      let seg = last && !last.same ? last : null;
-      if (!seg) {
-        seg = { same: false, oldLines: [], newLines: [] };
-        segs.push(seg);
-      }
-      if (op === 'del') { seg.oldLines.push(a[ai]); ai++; }
-      else { seg.newLines.push(b[bi]); bi++; }
-    }
-  }
-  return segs;
+  return [{ same: false, oldLines: ev.old.split('\n'), newLines: ev.new.split('\n') }];
 }
 
 /** The right-hand document: unchanged text plus each hunk in its currently
@@ -236,7 +121,7 @@ class DiffReviewer {
    *  to rift; `notify` updates the chat card when the review resolves. */
   register(ev, send, notify) {
     const rel = vscode.workspace.asRelativePath(ev.path, false);
-    const segments = diffSegments(ev.old, ev.new);
+    const segments = reviewSegments(ev);
     // The basename keeps its extension so the diff gets real syntax
     // highlighting; the id makes the pair unique.
     const name = path.basename(ev.path);
@@ -424,6 +309,9 @@ class RiftChatProvider {
     /** Set when a past-chats list was requested before rift was running —
      *  the request is sent once the `ready` handshake arrives. */
     this.pendingListSessions = false;
+    /** Commands advertised by this rift's `ready` event — the feature-
+     *  detection surface for list_models/set_model vs older binaries. */
+    this.commands = [];
     this.stderrTail = [];
     this.stdoutBuf = '';
     /** Context-window occupancy from rift's `context` events: estimated
@@ -605,6 +493,7 @@ class RiftChatProvider {
     proc.on('exit', (code) => {
       this.proc = null;
       this.busy = false;
+      this.commands = []; // capability set died with the process
       this.reviewer.cancelAll('cancelled — rift exited');
       if (code !== 0 && code != null) {
         const tail = this.stderrTail.slice(-4).join('\n');
@@ -637,6 +526,10 @@ class RiftChatProvider {
       }
       // Skills + plugin commands, completable in the webview as /skill:<name>.
       this.skills = ev.skills || [];
+      this.commands = ev.commands || [];
+      // rift owns model discovery: populate the dropdown from the running
+      // process (provider routing included), not from HTTP probes of our own.
+      if (this.commands.includes('list_models')) this.write({ cmd: 'list_models' });
       // This extension speaks serve protocol v1 (docs/SERVE.md). An absent
       // protocol_version means a pre-1.10 rift — same v1 wire shapes.
       if (ev.protocol_version && ev.protocol_version > 1) {
@@ -667,6 +560,20 @@ class RiftChatProvider {
       // Answer to a list_sessions request — a native quick-pick, not
       // transcript, so handle it here and don't record/forward it.
       this.showSessionPicker(ev.items || []);
+      return;
+    } else if (ev.event === 'models') {
+      // Answer to list_models: rift's reachable models, provider prefixes
+      // included. Dropdown state, not transcript — don't record/forward.
+      if (this.view) {
+        this.view.webview.postMessage({ type: 'models', models: ev.models || [], current: ev.current || this.model });
+      }
+      return;
+    } else if (ev.event === 'model_changed') {
+      // A live set_model landed: same chat, new model. The context event
+      // that follows refreshes the gauge for any num_ctx change.
+      this.model = ev.model;
+      this.post({ type: 'rift', ev: { event: 'info', text: `switched to ${ev.model}${ev.note ? ' ' + ev.note : ''}` } });
+      this.postStatus();
       return;
     }
     // Thinking/content deltas are high-volume; replaying them is what makes
@@ -775,7 +682,7 @@ class RiftChatProvider {
         this.requestSessions();
         break;
       case 'refreshModels':
-        this.postModels();
+        this.postModels(true);
         break;
       case 'queryFiles':
         this.postFiles(m.query, m.token);
@@ -784,9 +691,14 @@ class RiftChatProvider {
         config()
           .update('model', m.model || undefined, vscode.ConfigurationTarget.Global)
           .then(() => {
-            // Respawn resuming the same session: the conversation continues
-            // on the newly selected model (rift recomposes the system prompt).
-            if (this.proc) this.restart(this.continueArgs());
+            // Live switch on the running process — same conversation, no
+            // respawn (rift preflights the target and swaps the client).
+            // Only an older rift without set_model needs the restart path.
+            if (this.proc && m.model && this.commands.includes('set_model')) {
+              this.write({ cmd: 'set_model', model: m.model });
+            } else if (this.proc) {
+              this.restart(this.continueArgs());
+            }
             this.postSettings();
           });
         break;
@@ -906,16 +818,25 @@ class RiftChatProvider {
     }
   }
 
-  postModels() {
-    discoverModels().then((models) => {
-      if (this.view) {
-        this.view.webview.postMessage({
-          type: 'models',
-          models,
-          current: config().get('model') || '',
-        });
-      }
-    });
+  /** Populate the model dropdown. rift answers list_models with everything
+   *  it can reach (default host + configured providers). Until a process is
+   *  running the dropdown just shows the configured model; `spawn` (the
+   *  explicit ⟳ button) starts rift, whose `ready` then requests the full
+   *  list. A passive webview open never spawns a process. */
+  postModels(spawn = false) {
+    if (this.proc && this.commands.includes('list_models')) {
+      this.write({ cmd: 'list_models' });
+      return;
+    }
+    if (this.view) {
+      const current = this.model || config().get('model') || '';
+      this.view.webview.postMessage({
+        type: 'models',
+        models: current ? [current] : [],
+        current,
+      });
+    }
+    if (!this.proc && spawn) this.ensureServer();
   }
 
   restart(extraArgs) {

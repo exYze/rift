@@ -359,36 +359,7 @@ async fn cmd_model(
     // Route `provider/model` through a configured provider; a bare name uses
     // the default Ollama host. Preflight the *target* client, then swap it in
     // so the rest of the session talks to the right endpoint.
-    let (client, actual) = crate::build_provider(arg, &cx.host, &cx.providers);
-    // Same preflight as startup: capability check + num_ctx clamp.
-    let show = client
-        .show(&actual)
-        .await
-        .map_err(|e| anyhow!("model '{arg}' not usable: {e}"))?;
-    if !show.supports("tools") {
-        bail!("model '{arg}' does not have the 'tools' capability");
-    }
-    agent.cfg.think = if show.supports("thinking") { None } else { Some(false) };
-    let mut note = String::new();
-    if let Some(max) = show.context_length() {
-        // Mirrors startup: provider-routed models don't send num_ctx to the
-        // server, so a bigger reported context is adopted as the working
-        // budget (capped — huge hosted contexts would bloat every request).
-        const ADOPT_CTX_MAX: u64 = 131_072;
-        let provider_routed = actual != arg;
-        if agent.cfg.num_ctx > max {
-            note = format!(" (num_ctx clamped {} → {max})", agent.cfg.num_ctx);
-            agent.cfg.num_ctx = agent.cfg.num_ctx.min(max);
-        } else if provider_routed && max > agent.cfg.num_ctx {
-            let adopted = max.min(ADOPT_CTX_MAX);
-            if adopted > agent.cfg.num_ctx {
-                note = format!(" (context budget {} → {adopted}; /ctx overrides)", agent.cfg.num_ctx);
-                agent.cfg.num_ctx = adopted;
-            }
-        }
-    }
-    agent.cfg.model = actual.clone();
-    agent.set_client(client);
+    let note = crate::switch_model(agent, arg, &cx.host, &cx.providers).await?;
     // Keep the addressable name current so /fork relaunches with it.
     cx.model_addr = arg.to_string();
     // The UI carries the ADDRESSABLE name (provider prefix intact) — it's

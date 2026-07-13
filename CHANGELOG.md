@@ -3,6 +3,30 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.6.3 — 2026-07-12
+
+- **Serve protocol: rift owns model discovery and switching** (additive,
+  still protocol v1 — docs/SERVE.md):
+  - `list_models` command → `models` event: every reachable model (default
+    host + each configured provider as `provider/model`), probed
+    server-side with the same routing the agent uses. The VS Code extension
+    drops its JS re-implementation that read rift's config and probed
+    servers itself — one source of truth, no drift.
+  - `set_model` command → `model_changed` event: live model switch on the
+    same conversation — the TUI's `/model` preflight-and-swap (now shared
+    code, `switch_model`), so the extension stops killing and respawning
+    the process on every dropdown change.
+  - `ready.commands` advertises the command set for feature detection;
+    the extension gates the new paths on it and keeps working against
+    older binaries.
+- **Serve protocol: `edit_review` events carry `segments`** — rift's own
+  line diff (Myers, in rift-core) as alternating same/change runs, the
+  authoritative hunking for inline review. The VS Code extension renders
+  and reassembles accepted hunks from it instead of re-deriving a diff in
+  JS (~140 lines deleted; older rifts degrade to whole-file review).
+  Wire shapes pinned by the conformance suite; verified end-to-end against
+  a live vLLM server (discovery, live switch, per-hunk apply to disk).
+
 ## v2.6.2 — 2026-07-12
 
 - **README accuracy pass**: the tagline now reflects the multi-server

@@ -119,6 +119,121 @@ pub fn preview_diff(old: &str, new: &str, max_lines: usize) -> Vec<String> {
     out
 }
 
+/// One alternating run of a line diff: shared lines, or an old→new change.
+/// The reviewable unit for interactive diff review — each `Change` is one
+/// hunk a frontend can accept or reject independently.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiffSegment {
+    Same(Vec<String>),
+    Change { old: Vec<String>, new: Vec<String> },
+}
+
+/// Line-based Myers diff of `old` → `new` as alternating segments. This is
+/// the authoritative hunking for edit review (the serve protocol ships it
+/// with every edit_review event) — frontends render and reassemble from it
+/// instead of re-deriving their own diff. Degrades to a single whole-file
+/// `Change` when the edit distance exceeds the cap: review still works,
+/// just as one hunk.
+pub fn diff_segments(old: &str, new: &str) -> Vec<DiffSegment> {
+    let a: Vec<&str> = old.split('\n').collect();
+    let b: Vec<&str> = new.split('\n').collect();
+    let mut segs: Vec<DiffSegment> = Vec::new();
+    let mut push = |op: u8, line: &str| {
+        match (op, segs.last_mut()) {
+            (b'=', Some(DiffSegment::Same(lines))) => lines.push(line.into()),
+            (b'=', _) => segs.push(DiffSegment::Same(vec![line.into()])),
+            (b'-', Some(DiffSegment::Change { old, .. })) => old.push(line.into()),
+            (b'+', Some(DiffSegment::Change { new, .. })) => new.push(line.into()),
+            (b'-', _) => segs.push(DiffSegment::Change { old: vec![line.into()], new: vec![] }),
+            (b'+', _) => segs.push(DiffSegment::Change { old: vec![], new: vec![line.into()] }),
+            _ => unreachable!(),
+        }
+    };
+    for (op, line) in myers_ops(&a, &b) {
+        push(op, line);
+    }
+    segs
+}
+
+/// Myers O(ND) as a flat op list: (b'=' shared | b'-' deleted | b'+'
+/// inserted, the line). Capped at edit distance 2000 — past that, one
+/// whole-file delete+insert (same fallback the reference JS reviewer used).
+fn myers_ops<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<(u8, &'a str)> {
+    let (n, m) = (a.len(), b.len());
+    if n == 0 {
+        return b.iter().map(|l| (b'+', *l)).collect();
+    }
+    if m == 0 {
+        return a.iter().map(|l| (b'-', *l)).collect();
+    }
+    let max_d = (n + m).min(2000);
+    let offset = max_d as isize;
+    let mut v = vec![0usize; 2 * max_d + 1];
+    let mut trace: Vec<Vec<usize>> = Vec::new();
+    let mut found: isize = -1;
+    'outer: for d in 0..=max_d as isize {
+        trace.push(v.clone());
+        let mut k = -d;
+        while k <= d {
+            let i = (offset + k) as usize;
+            let mut x = if k == -d || (k != d && v[i - 1] < v[i + 1]) { v[i + 1] } else { v[i - 1] + 1 };
+            let mut y = (x as isize - k) as usize;
+            while x < n && y < m && a[x] == b[y] {
+                x += 1;
+                y += 1;
+            }
+            v[i] = x;
+            if x >= n && y >= m {
+                found = d;
+                break 'outer;
+            }
+            k += 2;
+        }
+    }
+    if found < 0 {
+        let mut ops: Vec<(u8, &str)> = a.iter().map(|l| (b'-', *l)).collect();
+        ops.extend(b.iter().map(|l| (b'+', *l)));
+        return ops;
+    }
+    let mut ops: Vec<(u8, &str)> = Vec::with_capacity(n + m);
+    let (mut x, mut y) = (n, m);
+    for d in (1..=found).rev() {
+        let vp = &trace[d as usize];
+        let k = x as isize - y as isize;
+        let i = (offset + k) as usize;
+        let prev_k = if k == -d || (k != d && vp[i - 1] < vp[i + 1]) { k + 1 } else { k - 1 };
+        let prev_x = vp[(offset + prev_k) as usize];
+        let prev_y = (prev_x as isize - prev_k) as usize;
+        while x > prev_x && y > prev_y {
+            x -= 1;
+            y -= 1;
+            ops.push((b'=', a[x]));
+        }
+        if x == prev_x {
+            y -= 1;
+            ops.push((b'+', b[y]));
+        } else {
+            x -= 1;
+            ops.push((b'-', a[x]));
+        }
+    }
+    while x > 0 && y > 0 {
+        x -= 1;
+        y -= 1;
+        ops.push((b'=', a[x]));
+    }
+    while x > 0 {
+        x -= 1;
+        ops.push((b'-', a[x]));
+    }
+    while y > 0 {
+        y -= 1;
+        ops.push((b'+', b[y]));
+    }
+    ops.reverse();
+    ops
+}
+
 /// One step of the model's self-declared task checklist (the `plan` tool).
 #[derive(Debug, Clone)]
 pub struct PlanItem {
@@ -2692,6 +2807,47 @@ mod tests {
         let d = preview_diff(&old, &new, 10);
         assert_eq!(d.len(), 11);
         assert!(d.last().unwrap().contains("more diff lines"));
+    }
+
+    #[test]
+    fn diff_segments_hunks_a_line_diff() {
+        use DiffSegment::{Change, Same};
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Two separated changes → two hunks with shared context between.
+        assert_eq!(
+            diff_segments("a\nb\nc\nd\ne", "a\nB\nc\nd\nE"),
+            vec![
+                Same(s(&["a"])),
+                Change { old: s(&["b"]), new: s(&["B"]) },
+                Same(s(&["c", "d"])),
+                Change { old: s(&["e"]), new: s(&["E"]) },
+            ]
+        );
+        // Pure insertion keeps its surroundings as one Same run each side.
+        assert_eq!(
+            diff_segments("a\nc", "a\nb\nc"),
+            vec![Same(s(&["a"])), Change { old: vec![], new: s(&["b"]) }, Same(s(&["c"]))]
+        );
+        // Identical input is a single Same segment.
+        assert_eq!(diff_segments("x\ny", "x\ny"), vec![Same(s(&["x", "y"]))]);
+        // Reassembling "all hunks accepted" must reproduce `new` exactly —
+        // the invariant the edit reviewer's apply path depends on.
+        let (old, new) = ("fn a() {}\nfn b() {}\nfn c() {}", "fn a() {}\nfn B() {}\nfn c() {}\nfn d() {}");
+        let rebuilt: Vec<String> = diff_segments(old, new)
+            .into_iter()
+            .flat_map(|seg| match seg {
+                Same(lines) => lines,
+                Change { new, .. } => new,
+            })
+            .collect();
+        assert_eq!(rebuilt.join("\n"), new);
+        // Past the edit-distance cap the diff degrades to ONE whole-file
+        // hunk — review still works, never panics.
+        let big_old: String = (0..3000).map(|i| format!("o{i}\n")).collect();
+        let big_new: String = (0..3000).map(|i| format!("n{i}\n")).collect();
+        let segs = diff_segments(&big_old, &big_new);
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], Change { old, new } if old.len() == 3001 && new.len() == 3001));
     }
 
     #[tokio::test]

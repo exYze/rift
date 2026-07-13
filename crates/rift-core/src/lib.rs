@@ -32,8 +32,8 @@ pub use swarm::{
 };
 pub use permissions::{Decision, RuleSet};
 pub use tools::{
-    builtin_bash_deny, AskRequest, AskUserTool, EditRecord, EditReviewReply, EditReviewRequest,
-    PlanItem, Tool, ToolCtx, ToolRegistry,
+    builtin_bash_deny, diff_segments, AskRequest, AskUserTool, DiffSegment, EditRecord,
+    EditReviewReply, EditReviewRequest, PlanItem, Tool, ToolCtx, ToolRegistry,
 };
 pub use trace::{FailureCounters, TraceWriter};
 
