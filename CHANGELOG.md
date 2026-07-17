@@ -3,6 +3,18 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.6.4 — 2026-07-16
+
+- **TUI input box scales with the window**: the prompt input rendered each
+  line without wrapping and sized itself from newline count alone, so on a
+  non-maximized (narrow) window a long typed line ran off the right edge —
+  its tail, and often the cursor, were clipped until the window was widened.
+  The input now hard-wraps to the pane width: long lines fold into as many
+  rows as needed, the box grows with them up to a cap (then scrolls to keep
+  the cursor in view), and its height is recomputed for the current width.
+  A cursor at the end of a full-width line gets its own row so it's never
+  clipped.
+
 ## v2.6.3 — 2026-07-12
 
 - **Serve protocol: rift owns model discovery and switching** (additive,
