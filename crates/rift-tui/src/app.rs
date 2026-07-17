@@ -962,6 +962,68 @@ mod tests {
     }
 
     #[test]
+    fn input_wraps_to_width_and_tracks_cursor() {
+        // A single long line folds into ceil(len/width) rows instead of
+        // running off the edge — the reported bug.
+        let (rows, cr, cc) = wrap_input("abcdefghij", 0, 4);
+        assert_eq!(rows, vec!["abcd", "efgh", "ij"]);
+        assert_eq!((cr, cc), (0, 0));
+        // Cursor mid-text lands on the right wrapped row/column.
+        let (_, cr, cc) = wrap_input("abcdefghij", 6, 4);
+        assert_eq!((cr, cc), (1, 2)); // 6/4 = row 1, 6%4 = col 2
+        // Cursor at the very end of a full-width line gets its own row so it
+        // stays visible (terminal-style wrap), not clipped past the edge.
+        let (rows, cr, cc) = wrap_input("abcd", 4, 4);
+        assert_eq!(rows, vec!["abcd", ""]);
+        assert_eq!((cr, cc), (1, 0));
+        // Explicit newlines still split; continuation rows are counted.
+        let (rows, _, _) = wrap_input("hello world\nbye", 999, 5);
+        assert_eq!(rows, vec!["hello", " worl", "d", "bye"]);
+        // Empty input is one row; height includes the two borders.
+        assert_eq!(wrap_input("", 0, 4).0, vec![String::new()]);
+        assert_eq!(input_height("", 0, 80), 3);
+    }
+
+    #[test]
+    fn input_pane_renders_long_line_across_multiple_rows() {
+        // End-to-end render at a narrow width: a long line must appear on
+        // several rows, not run off the right edge (the reported bug).
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = App::new(String::new(), vec![], theme::DARK, std::path::PathBuf::from("."));
+        app.input = "x".repeat(100);
+        app.cursor = app.input.len();
+        let mut term = Terminal::new(TestBackend::new(30, 20)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let mut rows_with_text = 0;
+        for y in 0..buf.area.height {
+            let mut s = String::new();
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+            if s.contains("xx") {
+                // No row may overflow the frame width.
+                assert!(s.chars().count() <= 30, "row wider than frame: {s:?}");
+                rows_with_text += 1;
+            }
+        }
+        assert!(rows_with_text >= 2, "input did not wrap (rows_with_text={rows_with_text})");
+    }
+
+    #[test]
+    fn input_height_grows_with_wrapping_and_is_capped() {
+        // Narrow terminal: a line that fits at full width now wraps to more
+        // rows, so the box grows — this is the fix for text disappearing.
+        let long = "x".repeat(50);
+        assert!(input_height(&long, 0, 20) > input_height(&long, 0, 200));
+        // But never past the cap (+2 borders), so a huge paste can't eat the
+        // whole screen — it scrolls instead.
+        let huge = "y".repeat(10_000);
+        assert_eq!(input_height(&huge, 0, 30), (MAX_INPUT_ROWS + 2) as u16);
+    }
+
+    #[test]
     fn gui_editors_recognized_terminal_editors_left_to_handover() {
         // GUI editors keep the TUI up with the modal; recognizing these is
         // what fixes the notepad "blank terminal" bug.
@@ -2084,9 +2146,68 @@ impl App {
     }
 }
 
-fn input_height(input: &str) -> u16 {
-    let lines = input.lines().count().clamp(1, 6) as u16;
-    lines + 2 // borders
+/// Max input rows shown at once before the box stops growing and scrolls to
+/// follow the cursor — keeps a long paste from eating the whole screen.
+const MAX_INPUT_ROWS: usize = 8;
+
+/// Columns available for input text on one row: the terminal width minus the
+/// block borders (2) and the "❯ "/"… " prefix (2). At least 1.
+fn input_content_width(term_width: u16) -> usize {
+    (term_width as usize).saturating_sub(4).max(1)
+}
+
+/// Wrap the input to `content_w` columns, returning the display rows (prefix
+/// excluded) plus the cursor's (row, column) among them. Every logical line
+/// (split on '\n') hard-wraps into chunks of `content_w`; a cursor sitting
+/// exactly at the end of a full-width line gets its own trailing row, the way
+/// a terminal wraps it. This is what lets the input box scale with the window
+/// instead of running text off the right edge.
+fn wrap_input(input: &str, cursor_byte: usize, content_w: usize) -> (Vec<String>, usize, usize) {
+    let w = content_w.max(1);
+    let cursor = cursor_byte.min(input.len());
+    let cur_line = input[..cursor].matches('\n').count();
+    let line_start = input[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let cursor_char_col = input[line_start..cursor].chars().count();
+
+    let mut rows: Vec<String> = Vec::new();
+    let mut cursor_row = 0;
+    let mut cursor_col = 0;
+    for (li, line) in input.split('\n').enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let base = rows.len();
+        let mut off = 0;
+        while off < chars.len() {
+            let end = (off + w).min(chars.len());
+            rows.push(chars[off..end].iter().collect());
+            off = end;
+        }
+        if chars.is_empty() {
+            rows.push(String::new());
+        }
+        if li == cur_line {
+            let seg = cursor_char_col / w;
+            if seg >= rows.len() - base {
+                // Cursor one past the last full-width segment — its own row.
+                rows.push(String::new());
+                cursor_row = rows.len() - 1;
+                cursor_col = 0;
+            } else {
+                cursor_row = base + seg;
+                cursor_col = cursor_char_col % w;
+            }
+        }
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    (rows, cursor_row, cursor_col)
+}
+
+/// Height of the input pane (including borders) for the current text, cursor,
+/// and terminal width — grows with wrapped rows up to [`MAX_INPUT_ROWS`].
+fn input_height(input: &str, cursor: usize, term_width: u16) -> u16 {
+    let (rows, _, _) = wrap_input(input, cursor, input_content_width(term_width));
+    (rows.len().clamp(1, MAX_INPUT_ROWS) as u16) + 2
 }
 
 /// `"editor"` from the user config; beats $EDITOR/$VISUAL. A global because
@@ -2279,7 +2400,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let [main_area, status_area, input_area] = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(1),
-        Constraint::Length(input_height(&app.input)),
+        Constraint::Length(input_height(&app.input, app.cursor, frame.area().width)),
     ])
     .areas(frame.area());
 
@@ -2445,31 +2566,32 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let input_block = Block::bordered().title(input_title).border_style(unfocused_style);
     let input_inner = input_block.inner(input_area);
     frame.render_widget(input_block, input_area);
-    let mut lines: Vec<Line> = Vec::new();
     app.cursor = app.cursor.min(app.input.len());
-    let cur_line_idx = app.input[..app.cursor].matches('\n').count();
-    let col = app.cursor - line_start(&app.input, app.cursor);
-    let input_lines: Vec<&str> = if app.input.is_empty() { vec![""] } else { app.input.split('\n').collect() };
-    let shown = input_lines.len().min(input_inner.height as usize).max(1);
-    // Window follows the cursor, not just the tail.
-    let start = (input_lines.len() - shown).min(cur_line_idx);
-    for (i, l) in input_lines[start..].iter().take(shown).enumerate() {
-        let abs = start + i;
-        let prefix = if abs == 0 { "❯ " } else { "… " };
+    // Wrap to the pane width so long lines fold instead of running off the
+    // right edge; the visible window scrolls to keep the cursor in view.
+    let content_w = (input_inner.width as usize).saturating_sub(2).max(1);
+    let (rows, cursor_row, cursor_col) = wrap_input(&app.input, app.cursor, content_w);
+    let visible = (input_inner.height as usize).max(1);
+    let start = if cursor_row >= visible { cursor_row + 1 - visible } else { 0 };
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(start).take(visible) {
+        // ❯ marks the very first row; every wrap/continuation row gets ….
+        let prefix = if i == 0 { "❯ " } else { "… " };
         let mut spans = vec![Span::styled(prefix, Style::default().fg(t.accent))];
-        if abs == cur_line_idx {
-            // Split the line at the cursor; render the char under it reversed.
-            let split = col.min(l.len());
-            let (before, rest) = l.split_at(split);
-            let (under, after) = match rest.chars().next() {
-                Some(c) => (c.to_string(), &rest[c.len_utf8()..]),
-                None => (" ".to_string(), rest),
+        if i == cursor_row {
+            let chars: Vec<char> = row.chars().collect();
+            let split = cursor_col.min(chars.len());
+            let before: String = chars[..split].iter().collect();
+            let (under, after) = if split < chars.len() {
+                (chars[split].to_string(), chars[split + 1..].iter().collect::<String>())
+            } else {
+                (" ".to_string(), String::new())
             };
-            spans.push(Span::raw(before.to_string()));
+            spans.push(Span::raw(before));
             spans.push(Span::styled(under, Style::default().add_modifier(Modifier::REVERSED)));
-            spans.push(Span::raw(after.to_string()));
+            spans.push(Span::raw(after));
         } else {
-            spans.push(Span::raw((*l).to_string()));
+            spans.push(Span::raw(row.clone()));
         }
         lines.push(Line::from(spans));
     }
