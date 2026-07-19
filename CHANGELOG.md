@@ -3,6 +3,18 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## Unreleased
+
+- **`rift github install` — local-first GitHub integration**: writes a
+  single self-hosted Actions workflow (`.github/workflows/rift.yml`) into
+  the current repo. Maintainers comment `/rift <task>` on an issue or PR;
+  a runner they control works the task headless against their own model
+  server (`RIFT_HOST` secret, optional `RIFT_MODEL` variable), then pushes
+  a `rift/issue-<n>` branch, opens a PR, and comments the result back.
+  Gated in the workflow itself to commenters with write/admin association;
+  refuses outside a git repo and asks before overwriting (refuses when
+  non-interactive). Setup and security notes in docs/GITHUB.md.
+
 ## v2.6.4 — 2026-07-16
 
 - **TUI input box scales with the window**: the prompt input rendered each

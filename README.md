@@ -90,6 +90,20 @@ a process)? `rift --serve` speaks a versioned line-JSON protocol —
 [docs/SERVE.md](docs/SERVE.md) is the contract, and
 `scripts/serve_client.py` is a minimal reference client.
 
+## GitHub integration
+
+```sh
+cd your-repo && rift github install
+```
+
+writes a single self-hosted Actions workflow: maintainers comment `/rift <task>`
+on an issue or PR, a runner you control works the task headless against your
+own model server (`RIFT_HOST` secret), and the result comes back as a
+`rift/issue-<n>` PR plus a comment. No hosted app, no third-party service —
+the workflow is short, commented YAML you audit and commit yourself, gated so
+only commenters with write access can trigger it. Setup and security notes:
+[docs/GITHUB.md](docs/GITHUB.md).
+
 ## Plugins
 
 A plugin is a directory with a `plugin.json`, discovered from

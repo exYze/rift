@@ -1,6 +1,7 @@
 mod app;
 mod clipboard;
 mod commands;
+mod github;
 mod highlight;
 mod pricing;
 mod release_notes;
@@ -241,6 +242,19 @@ enum Cmd {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// GitHub integration (self-hosted `/rift` issue-comment workflow)
+    Github {
+        #[command(subcommand)]
+        action: GithubAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GithubAction {
+    /// Write .github/workflows/rift.yml into this repo: maintainers comment
+    /// `/rift <task>` on an issue/PR and a runner you control works the task
+    /// against your model server, then opens a PR with the result
+    Install,
 }
 
 #[derive(Subcommand, Debug)]
@@ -283,6 +297,13 @@ async fn main() -> Result<()> {
         };
         println!("{}", rift_core::config::migrate_config_file(&path, *dry_run)?);
         return Ok(());
+    }
+
+    // `rift github install` is git-only — no config, no model server; it
+    // also runs before the config load so a broken config can't block it.
+    if let Some(Cmd::Github { action }) = &cli.cmd {
+        let GithubAction::Install = action;
+        return github::install();
     }
 
     // Load config up front so it can supply defaults for host/model. Precedence
@@ -363,8 +384,10 @@ async fn main() -> Result<()> {
             print!("{}", update::self_update(env!("CARGO_PKG_VERSION")).await?.cli_banner());
             return Ok(());
         }
-        // Handled before the config load; a broken config must not block it.
-        Some(Cmd::Config { .. }) => unreachable!("config subcommand returns early"),
+        // Handled before the config load; a broken config must not block them.
+        Some(Cmd::Config { .. }) | Some(Cmd::Github { .. }) => {
+            unreachable!("config/github subcommands return early")
+        }
         None => {}
     }
 
