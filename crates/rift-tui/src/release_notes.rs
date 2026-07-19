@@ -16,7 +16,10 @@ fn latest_from(text: &str) -> (String, Vec<String>) {
     let mut lines = text.lines();
     let heading = lines
         .by_ref()
-        .find_map(|l| l.strip_prefix("## ").map(str::to_string))
+        // An "Unreleased" section may sit above the newest release between
+        // tags — the notes popup is about what this version shipped, so
+        // skip to the first versioned heading.
+        .find_map(|l| l.strip_prefix("## ").filter(|h| h.trim() != "Unreleased").map(str::to_string))
         .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION")));
     let mut body: Vec<String> = Vec::new();
     for line in lines {
@@ -46,6 +49,15 @@ mod tests {
         assert!(!body.iter().any(|l| l.contains("old stuff")));
         // Trailing blank lines trimmed.
         assert!(!body.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unreleased_section_is_skipped() {
+        let sample = "# Changelog\n\n## Unreleased\n\n- pending stuff\n\n## v2.1.0 — 2026-07-10\n\n- shipped stuff\n";
+        let (heading, body) = latest_from(sample);
+        assert_eq!(heading, "v2.1.0 — 2026-07-10");
+        assert!(body.iter().any(|l| l.contains("shipped stuff")));
+        assert!(!body.iter().any(|l| l.contains("pending stuff")));
     }
 
     #[test]
