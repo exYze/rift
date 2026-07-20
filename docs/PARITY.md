@@ -28,14 +28,14 @@ better task success (150/150 vs 149/150).
 | Editor integration | VS Code extension (sidebar chat, inline per-hunk diff review, terminal) | VS Code-family extension, JetBrains/Zed via ACP | ACP on roadmap |
 | Update | `rift update`, startup check, winget/scoop/brew | `upgrade`, autoupdate config | parity |
 
-## Gaps being closed (this branch)
+## Gaps closed (this branch)
 
-| feature | opencode has | rift plan |
+| feature | opencode has | rift now |
 |---|---|---|
-| **Desktop app** | Electron app (migrated *from* Tauri), tabs-primary UI, sessions sidebar, diff review, onboarding | **Tauri 2** app over the serve protocol — no Node runtime, one small binary; tabs, sessions sidebar, in-app per-hunk diff review (`desktop/`) |
-| **LSP diagnostics** | 30+ auto-detected servers, diagnostics feed the agent | zero-dep LSP client (rust-analyzer, pyright, typescript-language-server, gopls, clangd auto-detected); post-edit diagnostics appended to tool results, token-capped |
-| **GitHub integration** | GitHub App, `/opencode` comment triggers, PR reviews | `rift github install` writes a self-hosted Actions workflow: `/rift` comment triggers headless rift on your runner/model, pushes a branch, opens a PR — no hosted app needed |
-| **Share** | cloud share links (opncd.ai) | `/share`: self-contained HTML transcript export; optional GitHub gist upload via `gh`. No rift cloud service — local-first |
+| **Desktop app** | Electron app (migrated *from* Tauri), tabs-primary UI, sessions sidebar, diff review, onboarding | ✅ **Tauri 2** app over the serve protocol — no Node runtime, one small binary; tabs, sessions sidebar, in-app per-hunk diff review (`desktop/`) |
+| **LSP diagnostics** | 30+ auto-detected servers, diagnostics feed the agent | ✅ zero-dep LSP client (rust-analyzer, pyright, typescript-language-server, gopls, clangd auto-detected); post-edit diagnostics appended to tool results, token-capped |
+| **GitHub integration** | GitHub App, `/opencode` comment triggers, PR reviews | ✅ `rift github install` writes a self-hosted Actions workflow: `/rift` comment triggers headless rift on your runner/model, pushes a branch, opens a PR — no hosted app needed (docs/GITHUB.md) |
+| **Share** | cloud share links (opncd.ai) | ✅ `/share`: self-contained HTML transcript export; optional GitHub gist upload via `gh`. No rift cloud service — local-first |
 
 ## Deliberate non-goals
 
