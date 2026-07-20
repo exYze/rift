@@ -100,6 +100,11 @@ pub struct Config {
     /// only — never affects requests.
     #[serde(default)]
     pub pricing: HashMap<String, Pricing>,
+    /// LSP diagnostics after write/edit: `false` disables entirely; a map
+    /// overrides/adds servers per language (see crate::lsp). Absent =
+    /// enabled with the built-in registry.
+    #[serde(default)]
+    pub lsp: Option<crate::lsp::LspSetting>,
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
     /// MCP servers that came from the *project* file. Kept separate because
@@ -344,6 +349,21 @@ impl Config {
             } else {
                 self.project_mcp.insert(name, server);
             }
+        }
+        // LSP server entries name commands to spawn, so like the editor and
+        // bash_wrapper they load from the user config only; a project may
+        // still tighten with `"lsp": false`.
+        match p.lsp {
+            Some(crate::lsp::LspSetting::Enabled(false)) => {
+                self.lsp = Some(crate::lsp::LspSetting::Enabled(false));
+            }
+            Some(_) => warnings.push(
+                "project .rift.json 'lsp' server entries ignored — LSP commands load from the \
+                 user config only (a cloned repo must not choose what runs on edit); a project \
+                 may only set \"lsp\": false"
+                    .into(),
+            ),
+            None => {}
         }
         self.permissions.bash_deny.extend(p.permissions.bash_deny);
         // Granular rules follow the same tighten-only policy: deny and ask

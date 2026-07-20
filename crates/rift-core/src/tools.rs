@@ -276,6 +276,10 @@ pub struct ToolCtx {
         std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<EditReviewRequest>>>>,
     /// SearXNG endpoint for the web_search tool; None = search unavailable.
     search_url: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared LSP manager: per-language diagnostics servers queried after
+    /// write/edit. None = disabled or never installed — the edit result is
+    /// then byte-identical to a no-LSP session.
+    lsp: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::lsp::LspManager>>>>,
     /// ± preview of the change the LAST successful write/edit applied. The
     /// agent loop takes it right after the call and surfaces it as an
     /// EditDiff event, so frontends can show what actually changed.
@@ -325,6 +329,7 @@ impl ToolCtx {
             bash_wrapper: std::sync::Arc::new(std::sync::Mutex::new(None)),
             edit_review: std::sync::Arc::new(std::sync::Mutex::new(None)),
             search_url: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            lsp: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_diff: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -350,6 +355,24 @@ impl ToolCtx {
 
     pub fn search_url(&self) -> Option<String> {
         self.search_url.lock().ok().and_then(|u| u.clone())
+    }
+
+    /// Install the LSP manager (startup; None disables).
+    pub fn set_lsp(&self, mgr: Option<std::sync::Arc<crate::lsp::LspManager>>) {
+        if let Ok(mut l) = self.lsp.lock() {
+            *l = mgr;
+        }
+    }
+
+    pub fn lsp(&self) -> Option<std::sync::Arc<crate::lsp::LspManager>> {
+        self.lsp.lock().ok().and_then(|l| l.clone())
+    }
+
+    /// LSP diagnostics for a just-edited file, formatted for the tool
+    /// result. None whenever anything is off/missing/slow — an LSP failure
+    /// must never affect the edit itself.
+    pub(crate) async fn lsp_diagnostics(&self, path: &Path, text: &str) -> Option<String> {
+        self.lsp()?.diagnostics(path, text).await
     }
 
     /// Set/clear the sandbox wrapper (startup, /config reload).
@@ -440,6 +463,8 @@ impl ToolCtx {
             edit_review: self.edit_review.clone(),
             // Research sub-agents search too.
             search_url: self.search_url.clone(),
+            // Sub-agent edits get the same diagnostics (same workspace root).
+            lsp: self.lsp.clone(),
             // Own slot: a child's edits surface through its own loop.
             last_diff: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
@@ -1445,6 +1470,11 @@ impl Tool for WriteTool {
                 "\nNOTE: the user accepted only part of your proposal in review — re-read the file to see what was applied.",
             );
         }
+        // Diagnostics before the hooks: hooks may rewrite the file (fmt),
+        // and the server should see exactly what was written.
+        if let Some(diags) = ctx.lsp_diagnostics(&path, &content).await {
+            result.push_str(&format!("\n── diagnostics ──\n{diags}"));
+        }
         if let Some(report) = ctx.run_post_edit_hooks(&path).await {
             result.push_str(&report);
         }
@@ -1575,6 +1605,9 @@ impl Tool for EditTool {
             result.push_str(
                 "\nNOTE: the user accepted only part of your proposal in review — re-read the file to see what was applied.",
             );
+        }
+        if let Some(diags) = ctx.lsp_diagnostics(&path, &applied).await {
+            result.push_str(&format!("\n── diagnostics ──\n{diags}"));
         }
         if let Some(report) = ctx.run_post_edit_hooks(&path).await {
             result.push_str(&report);
