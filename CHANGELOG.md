@@ -34,6 +34,19 @@ All notable changes to rift. Versions follow the roadmap phases in
   Gated in the workflow itself to commenters with write/admin association;
   refuses outside a git repo and asks before overwriting (refuses when
   non-interactive). Setup and security notes in docs/GITHUB.md.
+- **LSP diagnostics on every edit** (opencode parity, token-lean): after a
+  successful `write`/`edit`, rift syncs the file to the language's LSP
+  server and appends any errors/warnings to the tool result —
+  `path:line:col error: message`, capped at 10 lines — so the model fixes a
+  broken edit in the same turn. Zero new dependencies: a minimal
+  Content-Length-framed JSON-RPC stdio client in rift-core (`lsp.rs`), the
+  same shape as the MCP client. Servers spawn lazily on the first edit of a
+  matching file (rust-analyzer, pyright/pylsp, typescript-language-server,
+  gopls, clangd) and only when the binary is on PATH; failures/timeouts
+  degrade silently — the edit result is byte-identical to a no-LSP session.
+  `/lsp` lists detected languages and server status; config `"lsp": false`
+  disables, or a per-language map overrides/adds servers (user config only —
+  a project `.rift.json` can only tighten).
 
 ## v2.6.4 — 2026-07-16
 

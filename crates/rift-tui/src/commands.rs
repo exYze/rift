@@ -103,6 +103,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/host", "[url]", "show or switch the model server — Ollama or OpenAI-compatible, auto-detected"),
     ("/init", "", "generate a RIFT.md project guide"),
     ("/loop", "[30s|5m|2h] <prompt>|stop", "re-run a prompt or /command on an interval (or back-to-back)"),
+    ("/lsp", "", "LSP diagnostics servers: detected languages and status"),
     ("/mcp", "[add [--global] <name> <cmd> [args…]|new [--global] <desc>|trust <name>]", "list MCP servers, connect an existing one, generate one, manage trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
@@ -181,6 +182,7 @@ pub async fn run_command(
         "/tokens" => cmd_tokens(agent, fx),
         "/sessions" => cmd_sessions(rest, agent, cx, fx),
         "/tools" => cmd_tools(agent, fx),
+        "/lsp" => cmd_lsp(agent, fx).await,
         "/mcp" => cmd_mcp(rest, agent, cx, fx).await,
         "/permissions" => cmd_permissions(rest, agent, cx, fx),
         "/plan" => cmd_plan(rest, agent, fx),
@@ -620,6 +622,24 @@ fn cmd_tools(agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     }
     let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
     Ok(format!("{} tool(s)", defs.len()))
+}
+
+/// /lsp — the /mcp mirror for diagnostics servers: which languages the
+/// registry covers and whether each server is running/available/missing.
+async fn cmd_lsp(agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let Some(mgr) = agent.ctx().lsp() else {
+        let _ = fx.send(UiEffect::Out(Kind::Info, "lsp disabled (\"lsp\": false in config)".into()));
+        return Ok("lsp disabled".into());
+    };
+    let rows = mgr.status().await;
+    let mut out = String::from("LSP servers (spawn on the first edit of a matching file):\n");
+    for (lang, cmd, state) in &rows {
+        out.push_str(&format!("  {lang:<12} {state:<10} {cmd}\n"));
+    }
+    out.push_str("(diagnostics append to write/edit results; \"lsp\" in config overrides)");
+    let running = rows.iter().filter(|(_, _, s)| *s == "running").count();
+    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+    Ok(format!("{running} server(s) running"))
 }
 
 async fn cmd_mcp(

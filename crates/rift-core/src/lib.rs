@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod compact;
 pub mod config;
+pub mod lsp;
 pub mod mcp;
 pub mod memory;
 pub mod outline;
@@ -21,6 +22,7 @@ pub use agent::{Agent, AgentConfig, AgentEvent, TurnStats, EFFORT_LEVELS};
 pub use config::{
     mcp_entry_trusted, trust_mcp_entry, untrust_mcp_entry, Config, LoadedConfig, ProviderConfig,
 };
+pub use lsp::{LspManager, LspSetting};
 pub use mcp::{McpClient, McpTool};
 pub use plugins::{commands_as_skills, load_plugins, register_tools as register_plugin_tools, Plugin};
 pub use session::{SavedSession, SessionStore};

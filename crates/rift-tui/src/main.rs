@@ -588,6 +588,11 @@ async fn main() -> Result<()> {
     }
     ctx.set_post_edit_hooks(&post_edit_hooks);
 
+    // LSP diagnostics: language servers spawn lazily on the first edit of a
+    // matching file; a missing binary just means no diagnostics. `/lsp`
+    // shows the registry; `"lsp": false` in config turns it off.
+    ctx.set_lsp(rift_core::LspManager::from_config(&cwd, config.lsp.clone()));
+
     let (mut prompt_text, guide_files) = rift_core::system_prompt_with_guide(&model, &cwd);
     if !guide_files.is_empty() {
         eprintln!("loaded project context: {}", guide_files.join(", "));

@@ -146,6 +146,28 @@ color themes and (user-level only) `prompts/<family>.md` prompt targets.
 Anything from a *project* plugin that executes commands — tools, hooks —
 gets a one-time trust prompt at startup, keyed to the exact manifest.
 
+## LSP diagnostics
+
+After every successful `write`/`edit`, rift asks the file's language server
+for diagnostics and appends errors/warnings to the tool result (capped at 10
+lines) — the model sees a broken edit immediately, in the same turn, without
+spending a compile cycle on it. Servers spawn lazily on the first edit of a
+matching file and only if their binary is on PATH: `rust-analyzer` (rs),
+`pyright-langserver` or `pylsp` (py), `typescript-language-server`
+(ts/tsx/js/jsx), `gopls` (go), `clangd` (c/cc/cpp/h/hpp). No server, slow
+server, dead server — the edit result is simply unchanged; diagnostics are a
+bonus, never an error. `/lsp` shows detected languages and server status.
+
+```json
+{"lsp": false}
+{"lsp": {"rust": {"disabled": true}, "zig": {"command": ["zls"]}}}
+```
+
+`false` disables the whole thing; a map disables or overrides per language
+(built-in names, or a file extension for languages rift doesn't know).
+Server commands load from the user config only — a project `.rift.json` may
+only set `"lsp": false`.
+
 ## Usage
 
 ```sh

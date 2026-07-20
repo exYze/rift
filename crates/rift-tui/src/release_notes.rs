@@ -5,9 +5,11 @@
 /// The whole changelog, baked into the binary.
 const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
-/// (heading, body lines) for the newest release — the first `## ` section,
-/// up to the next one. The heading is returned without the `## ` marker
-/// (e.g. "v2.1.0 — 2026-07-10"); trailing blank lines are trimmed.
+/// (heading, body lines) for the newest release — the first `## v…` section,
+/// up to the next one. A pending `## Unreleased` section is skipped: it
+/// describes work this binary's version doesn't claim yet. The heading is
+/// returned without the `## ` marker (e.g. "v2.1.0 — 2026-07-10"); trailing
+/// blank lines are trimmed.
 pub fn latest() -> (String, Vec<String>) {
     latest_from(CHANGELOG)
 }
@@ -19,7 +21,7 @@ fn latest_from(text: &str) -> (String, Vec<String>) {
         // An "Unreleased" section may sit above the newest release between
         // tags — the notes popup is about what this version shipped, so
         // skip to the first versioned heading.
-        .find_map(|l| l.strip_prefix("## ").filter(|h| h.trim() != "Unreleased").map(str::to_string))
+        .find_map(|l| l.strip_prefix("## ").filter(|h| h.starts_with('v')).map(str::to_string))
         .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION")));
     let mut body: Vec<String> = Vec::new();
     for line in lines {
