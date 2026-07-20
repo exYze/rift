@@ -104,6 +104,20 @@ How rift compares to opencode (CLI, TUI, and desktop) — where it's ahead,
 at parity, and what's deliberately out of scope — is tracked in
 [docs/PARITY.md](docs/PARITY.md).
 
+## GitHub integration
+
+```sh
+cd your-repo && rift github install
+```
+
+writes a single self-hosted Actions workflow: maintainers comment `/rift <task>`
+on an issue or PR, a runner you control works the task headless against your
+own model server (`RIFT_HOST` secret), and the result comes back as a
+`rift/issue-<n>` PR plus a comment. No hosted app, no third-party service —
+the workflow is short, commented YAML you audit and commit yourself, gated so
+only commenters with write access can trigger it. Setup and security notes:
+[docs/GITHUB.md](docs/GITHUB.md).
+
 ## Plugins
 
 A plugin is a directory with a `plugin.json`, discovered from
@@ -191,6 +205,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/host [url]` | show or switch the model server — the type is auto-detected by probing (native Ollama, or OpenAI-compatible for vLLM/LM Studio/llama.cpp URLs like `http://host:8000/v1`); bare `/model` switches then resolve against it with the right protocol. Keyed endpoints belong in `providers` |
 | `/think [on\|off\|auto\|<level>]` | thinking mode and reasoning effort. Levels `minimal`/`low`/`medium`/`high`/`xhigh`/`max` (a level implies thinking on) map to each provider's own syntax — Ollama's graded `think`, OpenAI/DeepSeek `reasoning_effort` + `thinking` toggle, Anthropic-format `output_config.effort`. Servers with fewer grades map between them (DeepSeek: low/medium→high, xhigh→max); servers that reject the params get one clean retry without them. Also `--effort <level>` / `"effort"` in config |
 | `/export` | save the transcript as markdown |
+| `/share` | export the transcript as one **self-contained HTML page** — inline CSS, no scripts, no external assets; user/assistant bubbles, thinking and tool calls as collapsible sections, nothing truncated. Written as `rift-share-<timestamp>.html`; with the `gh` CLI on PATH it prints the `gh gist create` one-liner (never auto-uploads) |
 | `/theme [name]` | browse (interactive picker) or switch the color theme. 13 built-in: `dark`, `light`, `mono` (terminal-native) plus 10 truecolor palettes with their own text/background/border colors — `dracula`, `nord`, `gruvbox`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin`, `rose-pine`, `matrix`, `synthwave`. Persist with `"theme": "<name>"` in config |
 
 ## Config (`.rift.json` in the project, or `~/.config/rift/config.json`)

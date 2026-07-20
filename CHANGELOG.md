@@ -17,6 +17,23 @@ All notable changes to rift. Versions follow the roadmap phases in
 - **docs/PARITY.md**: a maintained feature-parity comparison against
   opencode (CLI, TUI, desktop) — ahead/at-parity/deliberate non-goals —
   with the benchmarked speed advantage as context.
+- **`/share` — self-contained HTML transcript export**: renders the whole
+  session to one `rift-share-<timestamp>.html` — inline CSS only, no
+  scripts, no external assets. User turns as right-aligned bubbles,
+  assistant prose on the left, thinking and tool calls/results as
+  collapsible `<details>`, all content HTML-escaped and nothing truncated
+  (unlike /export's tool-output preview). When the `gh` CLI is on PATH the
+  command prints the `gh gist create` one-liner as the upload path — it
+  never uploads anything itself.
+- **`rift github install` — local-first GitHub integration**: writes a
+  single self-hosted Actions workflow (`.github/workflows/rift.yml`) into
+  the current repo. Maintainers comment `/rift <task>` on an issue or PR;
+  a runner they control works the task headless against their own model
+  server (`RIFT_HOST` secret, optional `RIFT_MODEL` variable), then pushes
+  a `rift/issue-<n>` branch, opens a PR, and comments the result back.
+  Gated in the workflow itself to commenters with write/admin association;
+  refuses outside a git repo and asks before overwriting (refuses when
+  non-interactive). Setup and security notes in docs/GITHUB.md.
 
 ## v2.6.4 — 2026-07-16
 
