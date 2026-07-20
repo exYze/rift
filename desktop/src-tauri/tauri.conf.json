@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Rift",
+  "version": "2.6.4",
+  "identifier": "dev.exyze.rift",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Rift",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 420
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "dmg", "appimage", "deb"],
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "shortDescription": "Rift — a fast coding agent for local models",
+    "longDescription": "Desktop shell for the rift coding agent: tabs, sessions, inline diff review, model switching — backed by the same rift binary and serve protocol as the TUI and VS Code extension."
+  }
+}

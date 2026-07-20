@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rift</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="theme-dark">
+  <div id="app">
+    <!-- ── Left rail: projects + sessions ─────────────────────────────── -->
+    <aside id="sidebar">
+      <div id="sidebar-head">
+        <span id="brand">rift</span>
+        <button id="btn-collapse" data-tip="Collapse the sidebar">⟨</button>
+      </div>
+      <button id="btn-open-project" class="primary" data-tip="Open a project folder in a new tab">＋ Open project…</button>
+      <div class="side-section" id="recent-section">
+        <div class="side-title">Recent projects</div>
+        <div id="recent-list"></div>
+      </div>
+      <div class="side-section" id="sessions-section">
+        <div class="side-title">
+          <span>Past chats</span>
+          <button id="btn-sessions-refresh" data-tip="Refresh the list of saved chats">⟳</button>
+        </div>
+        <div id="session-list"></div>
+      </div>
+      <div id="sidebar-foot">
+        <button id="btn-settings" data-tip="Settings — rift binary, model server, defaults">⚙ Settings</button>
+        <button id="btn-theme" data-tip="Toggle light/dark theme">◐</button>
+      </div>
+    </aside>
+
+    <!-- ── Main: tab bar + one panel per tab ──────────────────────────── -->
+    <main id="main">
+      <div id="tabbar">
+        <div id="tabs"></div>
+        <button id="btn-new-tab" data-tip="New tab (Ctrl+T) — same project, fresh chat">＋</button>
+      </div>
+
+      <!-- Welcome screen (shown when no tabs are open) -->
+      <div id="welcome">
+        <div id="welcome-card">
+          <div id="welcome-logo">rift</div>
+          <p>A fast coding agent for local models.</p>
+          <button id="welcome-open" class="primary">Open a project folder…</button>
+          <div id="welcome-recent"></div>
+        </div>
+      </div>
+
+      <div id="panels"></div>
+    </main>
+  </div>
+
+  <!-- ── Per-tab panel ─────────────────────────────────────────────────── -->
+  <template id="tab-template">
+    <section class="panel">
+      <div class="panel-header">
+        <span class="status">starting…</span>
+        <span class="ctx hidden"></span>
+        <span class="header-buttons">
+          <button class="btn-undo" data-tip="Undo — revert the file edits from the last turn">↶</button>
+          <button class="btn-new-session" data-tip="New session — clear this conversation and start fresh">✚</button>
+          <button class="btn-continue" data-tip="Continue — resume this project's last saved session">↻</button>
+        </span>
+      </div>
+      <div class="messages"></div>
+      <div class="composer">
+        <div class="mention-popup hidden"></div>
+        <textarea class="input" rows="1"
+          placeholder="Ask rift… (@file attaches, Enter sends, Shift+Enter newline)"></textarea>
+        <button class="btn-send" data-tip="Send message (Enter)">➤</button>
+        <button class="btn-stop hidden" data-tip="Stop — cancel the turn in progress">■</button>
+      </div>
+      <div class="panel-footer">
+        <select class="model-select" data-tip="Model — switching keeps the current conversation"></select>
+        <button class="btn-models-refresh" data-tip="Refresh the model list from your servers">⟳</button>
+      </div>
+    </section>
+  </template>
+
+  <!-- ── Settings modal ────────────────────────────────────────────────── -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <span>Settings</span>
+        <button id="set-close" data-tip="Close without saving">✕</button>
+      </div>
+      <label data-tip="Path to the rift executable — leave empty if 'rift' is on your PATH">
+        <span>rift binary</span><input id="set-bin" placeholder="rift">
+      </label>
+      <label data-tip="The model server rift talks to: an Ollama URL, or an OpenAI-style one ending in /v1 (vLLM). Empty = rift's own config">
+        <span>server URL</span><input id="set-host" placeholder="http://localhost:11434 or http://host:8000/v1">
+      </label>
+      <label data-tip="Default model (empty = rift's own config)">
+        <span>model</span><input id="set-model" placeholder="qwen3:32b or provider/model">
+      </label>
+      <label data-tip="Tokens of context requested per call (--num-ctx)">
+        <span>context window</span><input id="set-numctx" type="number" min="1024" step="1024" placeholder="32768">
+      </label>
+      <label data-tip="Sampling temperature (--temp). Low values keep tool calling reliable">
+        <span>temperature</span><input id="set-temp" type="number" min="0" max="2" step="0.1" placeholder="0.2">
+      </label>
+      <label data-tip="Max agent-loop iterations (tool calls) per turn">
+        <span>max iterations</span><input id="set-iters" type="number" min="1" placeholder="40">
+      </label>
+      <label data-tip="How much thinking models reason before answering (--effort)">
+        <span>reasoning effort</span>
+        <select id="set-effort">
+          <option value="">model default</option>
+          <option value="minimal">minimal</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+      </label>
+      <div class="row">
+        <button id="set-save" class="primary" data-tip="Save — applies to new sessions; running tabs keep their settings until restarted">Save</button>
+      </div>
+      <p class="settings-note">Empty fields fall back to rift's own config file (providers, permissions, hooks live there), then its built-in defaults.</p>
+    </div>
+  </div>
+
+  <!-- ── Diff review modal ─────────────────────────────────────────────── -->
+  <div id="review-modal" class="modal hidden">
+    <div class="modal-card wide">
+      <div class="modal-head">
+        <span id="review-title">review</span>
+        <button id="review-close" data-tip="Close — the review card in the chat stays available">✕</button>
+      </div>
+      <div id="review-hunks"></div>
+      <div class="row" id="review-actions">
+        <button id="review-apply" class="primary"></button>
+        <button id="review-reject" class="secondary">✘ Reject all</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="highlight.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

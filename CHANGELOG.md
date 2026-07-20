@@ -3,6 +3,21 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## Unreleased
+
+- **Desktop app** (`desktop/`): a native shell for rift built with Tauri 2 —
+  tabs (one conversation per tab, each its own `rift --serve` process),
+  sessions sidebar with recent projects, inline per-hunk diff review
+  (rift's `segments` hunking, decided before the write touches disk),
+  streamed thinking/tool activity/plan/sub-agent lanes, @file mentions and
+  `/skill:` completion, live model switching, context gauge, light/dark
+  themes. No Electron, no Node runtime, no bundler: static frontend over
+  the OS webview, one small Rust binary. `desktop-build` workflow produces
+  NSIS/dmg/AppImage/deb bundles.
+- **docs/PARITY.md**: a maintained feature-parity comparison against
+  opencode (CLI, TUI, desktop) — ahead/at-parity/deliberate non-goals —
+  with the benchmarked speed advantage as context.
+
 ## v2.6.4 — 2026-07-16
 
 - **TUI input box scales with the window**: the prompt input rendered each

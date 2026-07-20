@@ -90,6 +90,20 @@ a process)? `rift --serve` speaks a versioned line-JSON protocol —
 [docs/SERVE.md](docs/SERVE.md) is the contract, and
 `scripts/serve_client.py` is a minimal reference client.
 
+## Desktop app
+
+[`desktop/`](desktop/) is a native desktop shell for rift — tabs (one
+conversation per tab, each its own `rift --serve` process), a sessions
+sidebar, inline per-hunk diff review, live model switching, @file mentions —
+built with Tauri 2 over the OS webview: no Electron, no Node runtime, no
+bundler, same small-binary philosophy as the CLI. See
+[desktop/README.md](desktop/README.md) for build instructions; installers
+come from the `desktop-build` workflow.
+
+How rift compares to opencode (CLI, TUI, and desktop) — where it's ahead,
+at parity, and what's deliberately out of scope — is tracked in
+[docs/PARITY.md](docs/PARITY.md).
+
 ## Plugins
 
 A plugin is a directory with a `plugin.json`, discovered from
