@@ -3,6 +3,51 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## Unreleased
+
+- **Desktop app** (`desktop/`): a native shell for rift built with Tauri 2 —
+  tabs (one conversation per tab, each its own `rift --serve` process),
+  sessions sidebar with recent projects, inline per-hunk diff review
+  (rift's `segments` hunking, decided before the write touches disk),
+  streamed thinking/tool activity/plan/sub-agent lanes, @file mentions and
+  `/skill:` completion, live model switching, context gauge, light/dark
+  themes. No Electron, no Node runtime, no bundler: static frontend over
+  the OS webview, one small Rust binary. `desktop-build` workflow produces
+  NSIS/dmg/AppImage/deb bundles.
+- **docs/PARITY.md**: a maintained feature-parity comparison against
+  opencode (CLI, TUI, desktop) — ahead/at-parity/deliberate non-goals —
+  with the benchmarked speed advantage as context.
+- **`/share` — self-contained HTML transcript export**: renders the whole
+  session to one `rift-share-<timestamp>.html` — inline CSS only, no
+  scripts, no external assets. User turns as right-aligned bubbles,
+  assistant prose on the left, thinking and tool calls/results as
+  collapsible `<details>`, all content HTML-escaped and nothing truncated
+  (unlike /export's tool-output preview). When the `gh` CLI is on PATH the
+  command prints the `gh gist create` one-liner as the upload path — it
+  never uploads anything itself.
+- **`rift github install` — local-first GitHub integration**: writes a
+  single self-hosted Actions workflow (`.github/workflows/rift.yml`) into
+  the current repo. Maintainers comment `/rift <task>` on an issue or PR;
+  a runner they control works the task headless against their own model
+  server (`RIFT_HOST` secret, optional `RIFT_MODEL` variable), then pushes
+  a `rift/issue-<n>` branch, opens a PR, and comments the result back.
+  Gated in the workflow itself to commenters with write/admin association;
+  refuses outside a git repo and asks before overwriting (refuses when
+  non-interactive). Setup and security notes in docs/GITHUB.md.
+- **LSP diagnostics on every edit** (opencode parity, token-lean): after a
+  successful `write`/`edit`, rift syncs the file to the language's LSP
+  server and appends any errors/warnings to the tool result —
+  `path:line:col error: message`, capped at 10 lines — so the model fixes a
+  broken edit in the same turn. Zero new dependencies: a minimal
+  Content-Length-framed JSON-RPC stdio client in rift-core (`lsp.rs`), the
+  same shape as the MCP client. Servers spawn lazily on the first edit of a
+  matching file (rust-analyzer, pyright/pylsp, typescript-language-server,
+  gopls, clangd) and only when the binary is on PATH; failures/timeouts
+  degrade silently — the edit result is byte-identical to a no-LSP session.
+  `/lsp` lists detected languages and server status; config `"lsp": false`
+  disables, or a per-language map overrides/adds servers (user config only —
+  a project `.rift.json` can only tighten).
+
 ## v2.6.4 — 2026-07-16
 
 - **TUI input box scales with the window**: the prompt input rendered each

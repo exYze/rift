@@ -103,6 +103,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/host", "[url]", "show or switch the model server — Ollama or OpenAI-compatible, auto-detected"),
     ("/init", "", "generate a RIFT.md project guide"),
     ("/loop", "[30s|5m|2h] <prompt>|stop", "re-run a prompt or /command on an interval (or back-to-back)"),
+    ("/lsp", "", "LSP diagnostics servers: detected languages and status"),
     ("/mcp", "[add [--global] <name> <cmd> [args…]|new [--global] <desc>|trust <name>]", "list MCP servers, connect an existing one, generate one, manage trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
@@ -112,6 +113,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
     ("/save", "<name>", "name this session (keeps autosaving to it)"),
     ("/search", "[url|off]", "show or set the SearXNG endpoint powering web_search and /deep-research"),
+    ("/share", "", "export the transcript as one self-contained HTML page (gist-ready)"),
     ("/deep-research", "<question>", "fan out web searches, fetch and cross-check sources, synthesize a cited report"),
     ("/skills", "[new [--global] <desc>]", "list skills, or generate one (project or user-wide)"),
     ("/swarm", "<task> [--models a,b] [--judge m]", "WarpDrive race in isolated worktrees"),
@@ -180,6 +182,7 @@ pub async fn run_command(
         "/tokens" => cmd_tokens(agent, fx),
         "/sessions" => cmd_sessions(rest, agent, cx, fx),
         "/tools" => cmd_tools(agent, fx),
+        "/lsp" => cmd_lsp(agent, fx).await,
         "/mcp" => cmd_mcp(rest, agent, cx, fx).await,
         "/permissions" => cmd_permissions(rest, agent, cx, fx),
         "/plan" => cmd_plan(rest, agent, fx),
@@ -195,6 +198,7 @@ pub async fn run_command(
         "/host" => cmd_host(rest, agent, cx, fx, cancel).await,
         "/think" => cmd_think(rest, agent, fx).await,
         "/export" => cmd_export(agent, cx, fx),
+        "/share" => cmd_share(agent, cx, fx),
         "/system" => cmd_system(rest, agent, fx),
         "/temp" => cmd_temp(rest, agent, fx),
         "/ctx" => cmd_ctx(rest, agent, fx),
@@ -618,6 +622,24 @@ fn cmd_tools(agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
     }
     let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
     Ok(format!("{} tool(s)", defs.len()))
+}
+
+/// /lsp — the /mcp mirror for diagnostics servers: which languages the
+/// registry covers and whether each server is running/available/missing.
+async fn cmd_lsp(agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let Some(mgr) = agent.ctx().lsp() else {
+        let _ = fx.send(UiEffect::Out(Kind::Info, "lsp disabled (\"lsp\": false in config)".into()));
+        return Ok("lsp disabled".into());
+    };
+    let rows = mgr.status().await;
+    let mut out = String::from("LSP servers (spawn on the first edit of a matching file):\n");
+    for (lang, cmd, state) in &rows {
+        out.push_str(&format!("  {lang:<12} {state:<10} {cmd}\n"));
+    }
+    out.push_str("(diagnostics append to write/edit results; \"lsp\" in config overrides)");
+    let running = rows.iter().filter(|(_, _, s)| *s == "running").count();
+    let _ = fx.send(UiEffect::Out(Kind::Info, out.trim_end().into()));
+    Ok(format!("{running} server(s) running"))
 }
 
 async fn cmd_mcp(
@@ -1686,4 +1708,190 @@ fn cmd_export(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Resu
     std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
     let _ = fx.send(UiEffect::Out(Kind::Info, format!("exported to {}", path.display())));
     Ok(format!("exported {}", path.display()))
+}
+
+/// /share — the transcript as ONE self-contained HTML file: inline CSS, no
+/// scripts, no external assets, nothing truncated. Made to be handed to a
+/// teammate or `gh gist create`d as-is.
+fn cmd_share(agent: &Agent, cx: &CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let path = cx.cwd.join(format!("rift-share-{stamp}.html"));
+    let html = render_share_html(&agent.cfg.model, &agent.messages);
+    std::fs::write(&path, html).with_context(|| format!("writing {}", path.display()))?;
+    let mut msg = format!("shared transcript → {}", path.display());
+    // Never auto-upload — sharing a session is a deliberate act; just point
+    // at the one-liner when gh is available.
+    if gh_on_path() {
+        msg.push_str(&format!("\nupload it with: gh gist create {}", path.display()));
+    }
+    let _ = fx.send(UiEffect::Out(Kind::Info, msg));
+    Ok(format!("shared {}", path.display()))
+}
+
+/// True when the `gh` CLI is somewhere on PATH (checked without spawning).
+fn gh_on_path() -> bool {
+    let Some(paths) = std::env::var_os("PATH") else { return false };
+    let exe = if cfg!(windows) { "gh.exe" } else { "gh" };
+    std::env::split_paths(&paths).any(|dir| dir.join(exe).is_file())
+}
+
+/// Minimal escaping for text interpolated into HTML element bodies.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The pure renderer behind /share (unit-tested below): user turns as
+/// right-aligned bubbles, assistant prose on the left, thinking and tool
+/// traffic collapsed into `<details>`. Same message walk as /export —
+/// system prompt and hidden `[system]` context notes stay out — but
+/// nothing is capped: this is an export, not a preview.
+fn render_share_html(model: &str, messages: &[Message]) -> String {
+    let turns = messages.iter().filter(|m| m.role == Role::User && !m.content.starts_with("[system]")).count();
+    let mut out = format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>rift transcript — {title}</title>\n\
+         <style>\n{CSS}</style>\n</head>\n<body>\n<main>\n\
+         <header><h1>rift transcript</h1>\
+         <p class=\"meta\">{title} · {turns} user turn(s) · rift v{version}</p></header>\n",
+        title = html_escape(model),
+        version = env!("CARGO_PKG_VERSION"),
+    );
+    for m in messages {
+        match m.role {
+            Role::System => {}
+            Role::User => {
+                if !m.content.starts_with("[system]") {
+                    out.push_str(&format!("<div class=\"user\">{}</div>\n", html_escape(&m.content)));
+                }
+            }
+            Role::Assistant => {
+                if let Some(t) = &m.thinking {
+                    if !t.trim().is_empty() {
+                        out.push_str(&format!(
+                            "<details class=\"thinking\"><summary>thinking</summary><pre>{}</pre></details>\n",
+                            html_escape(t.trim())
+                        ));
+                    }
+                }
+                if !m.content.is_empty() {
+                    out.push_str(&format!("<div class=\"assistant\">{}</div>\n", html_escape(&m.content)));
+                }
+                for tc in &m.tool_calls {
+                    let args = serde_json::to_string_pretty(&tc.function.arguments).unwrap_or_default();
+                    out.push_str(&format!(
+                        "<details class=\"tool\"><summary>→ {}</summary><pre>{}</pre></details>\n",
+                        html_escape(&tc.function.name),
+                        html_escape(&args)
+                    ));
+                }
+            }
+            Role::Tool => {
+                let name = m.tool_name.as_deref().unwrap_or("?");
+                out.push_str(&format!(
+                    "<details class=\"tool\"><summary>{} returned</summary><pre>{}</pre></details>\n",
+                    html_escape(name),
+                    html_escape(m.content.trim_end())
+                ));
+            }
+        }
+    }
+    out.push_str("</main>\n</body>\n</html>\n");
+    out
+}
+
+/// Inline stylesheet for /share. `pre-wrap` everywhere keeps code blocks
+/// and long tool output readable without any client-side machinery.
+const CSS: &str = "\
+body{margin:0;background:#f6f7f9;color:#1c1e21;font:15px/1.55 system-ui,-apple-system,'Segoe UI',sans-serif}\n\
+main{max-width:46rem;margin:0 auto;padding:2rem 1rem 4rem}\n\
+header{margin-bottom:2rem;border-bottom:1px solid #d8dbe0;padding-bottom:1rem}\n\
+h1{font-size:1.2rem;margin:0}\n\
+.meta{color:#66707d;font-size:.85rem;margin:.25rem 0 0}\n\
+.user{background:#2563eb;color:#fff;border-radius:14px 14px 4px 14px;padding:.6rem .9rem;\
+margin:1.2rem 0 1.2rem auto;max-width:85%;width:fit-content;white-space:pre-wrap;overflow-wrap:anywhere}\n\
+.assistant{margin:1rem 0;white-space:pre-wrap;overflow-wrap:anywhere}\n\
+details{margin:.5rem 0;border:1px solid #d8dbe0;border-radius:8px;background:#fff}\n\
+summary{cursor:pointer;padding:.4rem .7rem;font-size:.85rem;color:#55606d;\
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}\n\
+details pre{margin:0;padding:.6rem .8rem;border-top:1px solid #e5e7eb;\
+font:.8rem/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
+white-space:pre-wrap;overflow-wrap:anywhere}\n\
+.thinking summary{font-style:italic}\n";
+
+#[cfg(test)]
+mod share_tests {
+    use super::*;
+    use rift_ollama::{ToolCall, ToolCallFunction};
+
+    fn tool_call(name: &str, key: &str, value: &str) -> ToolCall {
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(key.into(), serde_json::Value::String(value.into()));
+        ToolCall { id: None, function: ToolCallFunction { index: None, name: name.into(), arguments } }
+    }
+
+    #[test]
+    fn escapes_html_metacharacters() {
+        assert_eq!(html_escape("a < b && c > d"), "a &lt; b &amp;&amp; c &gt; d");
+        assert_eq!(html_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn renders_a_session_with_everything_escaped_and_collapsed() {
+        let mut assistant = Message::user("");
+        assistant.role = Role::Assistant;
+        assistant.content = "use `Vec<T>` & friends".into();
+        assistant.thinking = Some("what if x < 1?".into());
+        assistant.tool_calls = vec![tool_call("read", "path", "src/<main>.rs")];
+        let messages = vec![
+            Message::system("<system prompt — never rendered>"),
+            Message::user("fix a & b <script>alert(1)</script>"),
+            assistant,
+            Message::tool_result("read", "fn main() { if a < b && b > c {} }"),
+            Message::user("[system] hidden resume brief"),
+        ];
+        let html = render_share_html("gemma4:26b", &messages);
+
+        // Document shell: self-contained, styled inline, no scripts of ours.
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("<style>"));
+        assert!(html.contains("rift transcript — gemma4:26b"));
+
+        // Every content path is escaped — raw metacharacters never survive.
+        assert!(html.contains("fix a &amp; b &lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("use `Vec&lt;T&gt;` &amp; friends"));
+        assert!(html.contains("if a &lt; b &amp;&amp; b &gt; c"));
+        assert!(html.contains("src/&lt;main&gt;.rs"));
+
+        // Structure: user bubble, assistant prose, thinking + tool traffic
+        // as collapsed details; system prompt and [system] notes stay out.
+        assert!(html.contains(r#"<div class="user">fix a &amp;"#));
+        assert!(html.contains(r#"<div class="assistant">"#));
+        assert!(html.contains(r#"<details class="thinking"><summary>thinking</summary><pre>what if x &lt; 1?</pre>"#));
+        assert!(html.contains(r#"<details class="tool"><summary>→ read</summary>"#));
+        assert!(html.contains(r#"<summary>read returned</summary>"#));
+        assert!(!html.contains("system prompt — never rendered"));
+        assert!(!html.contains("hidden resume brief"));
+        assert!(html.contains("1 user turn(s)"));
+    }
+
+    #[test]
+    fn share_caps_nothing() {
+        // /export previews tool output at 600 chars; /share is an export and
+        // must carry it whole.
+        let big = "x".repeat(20_000);
+        let messages = vec![Message::tool_result("bash", big.clone())];
+        let html = render_share_html("m", &messages);
+        assert!(html.contains(&big));
+    }
 }

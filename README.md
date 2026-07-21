@@ -90,6 +90,34 @@ a process)? `rift --serve` speaks a versioned line-JSON protocol —
 [docs/SERVE.md](docs/SERVE.md) is the contract, and
 `scripts/serve_client.py` is a minimal reference client.
 
+## Desktop app
+
+[`desktop/`](desktop/) is a native desktop shell for rift — tabs (one
+conversation per tab, each its own `rift --serve` process), a sessions
+sidebar, inline per-hunk diff review, live model switching, @file mentions —
+built with Tauri 2 over the OS webview: no Electron, no Node runtime, no
+bundler, same small-binary philosophy as the CLI. See
+[desktop/README.md](desktop/README.md) for build instructions; installers
+come from the `desktop-build` workflow.
+
+How rift compares to opencode (CLI, TUI, and desktop) — where it's ahead,
+at parity, and what's deliberately out of scope — is tracked in
+[docs/PARITY.md](docs/PARITY.md).
+
+## GitHub integration
+
+```sh
+cd your-repo && rift github install
+```
+
+writes a single self-hosted Actions workflow: maintainers comment `/rift <task>`
+on an issue or PR, a runner you control works the task headless against your
+own model server (`RIFT_HOST` secret), and the result comes back as a
+`rift/issue-<n>` PR plus a comment. No hosted app, no third-party service —
+the workflow is short, commented YAML you audit and commit yourself, gated so
+only commenters with write access can trigger it. Setup and security notes:
+[docs/GITHUB.md](docs/GITHUB.md).
+
 ## Plugins
 
 A plugin is a directory with a `plugin.json`, discovered from
@@ -117,6 +145,28 @@ arguments as JSON on stdin; plugins can also ship `themes/<name>.json`
 color themes and (user-level only) `prompts/<family>.md` prompt targets.
 Anything from a *project* plugin that executes commands — tools, hooks —
 gets a one-time trust prompt at startup, keyed to the exact manifest.
+
+## LSP diagnostics
+
+After every successful `write`/`edit`, rift asks the file's language server
+for diagnostics and appends errors/warnings to the tool result (capped at 10
+lines) — the model sees a broken edit immediately, in the same turn, without
+spending a compile cycle on it. Servers spawn lazily on the first edit of a
+matching file and only if their binary is on PATH: `rust-analyzer` (rs),
+`pyright-langserver` or `pylsp` (py), `typescript-language-server`
+(ts/tsx/js/jsx), `gopls` (go), `clangd` (c/cc/cpp/h/hpp). No server, slow
+server, dead server — the edit result is simply unchanged; diagnostics are a
+bonus, never an error. `/lsp` shows detected languages and server status.
+
+```json
+{"lsp": false}
+{"lsp": {"rust": {"disabled": true}, "zig": {"command": ["zls"]}}}
+```
+
+`false` disables the whole thing; a map disables or overrides per language
+(built-in names, or a file extension for languages rift doesn't know).
+Server commands load from the user config only — a project `.rift.json` may
+only set `"lsp": false`.
 
 ## Usage
 
@@ -177,6 +227,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/host [url]` | show or switch the model server — the type is auto-detected by probing (native Ollama, or OpenAI-compatible for vLLM/LM Studio/llama.cpp URLs like `http://host:8000/v1`); bare `/model` switches then resolve against it with the right protocol. Keyed endpoints belong in `providers` |
 | `/think [on\|off\|auto\|<level>]` | thinking mode and reasoning effort. Levels `minimal`/`low`/`medium`/`high`/`xhigh`/`max` (a level implies thinking on) map to each provider's own syntax — Ollama's graded `think`, OpenAI/DeepSeek `reasoning_effort` + `thinking` toggle, Anthropic-format `output_config.effort`. Servers with fewer grades map between them (DeepSeek: low/medium→high, xhigh→max); servers that reject the params get one clean retry without them. Also `--effort <level>` / `"effort"` in config |
 | `/export` | save the transcript as markdown |
+| `/share` | export the transcript as one **self-contained HTML page** — inline CSS, no scripts, no external assets; user/assistant bubbles, thinking and tool calls as collapsible sections, nothing truncated. Written as `rift-share-<timestamp>.html`; with the `gh` CLI on PATH it prints the `gh gist create` one-liner (never auto-uploads) |
 | `/theme [name]` | browse (interactive picker) or switch the color theme. 13 built-in: `dark`, `light`, `mono` (terminal-native) plus 10 truecolor palettes with their own text/background/border colors — `dracula`, `nord`, `gruvbox`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin`, `rose-pine`, `matrix`, `synthwave`. Persist with `"theme": "<name>"` in config |
 
 ## Config (`.rift.json` in the project, or `~/.config/rift/config.json`)
