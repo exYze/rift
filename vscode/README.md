@@ -67,9 +67,13 @@ provider configured in rift's own config, as `provider/model` entries.
 Switching models restarts the session with `--continue`, so the
 conversation carries over. The **⚙ gear** opens a full-view settings panel with
 a field per option — binary path, server URL, context window, temperature,
-max iterations, reasoning effort; "Edit rift config file…" opens
-`~/.config/rift/config.json` for everything else (providers, permissions,
-hooks).
+max iterations, reasoning effort, and a **system prompt** box: your own
+prompt that replaces rift's built-in one for every model and session. It is
+stored in `~/.config/rift/prompts/custom.md` — the same file the TUI's
+`/system save` manages, so the two frontends share one prompt; leave it
+empty to keep rift's built-in per-model prompts. "Edit rift config
+file…" opens `~/.config/rift/config.json` for everything else (providers,
+permissions, hooks).
 
 The same values are exposed as VS Code settings:
 

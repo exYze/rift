@@ -13,8 +13,8 @@
 //! ```
 //!
 //! `match:` lists lowercase substrings tried against the model name; the
-//! first target that matches wins, otherwise `default`. `{cwd}` and
-//! `{shell}` are the only placeholders.
+//! first target that matches wins, otherwise `default`. A bare `*` entry
+//! matches every model. `{cwd}` and `{shell}` are the only placeholders.
 //!
 //! Experiments run from `~/.config/rift/prompts/*.md`, matched before the
 //! embedded targets. User-level only, deliberately: RIFT.md from a cloned
@@ -22,8 +22,16 @@
 //! would let any cloned repo silently rewrite agent behavior. Prompts are
 //! code — a family file merges only if it beats the incumbent on the bench
 //! matrix (see crates/rift-core/prompts/README.md).
+//!
+//! `custom.md` in that directory is special only by convention: it is the
+//! file behind "your own system prompt" — written by the TUI's
+//! `/system save` and the editor extensions' settings UI — a `match: *`
+//! target that replaces every embedded family prompt while a user's
+//! concrete family override files still win (wildcard targets sort after
+//! concrete ones within the overrides).
 
-use std::path::Path;
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 
 /// One prompt target: a family name, the model-name substrings that select
 /// it, and the prompt template.
@@ -98,6 +106,9 @@ pub fn embedded_targets() -> Vec<PromptTarget> {
 /// `prompts/*.md` inside USER plugins (`~/.config/rift/plugins/*/`), sorted
 /// so precedence is deterministic. Deliberately nothing project-level —
 /// a cloned repo must never be able to replace the system prompt.
+///
+/// Wildcard (`match: *`) targets sort after the concrete ones so a user's
+/// family-specific override still beats their catch-all custom prompt.
 pub fn override_targets() -> Vec<PromptTarget> {
     let Some(dir) = crate::paths::config_dir() else { return vec![] };
     let mut out = targets_from_dir(&dir.join("rift/prompts"));
@@ -108,6 +119,7 @@ pub fn override_targets() -> Vec<PromptTarget> {
             out.extend(targets_from_dir(&p.join("prompts")));
         }
     }
+    out.sort_by_key(|t| t.matches.iter().any(|m| m == "*")); // stable: wildcards last
     out
 }
 
@@ -130,16 +142,62 @@ fn targets_from_dir(dir: &Path) -> Vec<PromptTarget> {
 }
 
 /// Pick the target for a model: first (by list order) whose `match`
-/// substrings hit the lowercased model name, else the first `default`
-/// family, else the first target. Callers put overrides before embedded
-/// targets so an override wins both the match and the fallback.
+/// substrings hit the lowercased model name (`*` hits every model), else
+/// the first `default` family, else the first target. Callers put
+/// overrides before embedded targets so an override wins both the match
+/// and the fallback.
 pub fn select<'a>(model: &str, targets: &'a [PromptTarget]) -> Option<&'a PromptTarget> {
     let model = model.to_lowercase();
     targets
         .iter()
-        .find(|t| t.matches.iter().any(|m| model.contains(m.as_str())))
+        .find(|t| t.matches.iter().any(|m| m == "*" || model.contains(m.as_str())))
         .or_else(|| targets.iter().find(|t| t.family == "default"))
         .or_else(|| targets.first())
+}
+
+// ---- the user's own system prompt (custom.md) -------------------------------
+
+/// `~/.config/rift/prompts/custom.md` — the file behind `/system save` and
+/// the editor extensions' system-prompt setting.
+pub fn custom_prompt_path() -> Option<PathBuf> {
+    crate::paths::config_dir().map(|d| d.join("rift/prompts/custom.md"))
+}
+
+/// The full file contents for a custom prompt body: a `match: *` target
+/// that applies to every model.
+fn custom_prompt_file_text(body: &str) -> String {
+    format!("---\nfamily: custom\nmatch: *\n---\n{}\n", body.trim_end())
+}
+
+/// The saved custom prompt's body (frontmatter stripped), if one exists.
+pub fn load_custom_prompt() -> Option<String> {
+    let text = std::fs::read_to_string(custom_prompt_path()?).ok()?;
+    Some(parse_target("custom", &text).template.trim_end().to_string())
+}
+
+/// Persist `body` as the user's custom system prompt (all models, all
+/// sessions). `{cwd}` and `{shell}` placeholders are honored at render
+/// time like any other target. Returns the path written.
+pub fn save_custom_prompt(body: &str) -> Result<PathBuf> {
+    anyhow::ensure!(!body.trim().is_empty(), "refusing to save an empty system prompt");
+    let path = custom_prompt_path().context("no home directory for the custom prompt")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(&path, custom_prompt_file_text(body))
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
+/// Delete the custom prompt, restoring the built-in targets. Returns
+/// whether a file was actually removed.
+pub fn delete_custom_prompt() -> Result<bool> {
+    let Some(path) = custom_prompt_path() else { return Ok(false) };
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(true)
 }
 
 /// Fill the template's placeholders. Plain string replacement — templates
@@ -252,6 +310,53 @@ mod tests {
         assert_eq!(t.family, "mistral");
         assert!(t.matches.is_empty());
         assert_eq!(t.template, "just a template");
+    }
+
+    #[test]
+    fn wildcard_target_matches_every_model_but_concrete_wins_first() {
+        let mut targets = vec![
+            parse_target("gemma", "---\nmatch: gemma\n---\nfamily prompt"),
+            parse_target("custom", "---\nfamily: custom\nmatch: *\n---\ncustom prompt"),
+        ];
+        targets.extend(embedded_targets());
+        // The user's concrete family file still beats their catch-all…
+        assert_eq!(select("gemma4:26b", &targets).unwrap().family, "gemma");
+        assert_eq!(select("gemma4:26b", &targets).unwrap().template, "family prompt");
+        // …while every other model (matched or default-bound) gets custom.
+        for model in ["qwen3:32b", "deepseek-r1:70b", "llama3.3:70b", ""] {
+            assert_eq!(select(model, &targets).unwrap().family, "custom", "{model}");
+        }
+    }
+
+    #[test]
+    fn custom_prompt_file_roundtrips_and_is_a_wildcard() {
+        let text = custom_prompt_file_text("You are my rift.\nBe terse in {cwd}.\n\n");
+        let t = parse_target("custom", &text);
+        assert_eq!(t.family, "custom");
+        assert_eq!(t.matches, vec!["*"]);
+        // parse_target keeps the file's trailing newline; render() trims it.
+        assert_eq!(t.template.trim_end(), "You are my rift.\nBe terse in {cwd}.");
+        // Renders like any target: placeholders fill, nothing left behind.
+        let p = render(&t, "/work/repo");
+        assert!(p.contains("/work/repo") && !p.contains("{cwd}"));
+    }
+
+    #[test]
+    fn override_dir_sorts_wildcards_after_concrete_files() {
+        // "custom.md" sorts alphabetically before "gemma.md", so without the
+        // wildcard re-sort the catch-all would shadow the family override.
+        let dir = std::env::temp_dir().join(format!("rift-prompts-wild-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("custom.md"), custom_prompt_file_text("catch-all")).unwrap();
+        std::fs::write(dir.join("gemma.md"), "---\nmatch: gemma\n---\ngemma override").unwrap();
+
+        let mut targets = targets_from_dir(&dir);
+        targets.sort_by_key(|t| t.matches.iter().any(|m| m == "*"));
+        targets.extend(embedded_targets());
+        assert_eq!(select("gemma4:26b", &targets).unwrap().template, "gemma override");
+        assert_eq!(select("qwen3:32b", &targets).unwrap().template.trim_end(), "catch-all");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -2135,7 +2135,7 @@ impl App {
             // Handled by the event loop (need stdout/terminal/restart state);
             // never reach here.
             UiEffect::Osc52(_) => {}
-            UiEffect::EditFile(_) => {}
+            UiEffect::EditFile(..) => {}
             UiEffect::Host(_) => {}
             UiEffect::Status(status) => self.status = status,
             UiEffect::Done(status) => {
@@ -3385,26 +3385,29 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     let result = (|| -> Result<()> {
         let mut needs_redraw = true;
         let mut last_tick = Instant::now();
-        // A GUI config editor we're waiting on (see UiEffect::EditFile). While
-        // Some, the modal is up and input is frozen.
-        let mut editing_child: Option<std::process::Child> = None;
+        // A GUI editor we're waiting on (see UiEffect::EditFile), paired
+        // with the command to dispatch when it closes cleanly. While Some,
+        // the modal is up and input is frozen.
+        let mut editing_child: Option<(std::process::Child, String)> = None;
         loop {
             // Watch a GUI editor: when its window closes, drop the modal and
-            // reload the config, exactly as the terminal-editor path does.
-            if let Some(child) = editing_child.as_mut() {
+            // dispatch the edit's reload command, exactly as the
+            // terminal-editor path does.
+            if let Some((child, after)) = editing_child.as_mut() {
                 match child.try_wait() {
                     Ok(Some(status)) => {
+                        let after = after.clone();
                         editing_child = None;
                         app.editing_file = None;
                         if status.success() {
                             let _ = prompt_tx.send(UiMsg::Command(
-                                "/config reload".into(),
+                                after,
                                 CancellationToken::new(),
                             ));
                         } else {
                             app.transcript.push_block(
                                 Kind::Warn,
-                                "! editor exited with an error; config not reloaded".into(),
+                                "! editor exited with an error; changes not reloaded".into(),
                             );
                         }
                         needs_redraw = true;
@@ -3435,7 +3438,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     let mut out = stdout();
                     let _ = out.write_all(crate::clipboard::osc52(&text).as_bytes());
                     let _ = out.flush();
-                } else if let UiEffect::EditFile(path) = fx {
+                } else if let UiEffect::EditFile(path, after) = fx {
                     let editor = resolve_editor();
                     if editor_is_gui(&editor) {
                         // GUI editor: it opens in its own window, so keep the
@@ -3446,7 +3449,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 let label =
                                     editor.split_whitespace().next().unwrap_or(&editor).to_string();
                                 app.editing_file = Some((label, path.display().to_string()));
-                                editing_child = Some(child);
+                                editing_child = Some((child, after));
                             }
                             Err(e) => app.transcript.push_block(
                                 Kind::Warn,
@@ -3491,14 +3494,12 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                         app.diff.dirty = true;
                         match status {
                             Ok(s) if s.success() => {
-                                let _ = prompt_tx.send(UiMsg::Command(
-                                    "/config reload".into(),
-                                    CancellationToken::new(),
-                                ));
+                                let _ = prompt_tx
+                                    .send(UiMsg::Command(after, CancellationToken::new()));
                             }
                             _ => app.transcript.push_block(
                                 Kind::Warn,
-                                "! editor exited with an error; config not reloaded".into(),
+                                "! editor exited with an error; changes not reloaded".into(),
                             ),
                         }
                     }

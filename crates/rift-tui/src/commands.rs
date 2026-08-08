@@ -52,8 +52,9 @@ pub enum UiEffect {
     Restart,
     /// Replace the pinned plan checklist (e.g. /plan clear).
     Plan(Vec<rift_core::PlanItem>),
-    /// Suspend the TUI, open the file in $EDITOR, then hot-reload config.
-    EditFile(PathBuf),
+    /// Suspend the TUI, open the file in $EDITOR, then dispatch the carried
+    /// slash command (e.g. "/config reload") to hot-apply the result.
+    EditFile(PathBuf, String),
     /// Ask the terminal to set the clipboard (OSC 52) — emitted by the UI
     /// loop, which owns stdout.
     Osc52(String),
@@ -123,7 +124,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/tokens", "", "context budget, usage estimate, calibration"),
     ("/yolo", "[off]", "stop asking before write/edit/bash (deny list still applies); /yolo off restores prompts"),
     ("/stats", "", "session totals: turns, tokens, tools, compactions"),
-    ("/system", "[text]", "show or override the system prompt"),
+    ("/system", "[text|save [text]|edit|reset]", "show or override the system prompt; save/edit/reset manage your own persistent one"),
     ("/temp", "<0.0-2.0>", "set sampling temperature"),
     ("/theme", "[name]", "browse/switch color themes (13 built-in: dark, light, mono, dracula, nord, gruvbox, …)"),
     ("/ctx", "<n>", "set context window (num_ctx)"),
@@ -199,7 +200,7 @@ pub async fn run_command(
         "/think" => cmd_think(rest, agent, fx).await,
         "/export" => cmd_export(agent, cx, fx),
         "/share" => cmd_share(agent, cx, fx),
-        "/system" => cmd_system(rest, agent, fx),
+        "/system" => cmd_system(rest, agent, cx, fx),
         "/temp" => cmd_temp(rest, agent, fx),
         "/ctx" => cmd_ctx(rest, agent, fx),
         "/save" => cmd_save(rest, agent, cx, fx),
@@ -413,24 +414,145 @@ fn cmd_ctx(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Resu
     Ok(format!("num_ctx: {n}"))
 }
 
-fn cmd_system(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
-    if arg.is_empty() {
-        let current = agent.messages.first().map_or_else(String::new, |m| m.content.clone());
-        let _ = fx.send(UiEffect::Out(Kind::Info, format!("system prompt:\n{current}")));
-        return Ok("system prompt shown".into());
+/// /system — show the prompt; /system <text> — session-only override;
+/// /system save|edit|reset — manage the user's persistent custom prompt
+/// (~/.config/rift/prompts/custom.md — a `match: *` target that replaces
+/// the built-in prompt for every model, every session).
+fn cmd_system(
+    arg: &str,
+    agent: &mut Agent,
+    cx: &mut CmdCx,
+    fx: &UnboundedSender<UiEffect>,
+) -> Result<String> {
+    use rift_core::prompts;
+    let (sub, rest) = match arg.split_once(char::is_whitespace) {
+        Some((s, r)) => (s, r.trim()),
+        None => (arg, ""),
+    };
+    match sub {
+        "" => {
+            let current = agent.messages.first().map_or_else(String::new, |m| m.content.clone());
+            let note = match prompts::custom_prompt_path() {
+                Some(p) if p.exists() => format!(
+                    "custom prompt active: {} — /system edit changes it, /system reset restores the built-in",
+                    p.display()
+                ),
+                _ => "no custom prompt saved — /system save <text> persists your own for all models \
+                      and sessions (/system <text> is this-session-only)"
+                    .into(),
+            };
+            let _ = fx.send(UiEffect::Out(Kind::Info, format!("system prompt:\n{current}\n\n{note}")));
+            Ok("system prompt shown".into())
+        }
+        // Persist: the given text, or the session override set earlier with
+        // /system <text>. The composed startup prompt (built-in + project
+        // guide) is refused as a source — saving it would bake this repo's
+        // RIFT.md into a global prompt.
+        "save" => {
+            let body = if rest.is_empty() {
+                let current =
+                    agent.messages.first().map_or_else(String::new, |m| m.content.clone());
+                let (composed, _) = rift_core::system_prompt_with_guide(&agent.cfg.model, &cx.cwd);
+                if current.trim().is_empty() || current == composed {
+                    bail!(
+                        "nothing custom to save — set one first with /system <text>, or pass it \
+                         directly: /system save <text>"
+                    );
+                }
+                current
+            } else {
+                rest.to_string()
+            };
+            let path = prompts::save_custom_prompt(&body)?;
+            recompose_system_prompt(agent, cx);
+            let _ = fx.send(UiEffect::Out(
+                Kind::Info,
+                format!(
+                    "custom system prompt saved to {} — replaces the built-in prompt for every \
+                     model and session ({{cwd}} and {{shell}} placeholders are filled at startup); \
+                     /system reset removes it",
+                    path.display()
+                ),
+            ));
+            Ok("custom system prompt saved".into())
+        }
+        // Open custom.md in the editor; applied on close via /system reload.
+        "edit" => {
+            let path = prompts::custom_prompt_path()
+                .ok_or_else(|| anyhow!("no home directory for the custom prompt"))?;
+            if !path.exists() {
+                // Seed with the current model's template (placeholders
+                // intact) so editing starts from the shipped prompt.
+                let mut targets = prompts::override_targets();
+                targets.extend(prompts::embedded_targets());
+                let seed = prompts::select(&agent.cfg.model, &targets)
+                    .map(|t| t.template.clone())
+                    .unwrap_or_default();
+                prompts::save_custom_prompt(&seed)?;
+                let _ = fx.send(UiEffect::Out(
+                    Kind::Info,
+                    format!(
+                        "created {} from the current model's prompt — quit without saving? \
+                         /system reset removes it",
+                        path.display()
+                    ),
+                ));
+            }
+            let _ = fx.send(UiEffect::EditFile(path, "/system reload".into()));
+            let (editor, _) = crate::app::resolve_editor_with_source();
+            Ok(format!("opening custom prompt in {editor}…"))
+        }
+        // Internal: dispatched by the UI after $EDITOR exits.
+        "reload" => {
+            recompose_system_prompt(agent, cx);
+            let _ = fx.send(UiEffect::Out(
+                Kind::Info,
+                "system prompt reloaded from disk and applied to this session".into(),
+            ));
+            Ok("system prompt reloaded".into())
+        }
+        "reset" => {
+            let removed = prompts::delete_custom_prompt()?;
+            recompose_system_prompt(agent, cx);
+            let msg = if removed {
+                "custom prompt removed — built-in prompt restored (and applied to this session)"
+            } else {
+                "no custom prompt file to remove — session prompt recomposed from the built-ins"
+            };
+            let _ = fx.send(UiEffect::Out(Kind::Info, msg.into()));
+            Ok("system prompt reset".into())
+        }
+        // Anything else is override text for this session only.
+        _ => {
+            let has_system = agent.messages.first().is_some_and(|m| m.role == Role::System);
+            let sys = Message::system(arg.to_string());
+            if has_system {
+                agent.messages[0] = sys;
+            } else {
+                agent.messages.insert(0, sys);
+            }
+            let _ = fx.send(UiEffect::Out(
+                Kind::Info,
+                "system prompt overridden for this session (kept across /clear; restart to reset; \
+                 /system save persists it for all sessions)"
+                    .into(),
+            ));
+            Ok("system prompt set".into())
+        }
     }
-    let has_system = agent.messages.first().is_some_and(|m| m.role == Role::System);
-    let sys = Message::system(arg.to_string());
-    if has_system {
+}
+
+/// Rebuild message[0] from disk: prompt targets (custom/overrides/embedded)
+/// for the current model plus the project guide files — the same composition
+/// as startup, so save/reset/edit apply live instead of "after restart".
+fn recompose_system_prompt(agent: &mut Agent, cx: &CmdCx) {
+    let (prompt, _) = rift_core::system_prompt_with_guide(&agent.cfg.model, &cx.cwd);
+    let sys = Message::system(prompt);
+    if agent.messages.first().is_some_and(|m| m.role == Role::System) {
         agent.messages[0] = sys;
     } else {
         agent.messages.insert(0, sys);
     }
-    let _ = fx.send(UiEffect::Out(
-        Kind::Info,
-        "system prompt overridden for this session (kept across /clear; restart to reset)".into(),
-    ));
-    Ok("system prompt set".into())
 }
 
 fn cmd_save(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiEffect>) -> Result<String> {
@@ -1349,7 +1471,7 @@ fn cmd_config(arg: &str, agent: &Agent, cx: &mut CmdCx, fx: &UnboundedSender<UiE
                 std::fs::write(&path, CONFIG_TEMPLATE).with_context(|| format!("creating {}", path.display()))?;
                 let _ = fx.send(UiEffect::Out(Kind::Info, format!("created {}", path.display())));
             }
-            let _ = fx.send(UiEffect::EditFile(path));
+            let _ = fx.send(UiEffect::EditFile(path, "/config reload".into()));
             // Say what will actually open — the resolved editor is a
             // surprise otherwise, especially when the PATH probe picked it.
             let (editor, source) = crate::app::resolve_editor_with_source();

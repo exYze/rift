@@ -534,6 +534,19 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
   opacity: 0.95;
 }
 #settings label > span { opacity: 0.85; }
+/* Tall fields (the system prompt) stack the label above a full-width box. */
+#settings label.stack { grid-template-columns: 1fr; align-items: start; gap: 4px; }
+#settings textarea {
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: inherit;
+  resize: vertical;
+  min-height: 60px;
+}
 .settings-note { margin: 2px 0 0; opacity: 0.55; font-size: 0.9em; }
 #settings input, #settings select {
   background: var(--vscode-input-background);
