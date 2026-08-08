@@ -804,6 +804,7 @@
   const setNumCtx = document.getElementById('set-numctx');
   const setTemp = document.getElementById('set-temp');
   const setIters = document.getElementById('set-iters');
+  const setSysPrompt = document.getElementById('set-sysprompt');
 
   function renderModels(models, current) {
     modelSelect.innerHTML = '';
@@ -864,6 +865,7 @@
       setNumCtx.value = m.numCtx;
       setTemp.value = m.temperature;
       setIters.value = m.maxIterations;
+      setSysPrompt.value = m.systemPrompt || '';
       if (m.model !== undefined && modelSelect.options.length) modelSelect.value = m.model;
     }
   });
@@ -939,6 +941,7 @@
       numCtx: setNumCtx.value.trim(),
       temperature: setTemp.value.trim(),
       maxIterations: setIters.value.trim(),
+      systemPrompt: setSysPrompt.value,
     });
     settingsPanel.classList.add('hidden');
   });

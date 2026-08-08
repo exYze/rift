@@ -24,6 +24,46 @@ function riftConfigPath() {
       : path.join(os.homedir(), '.config');
   return path.join(base, 'rift', 'config.json');
 }
+
+// ── Custom system prompt ────────────────────────────────────────────────────
+// The settings panel's "system prompt" field reads/writes rift's own custom
+// prompt file (~/.config/rift/prompts/custom.md) — the same file the TUI's
+// /system save manages — so both frontends share one source of truth. The
+// file is a prompt target with `match: *` frontmatter: it replaces rift's
+// built-in prompt for every model; rift picks it up on (re)start.
+
+function riftCustomPromptPath() {
+  return path.join(path.dirname(riftConfigPath()), 'prompts', 'custom.md');
+}
+
+/** The saved custom prompt's body, frontmatter stripped ('' if none). */
+function readCustomPrompt() {
+  let text;
+  try {
+    text = fs.readFileSync(riftCustomPromptPath(), 'utf8');
+  } catch {
+    return '';
+  }
+  // Same shape rift parses: `---` frontmatter up to the next `\n---` line.
+  const fm = text.match(/^---[^]*?\n---[^\n]*\n?/);
+  return (fm ? text.slice(fm[0].length) : text).trim();
+}
+
+/** Write the custom prompt (empty/blank body deletes it — back to rift's
+ *  built-in per-model prompts). */
+function writeCustomPrompt(body) {
+  const p = riftCustomPromptPath();
+  if (!body || !body.trim()) {
+    try {
+      fs.unlinkSync(p);
+    } catch {
+      /* nothing saved */
+    }
+    return;
+  }
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, `---\nfamily: custom\nmatch: *\n---\n${body.trim()}\n`);
+}
 // Model discovery and provider routing live in rift now (the `list_models`
 // serve command) — one source of truth instead of a JS re-implementation
 // reading rift's config and probing servers itself.
@@ -389,6 +429,11 @@ class RiftChatProvider {
         <option value="max">max</option>
       </select>
     </label>
+    <label class="stack" data-tip="Your own system prompt — replaces rift's built-in prompt for every model, every session. Shared with the TUI (/system save); stored in ~/.config/rift/prompts/custom.md. {cwd} and {shell} placeholders are filled at startup. Empty = rift's built-in per-model prompts">
+      <span>system prompt</span>
+      <textarea id="set-sysprompt" rows="6"
+        placeholder="Empty = rift's built-in per-model prompts"></textarea>
+    </label>
     <div class="row">
       <button id="set-save" data-tip="Save — applies immediately; a running session restarts and resumes">Save</button>
       <button id="set-config" class="secondary" data-tip="Providers (vLLM, cloud APIs), permissions, hooks and more live in rift's own config">Edit rift config file…</button>
@@ -711,6 +756,17 @@ class RiftChatProvider {
           const n = Number(v);
           return v !== '' && v != null && isFinite(n) ? n : undefined;
         };
+        // The system prompt lives in rift's own prompts dir, not VS Code
+        // settings — write it first so the restart below picks it up. Only
+        // when the webview sent the field: an absent value (stale webview
+        // JS) must not delete a prompt saved elsewhere.
+        if (typeof m.systemPrompt === 'string') {
+          try {
+            writeCustomPrompt(m.systemPrompt);
+          } catch (e) {
+            vscode.window.showWarningMessage(`rift: could not save the system prompt: ${e.message}`);
+          }
+        }
         Promise.all([
           cfg.update('executablePath', m.executablePath || undefined, vscode.ConfigurationTarget.Global),
           cfg.update('host', m.host || undefined, vscode.ConfigurationTarget.Global),
@@ -756,6 +812,7 @@ class RiftChatProvider {
         numCtx: cfg.get('numCtx') ?? '',
         temperature: cfg.get('temperature') ?? '',
         maxIterations: cfg.get('maxIterations') ?? '',
+        systemPrompt: readCustomPrompt(),
       });
     }
   }

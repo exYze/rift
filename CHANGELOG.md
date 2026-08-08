@@ -5,6 +5,15 @@ All notable changes to rift. Versions follow the roadmap phases in
 
 ## Unreleased
 
+- **Bring-your-own system prompt** (TUI + VS Code): `/system save [text]`
+  persists your own system prompt to `~/.config/rift/prompts/custom.md` —
+  a `match: *` prompt target that replaces the built-in prompt for every
+  model and session; `/system edit` opens it in your editor (applied when
+  the editor closes), `/system reset` restores the built-ins, and bare
+  `/system` now says which prompt is active. The VS Code sidebar gets a
+  "system prompt" box in its settings panel backed by the same file, so
+  both frontends share one source of truth. Concrete per-family override
+  files still beat the wildcard, and `/system <text>` stays session-only.
 - **Desktop app** (`desktop/`): a native shell for rift built with Tauri 2 —
   tabs (one conversation per tab, each its own `rift --serve` process),
   sessions sidebar with recent projects, inline per-hunk diff review

@@ -17,9 +17,19 @@ You are Rift, ... {cwd} ... {shell}
 
 - `family` — the target's name (defaults to the file stem).
 - `match` — comma-separated lowercase substrings tried against the model
-  name (`qwen3.6:27b` matches `qwen`). First matching target wins; no match
-  falls back to `default`. `default.md` has no `match` — it IS the fallback.
+  name (`qwen3.6:27b` matches `qwen`). A bare `*` matches every model.
+  First matching target wins; no match falls back to `default`.
+  `default.md` has no `match` — it IS the fallback.
 - `{cwd}` and `{shell}` are the only placeholders.
+
+## The user's own prompt: `custom.md`
+
+`~/.config/rift/prompts/custom.md` is the file behind "your own system
+prompt": a `match: *` target written by the TUI (`/system save`, `/system
+edit`, `/system reset`) and the VS Code extension's settings panel. It
+replaces the embedded prompt for **every** model — while a user's concrete
+family override in the same directory still wins, because wildcard targets
+are sorted after concrete ones within the overrides.
 
 ## Adding or changing a family — the evolution gate
 
