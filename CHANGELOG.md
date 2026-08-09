@@ -3,7 +3,7 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
-## Unreleased
+## v2.6.5 — 2026-08-08
 
 - **Bring-your-own system prompt** (TUI + VS Code): `/system save [text]`
   persists your own system prompt to `~/.config/rift/prompts/custom.md` —
