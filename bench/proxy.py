@@ -10,15 +10,28 @@ from the wire — no trust in self-reported stats.
 Usage: proxy.py [port] [upstream] [logfile]
 """
 import json
+import os
 import re
 import sys
+import tempfile
+import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 11435
 UPSTREAM = sys.argv[2] if len(sys.argv) > 2 else "http://localhost:11434"
-LOGFILE = sys.argv[3] if len(sys.argv) > 3 else "/tmp/rift-bench-tokens.jsonl"
+# Shared with bench.py (same env var / same default) — a drive-relative
+# "/tmp" diverges between processes on Windows.
+LOGFILE = (
+    sys.argv[3]
+    if len(sys.argv) > 3
+    else os.environ.get("RIFT_BENCH_TOKENS")
+    or os.path.join(tempfile.gettempdir(), "rift-bench-tokens.jsonl")
+)
+# Handler threads append concurrently; unserialized writes once interleaved
+# a blank line into the log and cost a 300-run suite its final task.
+LOG_LOCK = threading.Lock()
 
 PROMPT_RE = re.compile(rb'"(?:prompt_eval_count|prompt_tokens)":\s*(\d+)')
 OUTPUT_RE = re.compile(rb'"(?:eval_count|completion_tokens)":\s*(\d+)')
@@ -65,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
                 "prompt": int(prompt_counts[-1]) if prompt_counts else 0,
                 "output": int(output_counts[-1]) if output_counts else 0,
             }
-            with open(LOGFILE, "a") as f:
+            with LOG_LOCK, open(LOGFILE, "a") as f:
                 f.write(json.dumps(entry) + "\n")
 
     def do_POST(self):
