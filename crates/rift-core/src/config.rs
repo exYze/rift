@@ -190,8 +190,10 @@ pub struct Permissions {
     /// matching an allow rule skip the approval prompt. USER config only.
     #[serde(default)]
     pub allow: Vec<String>,
-    /// Rules that ALWAYS prompt, even in /yolo mode — the way to keep
-    /// approval off but gate the few actions that matter. Projects may add.
+    /// Rules that always prompt while approval mode is ON, even when a
+    /// broad allow rule would otherwise cover them. /yolo (approval OFF) is
+    /// all-or-nothing and suppresses these too — use `deny` for anything
+    /// that must hold regardless of mode. Projects may add.
     #[serde(default)]
     pub ask: Vec<String>,
     /// Rules refused outright (even /yolo, even headless):

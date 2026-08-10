@@ -83,6 +83,52 @@ body { display: flex; flex-direction: column; }
   max-width: 92%;
 }
 .msg.assistant { padding: 0 2px; }
+
+/* "Working" indicator — three dots that bounce and cycle color while a turn
+   runs. It sits at the end of the transcript from the moment a message is
+   sent until `done`, so the wait before a local model's first token reads as
+   activity rather than a dead UI. */
+.typing {
+  display: flex;
+  align-self: flex-start;
+  align-items: flex-end;
+  gap: 5px;
+  height: 14px;
+  padding: 6px 4px 10px;
+}
+.typing span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vscode-textLink-foreground, #4daafc);
+  animation: typing-bounce 1.05s infinite ease-in-out,
+             typing-color 3.15s infinite ease-in-out;
+}
+/* Staggered so the dots travel as a wave rather than pulsing in unison. */
+.typing span:nth-child(2) { animation-delay: 0.15s, 0.15s; }
+.typing span:nth-child(3) { animation-delay: 0.3s, 0.3s; }
+
+@keyframes typing-bounce {
+  0%, 75%, 100% { transform: translateY(0); opacity: 0.45; }
+  35% { transform: translateY(-6px); opacity: 1; }
+}
+@keyframes typing-color {
+  0%, 100% { background: var(--vscode-textLink-foreground, #4daafc); }
+  33% { background: var(--vscode-charts-purple, #b180d7); }
+  66% { background: var(--vscode-charts-green, #89d185); }
+}
+
+/* Motion-sensitive users still get a "something is happening" signal, just
+   without the travel: the dots fade in place. */
+@media (prefers-reduced-motion: reduce) {
+  .typing span {
+    animation: typing-fade 1.6s infinite ease-in-out;
+  }
+  @keyframes typing-fade {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+  }
+}
 .msg.assistant pre {
   background: var(--vscode-textCodeBlock-background, rgba(128,128,128,.15));
   padding: 8px;
@@ -492,12 +538,25 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
 #footer button:hover {
   background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.2));
 }
+/* The approval toggle is labeled, not icon-only: it decides whether the
+   agent touches your files unattended, so the mode is spelled out. */
+#btn-approve {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 0.8em;
+  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
+  white-space: nowrap;
+}
+#btn-approve .ap-icon { font-size: 1.05em; line-height: 1; }
 /* Auto-approve is the one footer state that changes what happens to your
    files without asking, so it stays visibly lit rather than blending in. */
 #btn-approve.auto-approve {
   background: var(--vscode-inputValidation-warningBackground, rgba(190,140,20,.28));
   color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
-  outline: 1px solid var(--vscode-inputValidation-warningBorder, rgba(190,140,20,.7));
+  border-color: var(--vscode-inputValidation-warningBorder, rgba(190,140,20,.8));
+  font-weight: 600;
 }
 
 #settings {

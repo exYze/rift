@@ -26,6 +26,11 @@
   const agentLanes = new Map();
   /** Last status text from the extension; agent count is appended locally. */
   let baseStatus = 'rift';
+  /** "Working" indicator: three bouncing dots pinned to the bottom of the
+   *  transcript for the whole turn. A local model can think for many
+   *  seconds before its first token, and without this the sent message
+   *  just sits there looking ignored. */
+  let typingEl = null;
 
   function esc(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -218,8 +223,32 @@
     toolGroup = null;
     const stick = atBottom();
     messages.appendChild(el);
+    // Re-appending keeps the dots last as the turn streams in — they mean
+    // "still working", so they must never end up stranded above the reply.
+    if (typingEl) messages.appendChild(typingEl);
     if (stick) messages.scrollTop = messages.scrollHeight;
     return el;
+  }
+
+  function showTyping() {
+    if (typingEl) {
+      messages.appendChild(typingEl); // already up: just keep it last
+      return;
+    }
+    const stick = atBottom();
+    typingEl = document.createElement('div');
+    typingEl.className = 'typing';
+    // Screen readers get a plain announcement instead of three empty dots.
+    typingEl.setAttribute('role', 'status');
+    typingEl.setAttribute('aria-label', 'rift is working');
+    for (let i = 0; i < 3; i++) typingEl.appendChild(document.createElement('span'));
+    messages.appendChild(typingEl);
+    if (stick) messages.scrollTop = messages.scrollHeight;
+  }
+
+  function hideTyping() {
+    if (typingEl) typingEl.remove();
+    typingEl = null;
   }
   function line(cls, text) {
     const el = document.createElement('div');
@@ -808,17 +837,18 @@
   const setAutoApprove = document.getElementById('set-autoapprove');
   const btnApprove = document.getElementById('btn-approve');
 
-  /** Footer approval toggle: 🔒 = rift asks first, ✓ = auto-approve. The
-   *  button carries the state so it reads at a glance — auto-approve
-   *  changes what happens to your files, so it must never be ambiguous. */
-  function renderApprove(autoApprove, live) {
-    btnApprove.textContent = autoApprove ? '✓' : '🔒';
-    btnApprove.classList.toggle('auto-approve', autoApprove);
+  /** Footer approval toggle. Exactly two states, spelled out rather than
+   *  left to an icon: this one decides whether the agent edits your files
+   *  without asking, so "which mode am I in?" must never need a guess. */
+  const apIcon = btnApprove.querySelector('.ap-icon');
+  const apLabel = btnApprove.querySelector('.ap-label');
+  function renderApprove(autoApprove) {
+    apIcon.textContent = autoApprove ? '⚡' : '🔒';
+    apLabel.textContent = autoApprove ? 'auto' : 'approve';
+    btnApprove.classList.toggle('auto-approve', !!autoApprove);
     btnApprove.dataset.tip = autoApprove
-      ? 'Auto-approve ON — rift applies edits and runs commands without asking. Click to require approval again.' +
-        (live ? '' : ' (this rift applies it on the next session start)')
-      : 'Approval ON — rift asks before edits and shell commands. Click to auto-accept them.' +
-        (live ? '' : ' (this rift applies it on the next session start)');
+      ? 'Auto-approve is ON — rift applies edits and runs commands with no prompts at all. Click to require approval.'
+      : 'Approval is ON — rift asks before every edit and shell command. Click to let it work without asking.';
   }
 
   function renderModels(models, current) {
@@ -852,7 +882,12 @@
       btnStop.classList.toggle('hidden', !m.busy);
       btnSend.classList.toggle('hidden', m.busy);
       if (m.skills) skills = m.skills;
-      renderApprove(m.autoApprove, m.approveLive !== false);
+      renderApprove(m.autoApprove);
+      // Busy is the extension's own turn state: it goes true the moment the
+      // prompt is sent and false on `done` (or a crash/cancel), so the dots
+      // can never outlive the turn that started them.
+      if (m.busy) showTyping();
+      else hideTyping();
     } else if (m.type === 'insert') {
       input.value += m.text;
       input.focus();
@@ -860,6 +895,7 @@
       updateMention();
     } else if (m.type === 'reset') {
       messages.innerHTML = '';
+      typingEl = null; // wiped with the transcript; drop the stale handle
       closeTurnBlocks();
       planEl = null;
       agentLanes.clear();

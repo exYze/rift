@@ -459,7 +459,7 @@ class RiftChatProvider {
   <div id="footer">
     <select id="model-select" data-tip="Model — switching keeps the current conversation"></select>
     <span>
-      <button id="btn-approve" data-tip="Approval mode">🔒</button>
+      <button id="btn-approve" data-tip="Approval mode"><span class="ap-icon">🔒</span><span class="ap-label">approve</span></button>
       <button id="btn-refresh" data-tip="Refresh the model list from your servers">⟳</button>
       <button id="btn-settings" data-tip="Settings — binary path, server URL, reasoning effort">⚙</button>
     </span>
@@ -490,39 +490,39 @@ class RiftChatProvider {
         ctxUsed: this.proc ? this.ctxUsed : 0,
         ctxLimit: this.proc ? this.ctxLimit : 0,
         skills: this.skills || [],
-        // With no process running, show what the next one will start as.
-        autoApprove: this.proc && this.approve !== null
-          ? !this.approve
-          : config().get('autoApprove') === true,
-        // Older rifts have no set_approval: the toggle then only takes
-        // effect on the next launch, and the webview says so.
-        approveLive: !this.proc || this.commands.includes('set_approval'),
+        // Exactly two states, and the setting is the single source of
+        // truth: the toggle is applied at the `hello` handshake and again
+        // on every change, so what the button says is what rift is doing.
+        autoApprove: config().get('autoApprove') === true,
       });
     }
   }
 
-  /** Turn auto-approve on/off: persist the choice, push it to the running
-   *  process (no restart — it is one flag rift flips live), and reflect it
-   *  in the footer. `on` omitted = toggle the current state. Returns the
-   *  new state synchronously (the config write lands later). */
+  /** Turn auto-approve on/off: persist the choice and push it to the
+   *  running process (no restart — it is one flag rift flips live).
+   *  `on` omitted = toggle. Returns the state actually adopted.
+   *
+   *  Two states, no third: if the running rift is too old to switch, the
+   *  change is refused outright rather than left pending, because a button
+   *  claiming "auto" while rift still prompts is worse than no button. */
   setAutoApprove(on) {
     const cfg = config();
-    const next = on === undefined ? !(cfg.get('autoApprove') === true) : !!on;
+    const current = cfg.get('autoApprove') === true;
+    const next = on === undefined ? !current : !!on;
+    if (next === current) return current;
+    if (this.proc && !this.commands.includes('set_approval')) {
+      this.post({
+        type: 'rift',
+        ev: {
+          event: 'warning',
+          text: 'this rift is too old to switch approval mode — update rift (or start a new session) to use auto-approve',
+        },
+      });
+      return current;
+    }
     cfg.update('autoApprove', next, vscode.ConfigurationTarget.Global).then(() => {
-      if (this.proc && this.commands.includes('set_approval')) {
-        // rift's flag is the inverse: approve=true means "keep asking".
-        this.write({ cmd: 'set_approval', approve: !next });
-      } else if (this.proc) {
-        this.post({
-          type: 'rift',
-          ev: {
-            event: 'warning',
-            text: `this rift build cannot switch approval mode live — auto-approve ${
-              next ? 'on' : 'off'
-            } applies the next time the session starts`,
-          },
-        });
-      }
+      // rift's flag is the inverse: approve=true means "keep asking".
+      if (this.proc) this.write({ cmd: 'set_approval', approve: !next });
       this.postStatus();
       this.postSettings();
     });
@@ -596,7 +596,13 @@ class RiftChatProvider {
     // proposals arrive as native diffs instead of plain approval prompts.
     // rift.inlineDiffReview=false skips the opt-in — approvals fall back to
     // the classic in-chat prompt with the diff as colored text.
-    this.write({ cmd: 'hello', edit_review: config().get('inlineDiffReview') !== false });
+    // `approve` rides along so the mode is set before anything can prompt
+    // (older rifts ignore the field; `ready` then reconciles it).
+    this.write({
+      cmd: 'hello',
+      edit_review: config().get('inlineDiffReview') !== false,
+      approve: !(config().get('autoApprove') === true),
+    });
     this.postStatus();
   }
 
@@ -618,13 +624,24 @@ class RiftChatProvider {
       // Skills + plugin commands, completable in the webview as /skill:<name>.
       this.skills = ev.skills || [];
       this.commands = ev.commands || [];
-      // Approval mode: rift reports what it started with (config +
-      // --approve). If the user's auto-approve preference differs, push it
-      // now — the setting is the source of truth for the chat sidebar.
+      // Approval mode: the setting is the source of truth and already rode
+      // in on `hello`. Reconcile anyway in case rift started before the
+      // handshake landed — and if this build can't switch at all, say so
+      // once and drop the setting, so the button never claims a mode rift
+      // isn't actually in.
       this.approve = typeof ev.approve === 'boolean' ? ev.approve : null;
       const wantApprove = !(config().get('autoApprove') === true);
-      if (this.commands.includes('set_approval') && this.approve !== wantApprove) {
-        this.write({ cmd: 'set_approval', approve: wantApprove });
+      if (this.commands.includes('set_approval')) {
+        if (this.approve !== wantApprove) this.write({ cmd: 'set_approval', approve: wantApprove });
+      } else if (!wantApprove) {
+        config().update('autoApprove', false, vscode.ConfigurationTarget.Global);
+        this.post({
+          type: 'rift',
+          ev: {
+            event: 'warning',
+            text: 'auto-approve turned off: this rift build does not support it — update rift to use it',
+          },
+        });
       }
       // rift owns model discovery: populate the dropdown from the running
       // process (provider routing included), not from HTTP probes of our own.

@@ -205,6 +205,67 @@ fn session_list() -> Vec<Value> {
     out
 }
 
+/// Offer one trust question per untrusted project plugin, through the
+/// ordinary ask machinery, so serve consumers (the VS Code chat) can approve
+/// what the TUI would have asked on stdin. A dropped or non-"trust" answer
+/// means skipped — fail safe; the plugin's tools stay unregistered.
+///
+/// With approval off (auto-approve / `/yolo`) the questions are SKIPPED, not
+/// auto-answered. Approval mode says "don't interrupt me for the agent's
+/// edits and commands"; it is not consent to execute commands shipped by a
+/// cloned repo, which is what trusting a project manifest grants. Silence
+/// here costs a few tools; the alternative costs a sandbox escape.
+fn offer_plugin_trust(
+    plugins: Vec<rift_core::Plugin>,
+    approval_on: bool,
+    ask_seq: &mut u64,
+    pending_asks: &mut HashMap<u64, tokio::sync::oneshot::Sender<String>>,
+    prompt_tx: &mpsc::UnboundedSender<ServeCmd>,
+) {
+    for plugin in plugins {
+        if !approval_on {
+            emit(json!({
+                "event": "info",
+                "text": format!(
+                    "project plugin '{}' left untrusted — its {} tool(s) stay unregistered while \
+                     auto-approve is on (trusting a repo's commands is a separate decision from \
+                     approving the agent's edits). Turn approval back on to be asked.",
+                    plugin.name,
+                    plugin.tools.len()
+                ),
+            }));
+            continue;
+        }
+        *ask_seq += 1;
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        emit(json!({
+            "event": "ask",
+            "id": *ask_seq,
+            "question": format!(
+                "Project plugin '{}' declares {} tool(s) — each runs a command from this repo \
+                 when the model calls it. Trust this manifest on this machine?",
+                plugin.name,
+                plugin.tools.len()
+            ),
+            "detail": plugin
+                .tools
+                .iter()
+                .map(|t| format!("{}: {} — `{}`", t.name, t.description, t.command))
+                .collect::<Vec<_>>(),
+            "choices": ["trust", "skip"],
+        }));
+        pending_asks.insert(*ask_seq, tx);
+        let cmd_tx = prompt_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(answer) = rx.await {
+                if matches!(answer.trim().to_lowercase().as_str(), "trust" | "yes" | "y") {
+                    let _ = cmd_tx.send(ServeCmd::TrustPlugin(plugin));
+                }
+            }
+        });
+    }
+}
+
 /// Work items for the agent task. Undo runs there (not on the select loop)
 /// because the agent owns its `ToolCtx`, and routing through the same queue
 /// keeps it serialized with turns.
@@ -414,40 +475,13 @@ pub async fn run_serve(
     let mut asks_open = true;
     let mut reviews_open = true;
 
-    // Project-plugin trust rides the ordinary ask machinery: one question
-    // per untrusted manifest, right after startup, so serve consumers (the
-    // VS Code chat) can approve what the TUI would have asked on stdin.
-    // A dropped or non-"trust" answer means skipped — fail safe; the
-    // plugin's tools stay unregistered for this session.
-    for plugin in pending_plugins {
-        ask_seq += 1;
-        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-        emit(json!({
-            "event": "ask",
-            "id": ask_seq,
-            "question": format!(
-                "Project plugin '{}' declares {} tool(s) — each runs a command from this repo \
-                 when the model calls it. Trust this manifest on this machine?",
-                plugin.name,
-                plugin.tools.len()
-            ),
-            "detail": plugin
-                .tools
-                .iter()
-                .map(|t| format!("{}: {} — `{}`", t.name, t.description, t.command))
-                .collect::<Vec<_>>(),
-            "choices": ["trust", "skip"],
-        }));
-        pending_asks.insert(ask_seq, tx);
-        let cmd_tx = prompt_tx.clone();
-        tokio::spawn(async move {
-            if let Ok(answer) = rx.await {
-                if matches!(answer.trim().to_lowercase().as_str(), "trust" | "yes" | "y") {
-                    let _ = cmd_tx.send(ServeCmd::TrustPlugin(plugin));
-                }
-            }
-        });
-    }
+    // Project-plugin trust is offered lazily — at the `hello` handshake, or
+    // failing that the first prompt — rather than the instant we start.
+    // Both give the consumer time to declare its approval mode first, which
+    // is what lets auto-approve mean "no questions" for real: a question
+    // emitted before the mode arrived would have beaten the switch.
+    let mut pending_plugins = pending_plugins;
+    let mut plugins_offered = false;
 
     loop {
         tokio::select! {
@@ -527,6 +561,13 @@ pub async fn run_serve(
                         } else {
                             ctl.set_edit_review(None);
                         }
+                        // Optional approval mode on the handshake: it lands
+                        // before anything can prompt, so a consumer opening
+                        // in auto-approve never flashes a question it would
+                        // have suppressed a moment later.
+                        if let Some(approve) = v["approve"].as_bool() {
+                            ctl.set_approval(approve);
+                        }
                         emit(json!({
                             "event": "capabilities",
                             "protocol_version": PROTOCOL_VERSION,
@@ -535,11 +576,33 @@ pub async fn run_serve(
                             // spawn can confirm both switches in one place.
                             "approve": ctl.approval_enabled(),
                         }));
+                        if !plugins_offered {
+                            plugins_offered = true;
+                            offer_plugin_trust(
+                                std::mem::take(&mut pending_plugins),
+                                ctl.approval_enabled(),
+                                &mut ask_seq,
+                                &mut pending_asks,
+                                &prompt_tx,
+                            );
+                        }
                     }
                     Some("prompt") => {
                         let mut text = v["text"].as_str().unwrap_or("").to_string();
                         if text.trim().is_empty() {
                             continue;
+                        }
+                        // A consumer that never says hello still gets asked,
+                        // just at the last moment before tools can run.
+                        if !plugins_offered {
+                            plugins_offered = true;
+                            offer_plugin_trust(
+                                std::mem::take(&mut pending_plugins),
+                                ctl.approval_enabled(),
+                                &mut ask_seq,
+                                &mut pending_asks,
+                                &prompt_tx,
+                            );
                         }
                         if busy {
                             emit(json!({"event": "warning", "text": "turn in progress — cancel it or wait for done"}));

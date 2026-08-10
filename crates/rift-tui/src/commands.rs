@@ -1008,7 +1008,7 @@ fn cmd_permissions(
             out.push_str(&format!("  {rule}\n"));
         }
     }
-    out.push_str("\nask (always prompt, even in YOLO mode):\n");
+    out.push_str("\nask (always prompt while approval is on; YOLO suppresses these — use deny to gate regardless):\n");
     if ask.is_empty() {
         out.push_str("  none — /permissions add ask Bash(git push *)\n");
     } else {
@@ -1413,8 +1413,8 @@ fn cmd_yolo(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result<
                 agent.ctx().set_approval(false);
                 let _ = fx.send(UiEffect::Out(
                     Kind::Warn,
-                    "YOLO mode ON — write/edit/bash run without asking. The deny list still applies. \
-                     /yolo off restores approval prompts."
+                    "YOLO mode ON — write/edit/bash run with no prompts at all (ask rules included). \
+                     The deny list still applies. /yolo off restores approval prompts."
                         .into(),
                 ));
             } else {

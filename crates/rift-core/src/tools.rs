@@ -665,7 +665,7 @@ impl ToolCtx {
     }
 
     /// The first ask rule any chained segment of `command` matches — a hit
-    /// forces a prompt even when approval mode is off.
+    /// forces a prompt whenever approval mode is on.
     fn bash_ask_rule(&self, command: &str) -> Option<String> {
         let rules = self.rules.lock().ok()?;
         Self::bash_segments(command).iter().find_map(|seg| rules.bash_ask_match(seg))
@@ -675,12 +675,19 @@ impl ToolCtx {
     /// allow-listed command runs silently; otherwise the prompt offers a
     /// persistent "always allow '<pattern>'" (saved to the user config)
     /// alongside once/session/deny. An ask rule (`Bash(git push *)` in
-    /// permissions.ask) forces the prompt even in /yolo mode.
+    /// permissions.ask) forces the prompt while approval mode is on.
+    ///
+    /// Approval OFF (/yolo, the editors' auto-approve) means exactly that:
+    /// nothing prompts, ask rules included. It is an all-or-nothing switch —
+    /// a mode that still interrupted for *some* actions was the worst of
+    /// both (you stop trusting it, but you also stop reading the prompts).
+    /// `deny` is unaffected: it refuses without ever asking, and the bash
+    /// tool checks it before this gate.
     pub(crate) async fn check_bash_approval(&self, command: &str) -> Result<()> {
-        let forced = self.bash_ask_rule(command);
-        if !self.approval_enabled() && forced.is_none() {
+        if !self.approval_enabled() {
             return Ok(());
         }
+        let forced = self.bash_ask_rule(command);
         if forced.is_none() {
             if self.approved_kinds.lock().map(|k| k.contains("bash")).unwrap_or(false) {
                 return Ok(());
@@ -741,7 +748,8 @@ impl ToolCtx {
     /// the model sees that as a tool error and adjusts course. `detail`
     /// lines (the pending diff) render above the question, diff-colored.
     /// `path` (write/edit) is judged against the permission rules first:
-    /// deny bails, allow skips the prompt, ask forces it even in /yolo.
+    /// deny bails, allow skips the prompt, ask forces it while approval is
+    /// on. Approval OFF means nothing prompts (see check_bash_approval).
     async fn check_approval(
         &self,
         kind: &str,
@@ -752,6 +760,8 @@ impl ToolCtx {
         use crate::permissions::Decision;
         let decision = path.and_then(|p| self.path_decision(kind, p));
         let forced = match &decision {
+            // Deny is checked before the approval mode: it refuses outright
+            // rather than prompting, so auto-approve never reaches it.
             Some((Decision::Deny, rule)) => {
                 bail!("this {kind} was blocked by permission rule '{rule}'")
             }
@@ -759,7 +769,7 @@ impl ToolCtx {
             Some((Decision::Ask, rule)) => Some(rule.clone()),
             None => None,
         };
-        if !self.approval_enabled() && forced.is_none() {
+        if !self.approval_enabled() {
             return Ok(());
         }
         if forced.is_none() && self.approved_kinds.lock().map(|k| k.contains(kind)).unwrap_or(false) {
@@ -849,7 +859,9 @@ impl ToolCtx {
             Some((Decision::Ask, rule)) => Some(rule.clone()),
             None => None,
         };
-        if !self.approval_enabled() && forced.is_none() {
+        // Auto-approve: apply without raising a review at all, so the
+        // frontend is never left holding a diff nobody will decide.
+        if !self.approval_enabled() {
             return Ok(new.to_string());
         }
         if forced.is_none() && self.approved_kinds.lock().map(|k| k.contains(kind)).unwrap_or(false) {
@@ -3144,9 +3156,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_rule_forces_prompt_even_in_yolo() {
-        // Approval OFF: an ask rule must still prompt (and deny headless).
-        let ctx = ctx_with_rules(Path::new("/tmp"), &[], &["Bash(git push *)"], &[]).with_approval(false);
+    async fn ask_rule_prompts_while_approval_is_on() {
+        // Approval ON: an ask rule prompts (and denies headless).
+        let ctx = ctx_with_rules(Path::new("/tmp"), &[], &["Bash(git push *)"], &[]).with_approval(true);
         // Headless (no ask channel): the ask rule denies rather than runs.
         let err = ctx.check_bash_approval("git push origin main").await.unwrap_err();
         assert!(err.to_string().contains("interactive approval"), "got: {err}");
@@ -3154,8 +3166,6 @@ mod tests {
         // not smuggle the command past the gate.
         assert!(ctx.check_bash_approval("git${IFS}push origin main").await.is_err());
         assert!(ctx.check_bash_approval("true && git push --force").await.is_err());
-        // Non-matching commands sail through in yolo, as before.
-        assert!(ctx.check_bash_approval("git status").await.is_ok());
         // With a user attached, the prompt fires and their answer rules.
         let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
         let ctx = ctx.with_interaction(ask_tx);
@@ -3167,6 +3177,31 @@ mod tests {
             }
         });
         assert!(ctx.check_bash_approval("git push origin main").await.is_ok());
+    }
+
+    /// /yolo (and the editors' auto-approve) is all-or-nothing: with
+    /// approval OFF nothing prompts, ask rules included. Deny is untouched —
+    /// it refuses outright instead of asking, so it never reaches the gate.
+    #[tokio::test]
+    async fn yolo_bypasses_ask_rules_but_never_deny() {
+        let ctx = ctx_with_rules(
+            Path::new("/tmp"),
+            &[],
+            &["Bash(git push *)"],
+            &["Bash(curl *)"],
+        )
+        .with_approval(false);
+        // An ask-rule command runs headless, with no prompt and no error.
+        assert!(ctx.check_bash_approval("git push origin main").await.is_ok());
+        assert!(ctx.check_bash_approval("true && git push --force").await.is_ok());
+        assert!(ctx.check_bash_approval("git status").await.is_ok());
+        // Even with a user attached, no question is ever raised.
+        let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
+        let ctx = ctx.with_interaction(ask_tx);
+        assert!(ctx.check_bash_approval("git push origin main").await.is_ok());
+        assert!(ask_rx.try_recv().is_err(), "auto-approve must not prompt at all");
+        // Deny still refuses — checked by the bash tool ahead of this gate.
+        assert!(ctx.bash_denied("curl http://evil.example"));
     }
 
     #[tokio::test]
