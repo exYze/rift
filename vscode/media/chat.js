@@ -805,6 +805,21 @@
   const setTemp = document.getElementById('set-temp');
   const setIters = document.getElementById('set-iters');
   const setSysPrompt = document.getElementById('set-sysprompt');
+  const setAutoApprove = document.getElementById('set-autoapprove');
+  const btnApprove = document.getElementById('btn-approve');
+
+  /** Footer approval toggle: 🔒 = rift asks first, ✓ = auto-approve. The
+   *  button carries the state so it reads at a glance — auto-approve
+   *  changes what happens to your files, so it must never be ambiguous. */
+  function renderApprove(autoApprove, live) {
+    btnApprove.textContent = autoApprove ? '✓' : '🔒';
+    btnApprove.classList.toggle('auto-approve', autoApprove);
+    btnApprove.dataset.tip = autoApprove
+      ? 'Auto-approve ON — rift applies edits and runs commands without asking. Click to require approval again.' +
+        (live ? '' : ' (this rift applies it on the next session start)')
+      : 'Approval ON — rift asks before edits and shell commands. Click to auto-accept them.' +
+        (live ? '' : ' (this rift applies it on the next session start)');
+  }
 
   function renderModels(models, current) {
     modelSelect.innerHTML = '';
@@ -837,6 +852,7 @@
       btnStop.classList.toggle('hidden', !m.busy);
       btnSend.classList.toggle('hidden', m.busy);
       if (m.skills) skills = m.skills;
+      renderApprove(m.autoApprove, m.approveLive !== false);
     } else if (m.type === 'insert') {
       input.value += m.text;
       input.focus();
@@ -866,6 +882,7 @@
       setTemp.value = m.temperature;
       setIters.value = m.maxIterations;
       setSysPrompt.value = m.systemPrompt || '';
+      setAutoApprove.checked = !!m.autoApprove;
       if (m.model !== undefined && modelSelect.options.length) modelSelect.value = m.model;
     }
   });
@@ -926,6 +943,11 @@
   document.getElementById('btn-refresh').addEventListener('click', () => {
     vscode.postMessage({ type: 'refreshModels' });
   });
+  btnApprove.addEventListener('click', () => {
+    // No `on` field: the extension owns the current value and toggles it,
+    // so a stale button state can't flip it the wrong way.
+    vscode.postMessage({ type: 'toggleAutoApprove' });
+  });
   document.getElementById('btn-settings').addEventListener('click', () => {
     settingsPanel.classList.toggle('hidden');
   });
@@ -942,6 +964,7 @@
       temperature: setTemp.value.trim(),
       maxIterations: setIters.value.trim(),
       systemPrompt: setSysPrompt.value,
+      autoApprove: setAutoApprove.checked,
     });
     settingsPanel.classList.add('hidden');
   });

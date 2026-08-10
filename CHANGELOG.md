@@ -3,6 +3,25 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.6.6 — 2026-08-09
+
+- **Auto-approve in the VS Code sidebar** (the TUI's `/yolo`, now in the
+  editor): a 🔒/✓ button in the chat footer switches between approving each
+  edit and letting them apply as the model makes them. The button lights up
+  while it is on, the switch is announced in the transcript, and manual
+  per-hunk review is one click away again — approval stays the default
+  (`rift.autoApprove`, off). Also a **Rift: Toggle Auto-Approve** palette
+  command and a settings-panel checkbox. It is not a permission bypass:
+  `deny` rules still refuse and `ask` rules still prompt, so you can
+  auto-approve broadly while keeping a gate on `Bash(git push *)` or
+  `Edit(prod/**)`; applied edits still render as diffs in the chat.
+- **Serve protocol: `set_approval`** (additive, still protocol v1 —
+  docs/SERVE.md): flips approval mode on the running process with no
+  restart and no lost conversation, acked with `approval_changed`; `ready`
+  and `capabilities` now carry the current `approve` state so a consumer's
+  toggle opens correctly. With approval off, no `edit_review` is raised at
+  all — a frontend can never be left waiting on a diff nobody will decide.
+
 ## v2.6.5 — 2026-08-08
 
 - **Bring-your-own system prompt** (TUI + VS Code): `/system save [text]`

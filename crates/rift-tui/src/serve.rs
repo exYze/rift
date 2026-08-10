@@ -13,9 +13,10 @@
 //!            | {"cmd":"answer","id":…,"text":…} | {"cmd":"cancel"} | {"cmd":"undo"}
 //!            | {"cmd":"edit_decision","id":…,"apply":bool,"content":…}
 //!            | {"cmd":"list_sessions"} | {"cmd":"list_models"}
-//!            | {"cmd":"set_model","model":…}
-//! Events:    ready (carries `commands` so consumers can feature-detect),
-//!            capabilities (acks hello), history, iteration,
+//!            | {"cmd":"set_model","model":…} | {"cmd":"set_approval","approve":bool}
+//! Events:    ready (carries `commands` so consumers can feature-detect,
+//!            and `approve` — the current approval mode), capabilities
+//!            (acks hello), history, iteration,
 //!            thinking, content, tool_start, tool_result, info, warning,
 //!            plan, subagent_started, subagent, subagent_finished,
 //!            task_started, task_finished, ask (answer it by id),
@@ -23,7 +24,16 @@
 //!            done (always ends a turn), context ({used, limit} —
 //!            context-window occupancy, sent at startup and after each
 //!            turn's idle compaction), models (answers list_models),
-//!            model_changed (acks a successful set_model).
+//!            model_changed (acks a successful set_model),
+//!            approval_changed (acks a successful set_approval).
+//!
+//! `set_approval` is the TUI's `/yolo` over the wire: `approve:false` stops
+//! the prompts, so write/edit/bash apply as soon as the model calls them
+//! (and edit_review events stop being emitted — there is nothing left to
+//! decide). It is deliberately NOT a bypass of the permission rules: `deny`
+//! rules still refuse and `ask` rules still prompt, exactly as in the TUI.
+//! An approval prompt already on screen still needs its answer; the change
+//! takes effect from the next gated action.
 //!
 //! Inline diff review is a capability the consumer opts into with
 //! `{"cmd":"hello","edit_review":true}` (the VS Code extension sends it at
@@ -55,7 +65,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// land a user-visible warning in their chat).
 const COMMANDS: &[&str] = &[
     "hello", "prompt", "answer", "edit_decision", "cancel", "undo", "list_sessions",
-    "list_models", "set_model",
+    "list_models", "set_model", "set_approval",
 ];
 
 /// One event object per stdout line, flushed immediately — the consumer on
@@ -229,7 +239,10 @@ pub async fn run_serve(
     // the consumer's hello opts in — a consumer that doesn't know the
     // edit_review event must keep getting plain ask prompts, not hang.
     let (review_tx, mut review_rx) = mpsc::unbounded_channel::<EditReviewRequest>();
-    let review_ctl = agent.ctx().clone();
+    // Control handle for the switches the select loop owns (edit-review
+    // installation, approval mode). ToolCtx shares them behind Arcs, so
+    // flipping here is seen by the agent task immediately.
+    let ctl = agent.ctx().clone();
     // Background-task events surface through the same channel, between turns.
     agent.ctx().bg().set_notify(ev_tx.clone());
     let cwd = std::env::current_dir()?.display().to_string();
@@ -247,6 +260,9 @@ pub async fn run_serve(
     // Captured before the agent moves: the ready event carries num_ctx and
     // an initial gauge so resumed sessions show their fill level up front.
     let (initial_used, num_ctx) = agent.context_usage();
+    // Startup approval mode (config + --approve), so the consumer's toggle
+    // opens in the right state instead of guessing.
+    let initial_approve = agent.ctx().approval_enabled();
     let switch_host = host.clone();
     let switch_providers = providers.clone();
     let switch_addr = model_addr.clone();
@@ -355,6 +371,9 @@ pub async fn run_serve(
         "version": env!("CARGO_PKG_VERSION"),
         "protocol_version": PROTOCOL_VERSION,
         "num_ctx": num_ctx,
+        // Approval mode at startup (additive v1): true = write/edit/bash
+        // pause for approval, false = they apply as the model calls them.
+        "approve": initial_approve,
         // Skills + plugin commands invocable via a "/skill:<name> [task]"
         // prompt — listed so consumers can offer completion (additive v1).
         "skills": skills.iter().map(|s| json!({"name": s.name, "description": s.description})).collect::<Vec<_>>(),
@@ -504,14 +523,17 @@ pub async fn run_serve(
                     Some("hello") => {
                         let edit_review = v["edit_review"].as_bool().unwrap_or(false);
                         if edit_review {
-                            review_ctl.set_edit_review(Some(review_tx.clone()));
+                            ctl.set_edit_review(Some(review_tx.clone()));
                         } else {
-                            review_ctl.set_edit_review(None);
+                            ctl.set_edit_review(None);
                         }
                         emit(json!({
                             "event": "capabilities",
                             "protocol_version": PROTOCOL_VERSION,
                             "edit_review": edit_review,
+                            // Echoed so a consumer that sets approval at
+                            // spawn can confirm both switches in one place.
+                            "approve": ctl.approval_enabled(),
                         }));
                     }
                     Some("prompt") => {
@@ -622,7 +644,20 @@ pub async fn run_serve(
                         }
                         let _ = prompt_tx.send(ServeCmd::SetModel(name.trim().to_string()));
                     }
-                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/edit_decision/cancel/undo/list_sessions/list_models/set_model)"})),
+                    // Approval mode (the TUI's /approve … /yolo) over the
+                    // wire. Answered from the select loop: it is one atomic
+                    // flag the agent task shares, so it needs no queueing and
+                    // can be flipped mid-turn. Permission rules are
+                    // untouched — deny still refuses, ask still prompts.
+                    Some("set_approval") => {
+                        let Some(approve) = v["approve"].as_bool() else {
+                            emit(json!({"event": "warning", "text": "set_approval needs a boolean 'approve' field"}));
+                            continue;
+                        };
+                        ctl.set_approval(approve);
+                        emit(json!({"event": "approval_changed", "approve": approve}));
+                    }
+                    _ => emit(json!({"event": "warning", "text": "unknown cmd (expected prompt/answer/edit_decision/cancel/undo/list_sessions/list_models/set_model/set_approval)"})),
                 }
             }
         }
@@ -733,8 +768,21 @@ mod tests {
     #[test]
     fn ready_commands_cover_the_v1_set() {
         for cmd in ["hello", "prompt", "answer", "edit_decision", "cancel", "undo",
-                    "list_sessions", "list_models", "set_model"] {
+                    "list_sessions", "list_models", "set_model", "set_approval"] {
             assert!(COMMANDS.contains(&cmd), "command '{cmd}' missing from ready.commands");
         }
+    }
+
+    /// Approval mode is the switch behind the VS Code auto-approve toggle:
+    /// off means write/edit never raise an edit_review or ask prompt, on
+    /// means they do. Pinned here because the frontend toggle is only
+    /// honest if this flag actually gates the prompts.
+    #[test]
+    fn approval_switch_gates_the_prompts() {
+        let ctx = rift_core::ToolCtx::new(std::env::temp_dir());
+        ctx.set_approval(true);
+        assert!(ctx.approval_enabled());
+        ctx.set_approval(false);
+        assert!(!ctx.approval_enabled());
     }
 }

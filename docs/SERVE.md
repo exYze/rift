@@ -48,6 +48,7 @@ stdin EOF → process exits (in-flight turn cancelled, session saved)
 | `list_sessions` | — | Requests the saved-session index for a history/reopen picker. Answered with a `sessions` event. Read-only — safe to send any time, including mid-turn. Reopen a chosen session by relaunching with `--resume <path>`. |
 | `list_models` | — | (added in 2.6.3) Requests every model rift can currently reach — the default host's list plus each configured provider's, as `provider/model` strings ready for `set_model`. Answered with a `models` event; unreachable servers are skipped after a short probe. Safe any time, including mid-turn. |
 | `set_model` | `model`: string | (added in 2.6.3) Live model switch on the same conversation — the preflight-and-swap of the TUI's `/model` (tools-capability check, num_ctx clamp/adopt). Acked with `model_changed` (+ a fresh `context` event); failure is a `warning`. Rejected with a `warning` mid-turn. |
+| `set_approval` | `approve`: bool | (added in 2.6.6) Approval mode — the TUI's `/approve` … `/yolo` over the wire. `approve:false` stops the prompts: write/edit/bash apply as the model calls them, and no `edit_review` is raised (there is nothing left to decide). NOT a permission bypass — `deny` rules still refuse and `ask` rules still prompt. Acked with `approval_changed`; a missing/non-boolean `approve` is a `warning`. Safe mid-turn (it is one shared flag, read per gated action); a prompt already on screen still needs its answer. |
 
 Unknown commands produce a `warning` event; malformed JSON lines likewise.
 Feature-detect via `commands` in `ready` rather than probing — an unknown
@@ -80,12 +81,13 @@ Session and status:
 
 | event | fields | notes |
 |---|---|---|
-| `ready` | `model`, `session`, `cwd`, `version`, `protocol_version`, `num_ctx`, `skills`: [{`name`,`description`}], `commands`: [string] | First event after spawn. `skills` (added in 2.0, additive) lists what `/skill:<name>` prompts can invoke — skills and plugin commands — so consumers can offer completion. `commands` (added in 2.6.3, additive) is the command set this build accepts — gate optional UI (model picker, live switch) on it. |
-| `capabilities` | `protocol_version`, `edit_review` | Acknowledges `hello` with the effective capability set. |
+| `ready` | `model`, `session`, `cwd`, `version`, `protocol_version`, `num_ctx`, `approve`, `skills`: [{`name`,`description`}], `commands`: [string] | First event after spawn. `skills` (added in 2.0, additive) lists what `/skill:<name>` prompts can invoke — skills and plugin commands — so consumers can offer completion. `commands` (added in 2.6.3, additive) is the command set this build accepts — gate optional UI (model picker, live switch) on it. `approve` (added in 2.6.6, additive) is the approval mode rift started with (config + `--approve`), so a consumer's toggle opens in the right state. |
+| `capabilities` | `protocol_version`, `edit_review`, `approve` | Acknowledges `hello` with the effective capability set. `approve` (added in 2.6.6) echoes the current approval mode. |
 | `context` | `used`, `limit` | Context-window occupancy; sent at startup and after each turn's idle compaction. |
 | `sessions` | `items`: [{`path`, `title`, `saved_at`, `cwd`, `model`, `turns`}] | Answer to `list_sessions` (added in 2.4, additive). Every saved session, newest first; `title` is the first user message, `saved_at` a Unix timestamp. Reopen one with `--resume <path>`. |
 | `models` | `models`: [string], `current` | Answer to `list_models` (added in 2.6.3, additive). Every reachable model in `set_model`-ready form; `current` is the addressable name of the model in use. |
 | `model_changed` | `model`, `num_ctx`, `note` | A `set_model` succeeded (added in 2.6.3, additive): same conversation, new model. `note` describes any context-budget adjustment (may be empty); a `context` event follows with the fresh gauge. |
+| `approval_changed` | `approve` | A `set_approval` landed (added in 2.6.6, additive). `approve:false` = edits and commands now apply without asking. Worth surfacing in the transcript: it changes what happens to the user's files without further confirmation. |
 | `history` | `messages`: [{`role`,`text`}] | Prior user/assistant exchanges of a resumed session (tool/system traffic excluded). |
 | `info` / `warning` | `text` | Human-relevant notices. |
 | `subagent_started` | `tag`, `model`, `label` | A concurrent sub-agent began. |

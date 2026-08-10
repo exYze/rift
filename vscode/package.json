@@ -2,7 +2,7 @@
   "name": "rift-vscode",
   "displayName": "Rift",
   "description": "Rift — a fast terminal coding agent for local Ollama models, integrated into VS Code",
-  "version": "2.6.5",
+  "version": "2.6.6",
   "publisher": "exYze",
   "license": "MIT",
   "repository": {
@@ -53,6 +53,10 @@
       {
         "command": "rift.openChat",
         "title": "Rift: Open Chat"
+      },
+      {
+        "command": "rift.toggleAutoApprove",
+        "title": "Rift: Toggle Auto-Approve (accept edits without asking)"
       },
       {
         "command": "rift.open",
@@ -190,6 +194,11 @@
           "type": "boolean",
           "default": true,
           "description": "Review the agent's file edits as native diffs with per-hunk accept/reject before they are written. Off = classic in-chat approval prompts with the diff as text."
+        },
+        "rift.autoApprove": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-accept the agent's file edits and shell commands instead of approving each one (the TUI's /yolo). Applied edits still appear as diffs in the chat, and rift's permission rules still hold: 'deny' rules refuse and 'ask' rules prompt even here. Toggle it live from the ✓/🔒 button in the chat footer."
         }
       }
     }

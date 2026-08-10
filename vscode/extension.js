@@ -358,6 +358,11 @@ class RiftChatProvider {
      *  tokens in the conversation vs the working num_ctx. 0/0 = unknown. */
     this.ctxUsed = 0;
     this.ctxLimit = 0;
+    /** Approval mode as rift last reported it (ready / approval_changed):
+     *  true = it pauses for approval, false = auto-approve. Mirrors rift's
+     *  own naming; the `rift.autoApprove` setting is its inverse. Null
+     *  until a process reports one. */
+    this.approve = null;
   }
 
   resolveWebviewView(view) {
@@ -429,6 +434,10 @@ class RiftChatProvider {
         <option value="max">max</option>
       </select>
     </label>
+    <label class="check" data-tip="Auto-accept edits and shell commands instead of approving each one (the TUI's /yolo). Applied edits still show as diffs in the chat, and rift's permission rules still hold: 'deny' rules refuse and 'ask' rules prompt even here">
+      <span>auto-approve</span>
+      <span class="check-row"><input id="set-autoapprove" type="checkbox"><em>apply the agent's edits without asking</em></span>
+    </label>
     <label class="stack" data-tip="Your own system prompt — replaces rift's built-in prompt for every model, every session. Shared with the TUI (/system save); stored in ~/.config/rift/prompts/custom.md. {cwd} and {shell} placeholders are filled at startup. Empty = rift's built-in per-model prompts">
       <span>system prompt</span>
       <textarea id="set-sysprompt" rows="6"
@@ -450,6 +459,7 @@ class RiftChatProvider {
   <div id="footer">
     <select id="model-select" data-tip="Model — switching keeps the current conversation"></select>
     <span>
+      <button id="btn-approve" data-tip="Approval mode">🔒</button>
       <button id="btn-refresh" data-tip="Refresh the model list from your servers">⟳</button>
       <button id="btn-settings" data-tip="Settings — binary path, server URL, reasoning effort">⚙</button>
     </span>
@@ -480,8 +490,43 @@ class RiftChatProvider {
         ctxUsed: this.proc ? this.ctxUsed : 0,
         ctxLimit: this.proc ? this.ctxLimit : 0,
         skills: this.skills || [],
+        // With no process running, show what the next one will start as.
+        autoApprove: this.proc && this.approve !== null
+          ? !this.approve
+          : config().get('autoApprove') === true,
+        // Older rifts have no set_approval: the toggle then only takes
+        // effect on the next launch, and the webview says so.
+        approveLive: !this.proc || this.commands.includes('set_approval'),
       });
     }
+  }
+
+  /** Turn auto-approve on/off: persist the choice, push it to the running
+   *  process (no restart — it is one flag rift flips live), and reflect it
+   *  in the footer. `on` omitted = toggle the current state. Returns the
+   *  new state synchronously (the config write lands later). */
+  setAutoApprove(on) {
+    const cfg = config();
+    const next = on === undefined ? !(cfg.get('autoApprove') === true) : !!on;
+    cfg.update('autoApprove', next, vscode.ConfigurationTarget.Global).then(() => {
+      if (this.proc && this.commands.includes('set_approval')) {
+        // rift's flag is the inverse: approve=true means "keep asking".
+        this.write({ cmd: 'set_approval', approve: !next });
+      } else if (this.proc) {
+        this.post({
+          type: 'rift',
+          ev: {
+            event: 'warning',
+            text: `this rift build cannot switch approval mode live — auto-approve ${
+              next ? 'on' : 'off'
+            } applies the next time the session starts`,
+          },
+        });
+      }
+      this.postStatus();
+      this.postSettings();
+    });
+    return next;
   }
 
   ensureServer(extraArgs = []) {
@@ -539,6 +584,7 @@ class RiftChatProvider {
       this.proc = null;
       this.busy = false;
       this.commands = []; // capability set died with the process
+      this.approve = null; // unknown again until the next ready
       this.reviewer.cancelAll('cancelled — rift exited');
       if (code !== 0 && code != null) {
         const tail = this.stderrTail.slice(-4).join('\n');
@@ -572,6 +618,14 @@ class RiftChatProvider {
       // Skills + plugin commands, completable in the webview as /skill:<name>.
       this.skills = ev.skills || [];
       this.commands = ev.commands || [];
+      // Approval mode: rift reports what it started with (config +
+      // --approve). If the user's auto-approve preference differs, push it
+      // now — the setting is the source of truth for the chat sidebar.
+      this.approve = typeof ev.approve === 'boolean' ? ev.approve : null;
+      const wantApprove = !(config().get('autoApprove') === true);
+      if (this.commands.includes('set_approval') && this.approve !== wantApprove) {
+        this.write({ cmd: 'set_approval', approve: wantApprove });
+      }
       // rift owns model discovery: populate the dropdown from the running
       // process (provider routing included), not from HTTP probes of our own.
       if (this.commands.includes('list_models')) this.write({ cmd: 'list_models' });
@@ -612,6 +666,21 @@ class RiftChatProvider {
       if (this.view) {
         this.view.webview.postMessage({ type: 'models', models: ev.models || [], current: ev.current || this.model });
       }
+      return;
+    } else if (ev.event === 'approval_changed') {
+      // Ack for set_approval. Announced in the transcript because it
+      // changes what happens to your files without further confirmation.
+      this.approve = ev.approve;
+      this.post({
+        type: 'rift',
+        ev: {
+          event: 'info',
+          text: ev.approve
+            ? 'approval mode ON — rift asks before edits and shell commands'
+            : "auto-approve ON — rift applies edits and runs commands without asking (deny/ask permission rules still hold)",
+        },
+      });
+      this.postStatus();
       return;
     } else if (ev.event === 'model_changed') {
       // A live set_model landed: same chat, new model. The context event
@@ -729,6 +798,9 @@ class RiftChatProvider {
       case 'refreshModels':
         this.postModels(true);
         break;
+      case 'toggleAutoApprove':
+        this.setAutoApprove(m.on);
+        break;
       case 'queryFiles':
         this.postFiles(m.query, m.token);
         break;
@@ -774,6 +846,7 @@ class RiftChatProvider {
           cfg.update('numCtx', num(m.numCtx), vscode.ConfigurationTarget.Global),
           cfg.update('temperature', num(m.temperature), vscode.ConfigurationTarget.Global),
           cfg.update('maxIterations', num(m.maxIterations), vscode.ConfigurationTarget.Global),
+          cfg.update('autoApprove', m.autoApprove === true, vscode.ConfigurationTarget.Global),
         ]).then(() => {
           if (this.proc) this.restart(this.continueArgs());
           this.postSettings();
@@ -813,6 +886,7 @@ class RiftChatProvider {
         temperature: cfg.get('temperature') ?? '',
         maxIterations: cfg.get('maxIterations') ?? '',
         systemPrompt: readCustomPrompt(),
+        autoApprove: cfg.get('autoApprove') === true,
       });
     }
   }
@@ -1037,6 +1111,14 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('rift.openChat', () => {
       vscode.commands.executeCommand('rift.chatView.focus');
+    }),
+    vscode.commands.registerCommand('rift.toggleAutoApprove', () => {
+      const on = chat.setAutoApprove();
+      vscode.window.showInformationMessage(
+        on
+          ? 'rift: auto-approve ON — edits and commands apply without asking'
+          : 'rift: auto-approve off — rift asks before edits and commands'
+      );
     }),
     vscode.commands.registerCommand('rift.open', () => {
       openRiftTerminal();

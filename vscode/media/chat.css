@@ -492,6 +492,13 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
 #footer button:hover {
   background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.2));
 }
+/* Auto-approve is the one footer state that changes what happens to your
+   files without asking, so it stays visibly lit rather than blending in. */
+#btn-approve.auto-approve {
+  background: var(--vscode-inputValidation-warningBackground, rgba(190,140,20,.28));
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+  outline: 1px solid var(--vscode-inputValidation-warningBorder, rgba(190,140,20,.7));
+}
 
 #settings {
   /* Covers the whole chat view: settings are modal, not a squeezed-in strip. */
@@ -534,6 +541,11 @@ body.vscode-light .hljs-deletion { color: #cd3131; }
   opacity: 0.95;
 }
 #settings label > span { opacity: 0.85; }
+/* Checkbox rows keep the 120px label column but put the box and its
+   explanation on one line, so they read as a sentence rather than a grid. */
+#settings label.check .check-row { display: flex; align-items: center; gap: 6px; }
+#settings label.check em { font-style: normal; opacity: 0.7; font-size: 0.9em; }
+#settings input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--vscode-button-background); }
 /* Tall fields (the system prompt) stack the label above a full-width box. */
 #settings label.stack { grid-template-columns: 1fr; align-items: start; gap: 4px; }
 #settings textarea {
