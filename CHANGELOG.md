@@ -3,6 +3,18 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.7.1 — 2026-08-09
+
+- **VS Code: the auto-approve button can no longer fail silently.** Clicking
+  it could do nothing at all, with no explanation: the config write was
+  never error-checked (a rejected write surfaced only as an unhandled
+  promise rejection), a workspace-scoped `rift.autoApprove` would shadow the
+  global write so the effective value never moved, and a rift too old for
+  `set_approval` was refused with a transcript line that scrolls away. All
+  three now write to the scope the setting actually lives in, re-read the
+  value to confirm it took, and report failure as a notification naming the
+  cause — including the rift version when the binary is the problem.
+
 ## v2.7.0 — 2026-08-09
 
 - **VS Code: a "working" indicator.** Three dots that bounce in a wave and
