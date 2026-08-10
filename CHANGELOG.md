@@ -3,7 +3,7 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
-## Unreleased
+## v2.7.0 — 2026-08-09
 
 - **VS Code: a "working" indicator.** Three dots that bounce in a wave and
   cycle color sit at the end of the transcript from the moment you hit Enter
