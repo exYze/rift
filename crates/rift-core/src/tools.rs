@@ -3222,6 +3222,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Auto-approve (the VS Code toggle / TUI `/yolo`, i.e. approval OFF)
+    /// must actually skip the gate, not merely auto-answer it: with a
+    /// review channel installed the edit applies and NO edit_review is
+    /// ever raised — otherwise the frontend would sit waiting on a diff
+    /// nobody is going to decide.
+    #[tokio::test]
+    async fn auto_approve_writes_without_raising_a_review() {
+        let dir = std::env::temp_dir().join(format!("rift-autoapprove-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "before\n").unwrap();
+        let ctx = ToolCtx::new(&dir).with_approval(false);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EditReviewRequest>();
+        ctx.set_edit_review(Some(tx));
+
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("a.txt".into()));
+        args.insert("content".into(), Value::String("after\n".into()));
+        WriteTool.execute(&args, &ctx).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "after\n");
+        // Nothing was ever offered for review.
+        assert!(rx.try_recv().is_err(), "auto-approve must not raise an edit_review");
+
+        // Flipping approval back ON mid-session (the toggle) re-arms the
+        // gate for the very next edit — the flag is read per call.
+        ctx.set_approval(true);
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let _ = req.reply.send(EditReviewReply::Deny);
+            }
+        });
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("a.txt".into()));
+        args.insert("content".into(), Value::String("clobbered\n".into()));
+        assert!(WriteTool.execute(&args, &ctx).await.is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "after\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Auto-approve is not a permission bypass: a `deny` rule still refuses
+    /// the write outright, exactly as it does in the TUI's /yolo.
+    #[tokio::test]
+    async fn auto_approve_still_obeys_deny_rules() {
+        let dir = std::env::temp_dir().join(format!("rift-autoapprove-deny-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("secret.txt"), "keep\n").unwrap();
+        let ctx = ctx_with_rules(&dir, &[], &[], &["Write(secret.txt)"]).with_approval(false);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<EditReviewRequest>();
+        ctx.set_edit_review(Some(tx));
+        let mut args = Map::new();
+        args.insert("path".into(), Value::String("secret.txt".into()));
+        args.insert("content".into(), Value::String("clobbered\n".into()));
+        let err = WriteTool.execute(&args, &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("blocked"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(dir.join("secret.txt")).unwrap(), "keep\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn edit_matches_lf_old_string_against_crlf_file() {
         // A model that copies lines out of the read tool gets LF-only text

@@ -75,6 +75,17 @@ empty to keep rift's built-in per-model prompts. "Edit rift config
 file…" opens `~/.config/rift/config.json` for everything else (providers,
 permissions, hooks).
 
+**Auto-approve** (the TUI's `/yolo`) is the 🔒/✓ button in the chat footer:
+by default rift asks before every file edit and shell command, and clicking
+the button switches it to applying them as the model calls them. The button
+lights up while auto-approve is on, the change is announced in the
+transcript, and it flips back the same way — the manual per-edit review is
+always one click away. Applied edits still appear as diffs in the chat, and
+rift's permission rules still hold: `deny` rules refuse and `ask` rules
+prompt even here, so you can auto-approve broadly while keeping a gate on
+`Bash(git push *)` or `Edit(prod/**)`. It is also available as the
+`rift.autoApprove` setting and the **Rift: Toggle Auto-Approve** command.
+
 The same values are exposed as VS Code settings:
 
 | Setting | Default | Effect |
@@ -87,6 +98,7 @@ The same values are exposed as VS Code settings:
 | `rift.temperature` | *(empty)* | Sampling temperature, passed as `--temp` |
 | `rift.maxIterations` | *(empty)* | Max agent-loop iterations per turn, passed as `--max-iterations` |
 | `rift.inlineDiffReview` | `true` | Review agent edits as native diffs with per-hunk accept/reject; off = classic in-chat prompts |
+| `rift.autoApprove` | `false` | Auto-accept edits and shell commands instead of approving each one (the TUI's `/yolo`) |
 
 Empty settings defer to rift's own defaults and `.rift.json` config, so an
 existing rift setup needs no configuration here at all.
