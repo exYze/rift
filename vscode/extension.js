@@ -509,24 +509,54 @@ class RiftChatProvider {
     const cfg = config();
     const current = cfg.get('autoApprove') === true;
     const next = on === undefined ? !current : !!on;
-    if (next === current) return current;
-    if (this.proc && !this.commands.includes('set_approval')) {
-      this.post({
-        type: 'rift',
-        ev: {
-          event: 'warning',
-          text: 'this rift is too old to switch approval mode — update rift (or start a new session) to use auto-approve',
-        },
-      });
-      return current;
-    }
-    cfg.update('autoApprove', next, vscode.ConfigurationTarget.Global).then(() => {
-      // rift's flag is the inverse: approve=true means "keep asking".
-      if (this.proc) this.write({ cmd: 'set_approval', approve: !next });
+    if (next === current) {
       this.postStatus();
-      this.postSettings();
-    });
-    return next;
+      return Promise.resolve(current);
+    }
+    // Every failure below is announced as a notification, not just a chat
+    // line: a click that silently does nothing is indistinguishable from a
+    // broken button, and a warning in the transcript scrolls away.
+    const fail = (text) => {
+      vscode.window.showWarningMessage(text);
+      this.post({ type: 'rift', ev: { event: 'warning', text } });
+      this.postStatus();
+      return current;
+    };
+    if (this.proc && !this.commands.includes('set_approval')) {
+      return Promise.resolve(
+        fail(
+          `rift: this rift${this.riftVersion ? ' (' + this.riftVersion + ')' : ''} is too old to switch approval mode — it needs 2.6.6 or newer. Run \`rift update\`, then start a new session.`
+        )
+      );
+    }
+    // Write to the scope the value actually lives in. A workspace (or
+    // folder) value shadows a global write, so updating Global would report
+    // success while the effective setting — and the button — never moved.
+    const info = cfg.inspect('autoApprove') || {};
+    const target =
+      info.workspaceFolderValue !== undefined
+        ? vscode.ConfigurationTarget.WorkspaceFolder
+        : info.workspaceValue !== undefined
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+    return Promise.resolve(cfg.update('autoApprove', next, target)).then(
+      () => {
+        // Trust the setting only after re-reading it: this is the check
+        // that turns a silently-ignored write into a visible error.
+        const applied = config().get('autoApprove') === true;
+        if (applied !== next) {
+          return fail(
+            'rift: could not switch auto-approve — "rift.autoApprove" is overridden elsewhere in your settings (check the Workspace tab in Settings)'
+          );
+        }
+        // rift's flag is the inverse: approve=true means "keep asking".
+        if (this.proc) this.write({ cmd: 'set_approval', approve: !next });
+        this.postStatus();
+        this.postSettings();
+        return next;
+      },
+      (e) => fail(`rift: could not save auto-approve — ${(e && e.message) || e}`)
+    );
   }
 
   ensureServer(extraArgs = []) {
@@ -609,6 +639,7 @@ class RiftChatProvider {
   onServerEvent(ev) {
     if (ev.event === 'ready') {
       this.model = ev.model;
+      this.riftVersion = ev.version || null;
       if (ev.num_ctx) this.ctxLimit = ev.num_ctx;
       // Remember which session we're in so a reload reopens it, and so
       // model/setting restarts stay on the same chat instead of jumping.
@@ -634,14 +665,14 @@ class RiftChatProvider {
       if (this.commands.includes('set_approval')) {
         if (this.approve !== wantApprove) this.write({ cmd: 'set_approval', approve: wantApprove });
       } else if (!wantApprove) {
-        config().update('autoApprove', false, vscode.ConfigurationTarget.Global);
-        this.post({
-          type: 'rift',
-          ev: {
-            event: 'warning',
-            text: 'auto-approve turned off: this rift build does not support it — update rift to use it',
-          },
-        });
+        const text = `rift: auto-approve turned off — this rift${
+          ev.version ? ' (' + ev.version + ')' : ''
+        } predates it (needs 2.6.6+). Run \`rift update\`.`;
+        Promise.resolve(
+          config().update('autoApprove', false, vscode.ConfigurationTarget.Global)
+        ).catch(() => {});
+        vscode.window.showWarningMessage(text);
+        this.post({ type: 'rift', ev: { event: 'warning', text } });
       }
       // rift owns model discovery: populate the dropdown from the running
       // process (provider routing included), not from HTTP probes of our own.
@@ -1129,8 +1160,10 @@ function activate(context) {
     vscode.commands.registerCommand('rift.openChat', () => {
       vscode.commands.executeCommand('rift.chatView.focus');
     }),
-    vscode.commands.registerCommand('rift.toggleAutoApprove', () => {
-      const on = chat.setAutoApprove();
+    vscode.commands.registerCommand('rift.toggleAutoApprove', async () => {
+      // Report what was actually adopted — a refused switch already showed
+      // its own warning, so don't claim a state that didn't take.
+      const on = await chat.setAutoApprove();
       vscode.window.showInformationMessage(
         on
           ? 'rift: auto-approve ON — edits and commands apply without asking'
