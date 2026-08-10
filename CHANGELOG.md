@@ -3,6 +3,35 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## Unreleased
+
+- **VS Code: a "working" indicator.** Three dots that bounce in a wave and
+  cycle color sit at the end of the transcript from the moment you hit Enter
+  until the turn is done — not just until the first token, so the wait while
+  a local model thinks (and the long stretches during tool calls) reads as
+  activity instead of a dead UI. They stay pinned below streamed content,
+  and users with `prefers-reduced-motion` get a fade in place.
+- **Auto-approve is now genuinely all-or-nothing.** `/yolo` (and the VS Code
+  toggle) previously still stopped for `ask` permission rules and for
+  untrusted project-plugin prompts, which made "no prompts" a half-promise —
+  the worst of both, since you stop trusting the mode *and* stop reading the
+  prompts. Approval OFF now suppresses `ask` rules too. `deny` is unchanged
+  and still absolute: it refuses outright rather than asking, so it never
+  depended on the approval mode. Anything that must hold regardless of mode
+  belongs in `deny`, not `ask` — README and `/permissions` say so now.
+  - Project-plugin **trust** prompts are skipped rather than auto-answered
+    while auto-approve is on: not interrupting you for the agent's own edits
+    is a different decision from consenting to run commands shipped by a
+    cloned repo. The tools stay unregistered and an info line says why.
+  - Those prompts are also deferred to the `hello` handshake now (which
+    carries an optional `approve` field), so a consumer opening in
+    auto-approve never flashes a question it would have suppressed.
+- **VS Code: the approval button has exactly two states**, spelled out
+  rather than left to an icon — **🔒 approve** or **⚡ auto** (lit amber).
+  The "applies on the next session start" third state is gone: if the
+  running rift is too old to switch, the change is refused with a warning
+  instead of leaving the button claiming a mode rift isn't in.
+
 ## v2.6.6 — 2026-08-09
 
 - **Auto-approve in the VS Code sidebar** (the TUI's `/yolo`, now in the
