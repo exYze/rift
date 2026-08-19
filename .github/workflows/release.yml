@@ -67,6 +67,7 @@ jobs:
 
       - name: install rust target
         shell: bash
+        timeout-minutes: 15
         run: |
           for i in 1 2 3; do
             rustup update stable && rustup target add ${{ matrix.target }} && exit 0
@@ -77,9 +78,14 @@ jobs:
       # Static Linux binaries: no glibc version requirements, run anywhere.
       - name: install musl toolchain
         if: contains(matrix.target, 'musl')
+        timeout-minutes: 15
         run: |
+          # `timeout` is what makes the retry loop worth anything: a hosted
+          # runner's apt mirror can hang after printing the mirrorlist and
+          # never return, and a retry around a command that never returns
+          # retries nothing. v2.8.0's release sat on this for 23 minutes.
           for i in 1 2 3; do
-            sudo apt-get update && sudo apt-get install -y musl-tools && exit 0
+            timeout 180 sudo apt-get update && timeout 180 sudo apt-get install -y musl-tools && exit 0
             echo "apt-get attempt $i failed; retrying in $((i * 10))s" && sleep $((i * 10))
           done
           exit 1
