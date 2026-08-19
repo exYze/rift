@@ -1,7 +1,7 @@
 name: dev-build
 
-# Build a downloadable Windows binary for manually testing a branch without
-# cutting a release. Trigger from the Actions tab (Run workflow) or:
+# Build downloadable binaries for manually testing a branch without cutting a
+# release. Trigger from the Actions tab (Run workflow) or:
 #   gh workflow run dev-build.yml --ref <branch>
 on:
   workflow_dispatch:
@@ -18,4 +18,39 @@ jobs:
         with:
           name: rift-windows-dev
           path: target/release/rift.exe
+          if-no-files-found: error
+
+  # Linux is here to prove the musl binary is genuinely static BEFORE it
+  # reaches a release. v2.8.1 shipped an x86_64 build that needed
+  # /lib/ld-musl-x86_64.so.1 and died with "not found" on every glibc host.
+  linux-musl:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable && rustup target add x86_64-unknown-linux-musl
+      - run: |
+          for i in 1 2 3; do
+            timeout 180 sudo apt-get update && timeout 180 sudo apt-get install -y musl-tools && exit 0
+            echo "apt-get attempt $i failed; retrying in $((i * 10))s" && sleep $((i * 10))
+          done
+          exit 1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target x86_64-unknown-linux-musl -p rift-tui
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          RUSTFLAGS: -C target-feature=+crt-static -C relocation-model=static
+      - name: verify the binary is static and actually runs
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/rift
+          file "$bin"
+          readelf -l "$bin" | grep -q INTERP && { echo "::error::dynamically linked"; exit 1; }
+          readelf -d "$bin" 2>/dev/null | grep NEEDED && { echo "::error::needs shared libs"; exit 1; }
+          # The runner is glibc-only, so this is the real test: a musl binary
+          # with a stray interpreter cannot exec here.
+          "$bin" --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rift-linux-musl-dev
+          path: target/x86_64-unknown-linux-musl/release/rift
           if-no-files-found: error
