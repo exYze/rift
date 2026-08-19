@@ -3,6 +3,25 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.1 — 2026-08-19
+
+- **Pasting multi-line text no longer sends the first line by itself.**
+  Windows has no bracketed paste — crossterm reads console records, not VT
+  sequences — so a pasted block arrives as ordinary key events and its
+  newlines were indistinguishable from Enter. Pasting a stack trace sent its
+  first line to the model and stranded the second in the input box, which is
+  precisely the case (dumping an error) where you want the whole thing.
+  Keys that arrive faster than anyone can type are now treated as pasted
+  text: Enter inserts a newline instead of sending, and Tab indents instead
+  of running command completion. Redraw time is discounted from the gap, and
+  a paste that arrives in chunks is carried across the pauses, so long
+  pastes land whole. Press Enter afterwards to send.
+- **A hung apt mirror can no longer stall a release.** v2.8.0's linux-musl
+  build sat on `apt-get update` for 23 minutes without returning; the retry
+  loop around it was useless, since a retry only helps a command that fails,
+  not one that hangs. Each attempt now runs under `timeout 180`, with a
+  15-minute step cap as a backstop.
+
 ## v2.8.0 — 2026-08-19
 
 - **Drag the mouse across a pane to copy what you selected.** The transcript

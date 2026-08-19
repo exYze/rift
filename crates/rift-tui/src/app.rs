@@ -1556,6 +1556,25 @@ mod tests {
     }
 
     #[test]
+    fn paste_bursts_are_told_apart_from_typing() {
+        let ms = Duration::from_millis;
+        // A console paste: keys arrive back to back.
+        assert!(is_paste_burst(ms(0), 0, true));
+        assert!(is_paste_burst(ms(1), 5, false));
+        // Human typing, even fast (200 wpm is ~60ms/char), is not a paste —
+        // and a queued mouse-move event must not make it look like one.
+        assert!(!is_paste_burst(ms(40), 0, true));
+        assert!(!is_paste_burst(ms(300), 0, false));
+        // A chunked paste can pause between chunks: the queue signal carries
+        // it, but only once a run of keys has already looked pasted.
+        assert!(is_paste_burst(ms(40), 9, true));
+        assert!(!is_paste_burst(ms(40), 1, true));
+        // Nothing queued and a human-sized gap: a keystroke, whatever came
+        // before it — this is the Enter that finally sends a pasted block.
+        assert!(!is_paste_burst(ms(40), 9, false));
+    }
+
+    #[test]
     fn drag_selection_extracts_pane_text() {
         let mut p = Pane::new();
         p.push_line(Kind::Info, "first line".into());
@@ -3275,6 +3294,28 @@ const INIT_PROMPT: &str = "Explore this repository (use repo_map and outline to 
 
 /// /goal auto-continuation cap — the backstop against a condition the model
 /// can never verify. /goal again resumes where it stopped.
+/// Below this gap between two key events, the second is treated as pasted
+/// text rather than a keystroke — so its Enter inserts a newline instead of
+/// sending, and its Tab indents instead of completing. Windows has no
+/// bracketed paste, so this heuristic is the only thing separating the two.
+/// 15ms is ~4x faster than the fastest sustained human typing and ~100x
+/// slower than the back-to-back delivery of a console paste, so both sides
+/// have a wide margin; time spent redrawing is discounted from the gap.
+const PASTE_BURST_GAP: Duration = Duration::from_millis(15);
+
+/// Does the key event that just arrived belong to a paste rather than to a
+/// person? `gap` is the time since the previous key event with any redraw
+/// time already subtracted, `burst_run` how many keys in a row have already
+/// looked pasted, and `more_queued` whether further input is waiting behind
+/// this one.
+///
+/// The queue signal only counts inside an established run: on its own it
+/// would fire on any queued mouse-move event and turn a hand-pressed Enter
+/// into a newline.
+fn is_paste_burst(gap: Duration, burst_run: u32, more_queued: bool) -> bool {
+    gap < PASTE_BURST_GAP || (burst_run >= 2 && more_queued)
+}
+
 const GOAL_MAX_RUNS: u32 = 25;
 /// /loop run cap — a week of half-hourly runs; /loop again re-arms.
 const LOOP_MAX_RUNS: u32 = 336;
@@ -3636,6 +3677,14 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     let result = (|| -> Result<()> {
         let mut needs_redraw = true;
         let mut last_tick = Instant::now();
+        // Paste-burst detection state (see PASTE_BURST_GAP): when the last key
+        // event arrived, and how much of the time since then we spent drawing
+        // rather than waiting — a frame in the middle of a paste must not read
+        // as a human-sized pause.
+        let mut last_key_at = Instant::now();
+        let mut draw_cost = Duration::ZERO;
+        // How many keys in a row have looked like a paste.
+        let mut burst_run: u32 = 0;
         // A GUI editor we're waiting on (see UiEffect::EditFile), paired
         // with the command to dispatch when it closes cleanly. While Some,
         // the modal is up and input is frozen.
@@ -3792,7 +3841,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
             // buffer, which then silently drops the tail of long pastes. Drain
             // the queue first, draw once — no more truncated pastes.
             if needs_redraw && !event::poll(Duration::from_millis(0))? {
+                let drawing = Instant::now();
                 terminal.draw(|f| draw(f, &mut app))?;
+                draw_cost += drawing.elapsed();
                 needs_redraw = false;
             }
             if app.quit {
@@ -3881,6 +3932,21 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
             match input_event {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     needs_redraw = true;
+                    // Is this key part of a paste rather than a keystroke?
+                    // Windows has no bracketed paste (crossterm reads console
+                    // records, not VT sequences), so a pasted block arrives as
+                    // ordinary key events and its newlines are indistinguishable
+                    // from Enter — which used to send the first line and strand
+                    // the rest. A paste arrives far faster than anyone types, so
+                    // the gap to the previous key tells them apart; time spent
+                    // drawing doesn't count, or a frame mid-paste would look
+                    // like a pause.
+                    let gap = last_key_at.elapsed().saturating_sub(draw_cost);
+                    let paste_burst =
+                        is_paste_burst(gap, burst_run, event::poll(Duration::from_millis(0))?);
+                    burst_run = if paste_burst { burst_run + 1 } else { 0 };
+                    last_key_at = Instant::now();
+                    draw_cost = Duration::ZERO;
                     let palette = app.palette();
                     let mention = if palette.is_empty() { app.mention_palette() } else { vec![] };
                     let popup_len = palette.len().max(mention.len());
@@ -3981,6 +4047,27 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                         continue;
                     }
                     match key.code {
+                    // ── Pasted characters, not keystrokes ──────────────────
+                    // Enter and Tab are commands (send, complete) when a human
+                    // presses them and plain text when they arrive inside a
+                    // paste. Getting this wrong sends the first line of a
+                    // stack trace and strands the rest in the box.
+                    KeyCode::Enter if paste_burst && app.picker.is_none() => {
+                        app.input.insert(app.cursor, '\n');
+                        app.cursor += 1;
+                        app.palette_off = false;
+                        app.palette_idx = 0;
+                        app.status = "multi-line paste — Enter sends it".into();
+                    }
+                    KeyCode::Tab if paste_burst && app.picker.is_none() => {
+                        // Indentation from the pasted text. Spaces, not a tab: the
+                        // input box measures width in chars, and a tab renders
+                        // wider than it counts, desyncing the cursor.
+                        app.input.insert_str(app.cursor, "    ");
+                        app.cursor += 4;
+                        app.palette_off = false;
+                        app.palette_idx = 0;
+                    }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl+C no longer exits; that is what /quit is for. If a turn is
                         // running, interrupt it (like Esc); otherwise remind the user.
@@ -4667,6 +4754,10 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                         }
                     }
                     KeyCode::Char(c) => {
+                        // A pasted newline can also arrive as a character;
+                        // normalize CR/CRLF so the prompt never carries a
+                        // stray CR into the model's context.
+                        let c = if c == '\r' { '\n' } else { c };
                         app.input.insert(app.cursor, c);
                         app.cursor += c.len_utf8();
                         app.palette_off = false;
