@@ -199,7 +199,7 @@ Env vars: `RIFT_HOST`, `RIFT_MODEL`. Flags: `--num-ctx` (default 32768), `--max-
 | `/config [edit]` | show or edit `.rift.json` in `$EDITOR` (permissions hot-reload) |
 | `/approve [on\|off]` | toggle approval mode without touching the config |
 | `/yolo [off]` | YOLO mode: stop asking before write/edit/bash (the deny list still applies); `/yolo off` restores prompts. When prompts are on, choosing "always allow '<pattern>'" saves the pattern to your user config so that command family never asks again |
-| `/copy [all\|log]` | copy the last reply, whole transcript, or activity log to the clipboard |
+| `/copy [all\|log]` | copy the last reply, whole transcript, or activity log to the clipboard. For part of a pane, **drag the mouse across it** — either pane, transcript or activity/diff — and the selection is copied on release (code-block gutters are stripped, so pasted code stays pasteable); Esc clears the highlight. The panes sit side by side, so the terminal's own selection would splice both columns of every row together — `Ctrl+T` hands selection back to it anyway when you want that |
 | `/compact` | force history compaction now |
 | `/tokens` | context budget, usage estimate, estimator calibration — the status bar also shows a live `ctx 42% 13k/32k` gauge (green/amber/red as the window fills), refreshed after every turn, command, and compaction |
 | `/sessions [n]` | interactive session picker, or resume the nth directly |

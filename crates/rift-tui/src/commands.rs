@@ -147,8 +147,9 @@ fn help_text() -> String {
         out.push_str(&format!("  {left:<30}{desc}\n"));
     }
     out.push_str(
-        "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+D live diff · Ctrl+T toggle \
-         mouse capture (off = select/copy text natively) · Esc cancel · /quit exit\n\
+        "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+D live diff · Esc cancel · /quit exit\n\
+         copy: drag the mouse inside either pane — the selection is copied on release, Esc clears it; \
+         /copy [all|log] grabs a whole pane; Ctrl+T toggles mouse capture (off = the terminal's own selection)\n\
          @path in a prompt attaches a file outline; @photo.png attaches the image itself \
          (vision models) — Tab completes either",
     );
@@ -295,6 +296,16 @@ async fn cmd_model(
     cx: &mut CmdCx,
     fx: &UnboundedSender<UiEffect>,
 ) -> Result<String> {
+    // The provider the session is currently routed through, if any. Models it
+    // serves are addressed as `<prefix>/<name>`; a BARE name builds against the
+    // default host instead — a different server (often the unused localhost
+    // Ollama). Used to keep picker values round-trippable, and to recover a
+    // bare name typed from that list.
+    let prefix: Option<String> = cx
+        .model_addr
+        .split_once('/')
+        .map(|(p, _)| p.to_string())
+        .filter(|p| cx.providers.contains_key(p) || matches!(p.as_str(), "anthropic" | "openai"));
     if arg.is_empty() {
         let models = agent.client().tags().await.context("listing models")?;
         if models.is_empty() {
@@ -345,7 +356,11 @@ async fn cmd_model(
             } else {
                 m.capabilities.join(", ")
             };
-            PickerItem { value: m.name.clone(), label: m.name, detail }
+            let value = match &prefix {
+                Some(p) => format!("{p}/{}", m.name),
+                None => m.name.clone(),
+            };
+            PickerItem { value, label: m.name, detail }
         }));
         let _ = fx.send(UiEffect::Picker {
             title: format!("select model — {}", agent.client().base_url()),
@@ -364,7 +379,23 @@ async fn cmd_model(
     // Route `provider/model` through a configured provider; a bare name uses
     // the default Ollama host. Preflight the *target* client, then swap it in
     // so the rest of the session talks to the right endpoint.
-    let note = crate::switch_model(agent, arg, &cx.host, &cx.providers).await?;
+    let mut switched = crate::switch_model(agent, arg, &cx.host, &cx.providers).await;
+    let mut addr = arg.to_string();
+    // A bare name the default host can't serve, while the session is routed
+    // through a provider: the user means that provider's model — the /model
+    // list shows exactly those names. Retry prefixed rather than failing with
+    // a default-host error that names a server they never configured.
+    if switched.is_err() && !arg.contains('/') {
+        if let Some(p) = &prefix {
+            let prefixed = format!("{p}/{arg}");
+            if let Ok(n) = crate::switch_model(agent, &prefixed, &cx.host, &cx.providers).await {
+                addr = prefixed;
+                switched = Ok(n);
+            }
+        }
+    }
+    let note = switched?;
+    let arg = addr.as_str();
     // Keep the addressable name current so /fork relaunches with it.
     cx.model_addr = arg.to_string();
     // The UI carries the ADDRESSABLE name (provider prefix intact) — it's

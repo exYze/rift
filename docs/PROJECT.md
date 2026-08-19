@@ -21,7 +21,7 @@ One Rust TUI combining three concepts: **GhostWriter** (flawless multi-pane TUI,
 ## Roadmap (work top-down; update this file each iteration)
 
 ### Iteration 2 — TUI polish + sessions (done)
-- [x] Multi-pane layout: transcript + activity (tool log) panes, independently scrollable, Tab focus, Ctrl+L toggle, mouse-wheel routed to pane under cursor
+- [x] Multi-pane layout: transcript + activity (tool log) panes, independently scrollable, Tab focus, Ctrl+L toggle, mouse-wheel routed to pane under cursor, drag-to-select text within a pane (copied on release, gutter-stripped)
 - [x] Esc-to-cancel via CancellationToken (clean mid-stream/mid-tool abort; pending tool calls get "cancelled" results so history stays valid)
 - [x] Multi-line input (Ctrl+J / Alt+Enter), input history (Alt+Up/Down), growing input pane
 - [x] Session persistence: atomic JSON saves after each turn under ~/.local/share/ghostwriter/sessions/; `-c/--continue` resumes latest, `--resume <path>` specific; verified memory across processes

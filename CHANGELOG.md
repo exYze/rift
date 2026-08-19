@@ -3,6 +3,28 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.0 — 2026-08-19
+
+- **Drag the mouse across a pane to copy what you selected.** The transcript
+  and the activity/diff pane sit side by side, so the terminal's own
+  selection splices both columns of every row together — copying one error
+  message, one path, or one code block out of rift meant hand-editing the
+  result. Dragging inside a pane now selects that pane's text and copies it
+  on release (system clipboard, OSC 52 over ssh). The selection is anchored
+  to the text, not the screen, so it survives scrolling and streaming
+  output; dragging past an edge scrolls; a code block's `│ ` gutter is
+  dropped from the copy so pasted code stays pasteable; Esc clears the
+  highlight. `Ctrl+T` still hands selection back to the terminal, and
+  `/copy [all|log]` still takes a whole pane at once.
+- **`/model` list picks now work when the session runs through a provider.**
+  The picker listed the *current* server's models but emitted them as bare
+  names, and a bare name is resolved against the default `host` — a
+  different server, usually the localhost Ollama nobody configured. Picking
+  a model from the list therefore failed with `error sending request for url
+  (http://localhost:11434/api/show)`. Picker entries now carry the provider
+  prefix, and a bare name the default host can't serve is retried against
+  the session's provider instead of failing.
+
 ## v2.7.1 — 2026-08-09
 
 - **VS Code: the auto-approve button can no longer fail silently.** Clicking
