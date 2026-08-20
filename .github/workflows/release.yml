@@ -62,6 +62,7 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -84,8 +85,15 @@ jobs:
           # runner's apt mirror can hang after printing the mirrorlist and
           # never return, and a retry around a command that never returns
           # retries nothing. v2.8.0's release sat on this for 23 minutes.
+          # `sudo timeout`, NOT `timeout sudo`: timeout signals its direct
+          # child, and an unprivileged process cannot signal a root-owned
+          # sudo (EPERM), so `timeout sudo …` waits forever on a hung apt --
+          # a dev-build burned the full 6h job limit proving it. Under sudo,
+          # timeout runs as root and can actually kill apt-get.
           for i in 1 2 3; do
-            timeout 180 sudo apt-get update && timeout 180 sudo apt-get install -y musl-tools && exit 0
+            sudo timeout -k 30 180 apt-get update \
+              && sudo timeout -k 30 180 apt-get install -y musl-tools \
+              && exit 0
             echo "apt-get attempt $i failed; retrying in $((i * 10))s" && sleep $((i * 10))
           done
           exit 1

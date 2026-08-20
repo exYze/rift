@@ -9,6 +9,7 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - run: rustup update stable
@@ -25,12 +26,22 @@ jobs:
   # /lib/ld-musl-x86_64.so.1 and died with "not found" on every glibc host.
   linux-musl:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - run: rustup update stable && rustup target add x86_64-unknown-linux-musl
-      - run: |
+      - name: install musl toolchain
+        timeout-minutes: 15
+        run: |
+          # `sudo timeout`, NOT `timeout sudo`: timeout signals its direct
+          # child, and an unprivileged process cannot signal a root-owned
+          # sudo (EPERM), so `timeout sudo …` waits forever on a hung apt --
+          # a dev-build burned the full 6h job limit proving it. Under sudo,
+          # timeout runs as root and can actually kill apt-get.
           for i in 1 2 3; do
-            timeout 180 sudo apt-get update && timeout 180 sudo apt-get install -y musl-tools && exit 0
+            sudo timeout -k 30 180 apt-get update \
+              && sudo timeout -k 30 180 apt-get install -y musl-tools \
+              && exit 0
             echo "apt-get attempt $i failed; retrying in $((i * 10))s" && sleep $((i * 10))
           done
           exit 1
