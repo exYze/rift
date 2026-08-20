@@ -3,6 +3,29 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.2 — 2026-08-20
+
+- **The Linux x86_64 download could not run at all.** `curl … | sh` installed
+  it and every attempt to start it answered `rift: not found` — for a file
+  sitting right there, executable, 15MB. The binary carried a PT_INTERP of
+  `/lib/ld-musl-x86_64.so.1` (with no shared libraries needed at all), so on
+  a glibc host the kernel could not find its loader and exec failed with
+  ENOENT, which the shell reports as the *binary* being missing. rustc links
+  x86_64-musl as a static PIE and musl-gcc's specs stamped the dynamic
+  linker in regardless; aarch64-musl links non-PIE and was unaffected, which
+  is why only half the Linux downloads were broken and why nothing looked
+  wrong in CI. musl targets now build with `-C relocation-model=static`.
+- **CI now proves the static binary is static.** Both release jobs fail if
+  the built binary has a PT_INTERP or any DT_NEEDED entry, and `dev-build`
+  gained a linux-musl job that runs those checks and then executes
+  `--version` on a glibc runner — the test that would have caught this
+  before a tag existed.
+- **The apt timeout added in 2.8.1 never worked.** `timeout` signals its
+  direct child, and an unprivileged process cannot signal a root-owned
+  `sudo` (EPERM), so a hung apt was never killed; 2.8.1 only looked fixed
+  because apt happened not to hang. It runs as `sudo timeout` now, with
+  job-level caps so no future variant can burn six hours of runner time.
+
 ## v2.8.1 — 2026-08-19
 
 - **Pasting multi-line text no longer sends the first line by itself.**
