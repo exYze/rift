@@ -261,16 +261,54 @@ pub trait Provider: Send + Sync {
 
 // ---- shared HTTP/streaming plumbing for provider implementations ----------
 
+/// Read-idle timeout for streaming responses. A long prefill on a big context
+/// is silence on the wire, so this has to outlast the slowest first token —
+/// `RIFT_READ_TIMEOUT` (seconds, 0 = no limit) raises it for very large
+/// contexts on slow hardware.
+fn parse_read_timeout(raw: Option<&str>) -> Option<std::time::Duration> {
+    const DEFAULT: u64 = 120;
+    // Unset, blank, or unparseable all mean "the default" — a typo in an env
+    // var must not silently remove the only guard against a hung server.
+    let secs = raw.map(str::trim).filter(|s| !s.is_empty()).and_then(|s| s.parse::<u64>().ok());
+    match secs {
+        Some(0) => None,
+        Some(s) => Some(std::time::Duration::from_secs(s)),
+        None => Some(std::time::Duration::from_secs(DEFAULT)),
+    }
+}
+
+fn read_timeout() -> Option<std::time::Duration> {
+    parse_read_timeout(std::env::var("RIFT_READ_TIMEOUT").ok().as_deref())
+}
+
 /// HTTP client with sane timeouts for streaming LLM traffic: bounded connect
 /// and per-read idle timeouts, but no whole-request timeout (that would kill
 /// long generations mid-stream). `reqwest::Client::new()` has NO timeouts at
 /// all — a hung server would stall a turn forever.
+///
+/// TCP keepalive is not optional here. A streaming turn sends its request,
+/// gets headers back at once, then goes SILENT for the whole prefill — which
+/// on a large context is minutes. Anything doing connection tracking in the
+/// middle (a VM's NAT, a router's conntrack table, a VPN) reaps that idle
+/// mapping, and the reply then has nowhere to land: the client retransmits
+/// into a black hole until the kernel gives up with ETIMEDOUT, surfacing as
+/// "error reading a body from connection: Operation timed out (os error 110)"
+/// partway through a turn. Keepalive probes keep the mapping warm through the
+/// quiet stretch. The idle window is deliberately short — NAT timeouts of 30s
+/// are common, and a probe costs one empty packet.
+///
+/// `pool_idle_timeout` is tightened for the same reason from the other side:
+/// a connection parked in the pool across a long tool run must be discarded
+/// rather than handed to the next turn after the NAT has already dropped it.
 pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    let mut b = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .read_timeout(std::time::Duration::from_secs(120))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .tcp_keepalive(std::time::Duration::from_secs(20))
+        .pool_idle_timeout(std::time::Duration::from_secs(30));
+    if let Some(t) = read_timeout() {
+        b = b.read_timeout(t);
+    }
+    b.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// Canonicalize a user-supplied endpoint: trim the trailing slash and default
@@ -522,6 +560,27 @@ mod tests {
 
     fn known() -> Vec<String> {
         vec!["read".into(), "bash".into()]
+    }
+
+    #[test]
+    fn read_timeout_override_parses_and_fails_safe() {
+        use std::time::Duration;
+        // Unset: the 120s guard against a hung server stays.
+        assert_eq!(parse_read_timeout(None), Some(Duration::from_secs(120)));
+        // Raised for a big context on slow hardware.
+        assert_eq!(parse_read_timeout(Some("600")), Some(Duration::from_secs(600)));
+        assert_eq!(parse_read_timeout(Some(" 600 ")), Some(Duration::from_secs(600)));
+        // 0 is the explicit "no limit" opt-out.
+        assert_eq!(parse_read_timeout(Some("0")), None);
+        // A typo must NOT read as "no limit" — that would silently remove the
+        // only thing bounding a stalled stream. Fall back to the default.
+        for bad in ["", "   ", "abc", "-5", "12s", "1.5"] {
+            assert_eq!(
+                parse_read_timeout(Some(bad)),
+                Some(Duration::from_secs(120)),
+                "{bad:?} should fall back to the default"
+            );
+        }
     }
 
     #[test]

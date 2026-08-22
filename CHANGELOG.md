@@ -3,6 +3,28 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.6 — 2026-08-22
+
+- **Turns died mid-stream behind a NAT with `error reading a body from
+  connection: Operation timed out (os error 110)`.** That errno is the
+  kernel giving up on the socket, not rift giving up on the request: a
+  streaming turn sends its prompt, gets headers back immediately, then goes
+  completely silent for the whole prefill — minutes, on a large context
+  grown by a long tool loop. Anything tracking connections in the middle (a
+  VM's NAT, a router's conntrack table, a VPN) reaps that idle mapping, and
+  the server's reply has nowhere to land. It failed *after* headers, so
+  `send_with_retry` could not retry it either — by then tokens may already
+  have been emitted. rift set **no TCP keepalive at all**, so nothing kept
+  the mapping warm. It now sends keepalive probes every 20s (NAT idle
+  timeouts of 30s are common, and a probe is one empty packet), and parks
+  pooled connections for 30s instead of reqwest's 90s so a connection idled
+  across a long tool run is discarded rather than handed to the next turn.
+- **The read-idle timeout is adjustable.** It was hardcoded at 120s, which a
+  long prefill on a very large context can legitimately exceed;
+  `RIFT_READ_TIMEOUT` (seconds, `0` = no limit) overrides it. A typo falls
+  back to the default rather than reading as "no limit" — silently removing
+  the only bound on a stalled stream is the worse failure.
+
 ## v2.8.5 — 2026-08-22
 
 - **A right-click on a machine with no clipboard tool scribbled `sh: 1:
