@@ -3,6 +3,28 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.3 — 2026-08-22
+
+- **Ctrl+V and right-click now paste into the input box.** `/paste` was the
+  only way in, and it only ever took images. Worse, in terminals that pass
+  the keystroke through rather than claiming it (conhost, plain xterm),
+  `Ctrl+V` typed a literal `v` into the prompt — the generic character arm
+  caught it, because nothing matched it first. Both gestures now read the
+  system clipboard: text goes in at the cursor as one insert (so newlines in
+  a pasted stack trace never act as Enter), and if there is no text but
+  there is an image, it stages as an attachment exactly like `/paste`.
+  Terminals that already intercept `Ctrl+V` are unaffected — they paste as a
+  bracketed-paste event, which rift has always handled. Right-click needs
+  rift's help regardless, since mouse capture takes the click away from the
+  terminal's own context menu.
+- **`/copy` on Windows prepended an invisible BOM to everything.** `clip.exe`
+  is fed UTF-16LE with a byte-order mark so it does not mangle non-ASCII,
+  but it stores that mark as clipboard *content* — so every `/copy` and
+  every drag-selection came back with a leading U+FEFF, which is invisible
+  and breaks compilers, JSON parsers, and shells when pasted into a file.
+  Reads now strip a leading BOM. (The write side still sends one; dropping
+  it would leave clip.exe guessing the encoding.)
+
 ## v2.8.2 — 2026-08-20
 
 - **The Linux x86_64 download could not run at all.** `curl … | sh` installed

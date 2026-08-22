@@ -69,6 +69,9 @@ pub enum UiEffect {
     /// /paste grabbed a clipboard image (data URL, size KB): stage it for
     /// the next prompt.
     Pasted(String, u64),
+    /// Ctrl+V / right-click pulled TEXT off the clipboard: drop it into the
+    /// input box at the cursor. (Images take the `Pasted` path above.)
+    InsertInput(String),
     /// Command finished; status-line text. Always the final effect.
     Done(String),
 }
@@ -108,7 +111,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/mcp", "[add [--global] <name> <cmd> [args…]|new [--global] <desc>|trust <name>]", "list MCP servers, connect an existing one, generate one, manage trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model"),
-    ("/paste", "", "attach a clipboard image to your next message (vision models)"),
+    ("/paste", "", "attach a clipboard image to your next message (vision models) — Ctrl+V does this too"),
     ("/permissions", "[add|remove <allow|ask|deny> <rule>]", "show or edit permission rules — Bash(git push *), Edit(src/**), Read(~/.ssh/**)"),
     ("/plan", "[clear]", "show or clear the agent's task checklist"),
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
@@ -147,9 +150,11 @@ fn help_text() -> String {
         out.push_str(&format!("  {left:<30}{desc}\n"));
     }
     out.push_str(
-        "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+D live diff · Esc cancel · /quit exit\n\
+        "\nkeys: Enter send · Ctrl+J newline · Ctrl+V paste · Tab focus · Ctrl+L log · Ctrl+D live diff · Esc cancel · /quit exit\n\
          copy: drag the mouse inside either pane — the selection is copied on release, Esc clears it; \
          /copy [all|log] grabs a whole pane; Ctrl+T toggles mouse capture (off = the terminal's own selection)\n\
+         paste: Ctrl+V or right-click drops the clipboard into the input — text at the cursor, an image \
+         staged as an attachment\n\
          @path in a prompt attaches a file outline; @photo.png attaches the image itself \
          (vision models) — Tab completes either",
     );

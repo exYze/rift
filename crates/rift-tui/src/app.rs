@@ -1325,6 +1325,27 @@ mod tests {
     }
 
     #[test]
+    fn pasted_text_lands_at_the_cursor_as_one_insert() {
+        // Ctrl+V / right-click arrive as an InsertInput effect, because the
+        // clipboard read runs off the UI thread. The insert must behave like
+        // bracketed paste: whole clipboard at once, CRLF normalized, so a
+        // pasted stack trace cannot send its first line by itself.
+        let mut app = App::new("m".into(), vec![], theme::DARK, std::env::temp_dir());
+        app.input = "see: ".into();
+        app.cursor = app.input.len();
+        app.handle_ui_effect(UiEffect::InsertInput("one\r\ntwo\rthree".into()));
+        assert_eq!(app.input, "see: one\ntwo\nthree");
+        assert_eq!(app.cursor, app.input.len());
+        assert!(app.status.contains("pasted 13 chars"), "status was {:?}", app.status);
+
+        // A second paste goes in wherever the cursor now sits, not at the end.
+        app.cursor = 3; // between "see" and ":"
+        app.handle_ui_effect(UiEffect::InsertInput("!".into()));
+        assert_eq!(app.input, "see!: one\ntwo\nthree");
+        assert_eq!(app.cursor, 4);
+    }
+
+    #[test]
     fn apply_theme_switches_and_rejects_unknown() {
         // Regression: theme switching is UI-side; both the typed form and
         // the picker route through apply_theme (the picker used to forward
@@ -2383,6 +2404,19 @@ impl App {
                 );
                 self.status = "image staged — type your message".into();
             }
+            UiEffect::InsertInput(text) => {
+                // One insert for the whole clipboard, exactly like bracketed
+                // paste: embedded newlines must not act as Enter presses.
+                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                let chars = text.chars().count();
+                self.input.insert_str(self.cursor, &text);
+                self.cursor += text.len();
+                self.palette_off = false;
+                self.palette_idx = 0;
+                // Status only (not Done) — a paste can land mid-turn, and
+                // resetting busy there would strand the running turn.
+                self.status = format!("pasted {chars} chars");
+            }
             UiEffect::Btw { question, reply, ok } => {
                 self.btw_busy = false;
                 if ok {
@@ -3176,6 +3210,44 @@ fn expand_mentions(input: &str, cwd: &std::path::Path) -> (String, Vec<String>, 
         notes.push(format!("attached {label} of {rel} ({} chars)", attach.chars().count()));
     }
     (expanded, notes, images)
+}
+
+/// Ctrl+V / right-click: pull the system clipboard into the input box.
+///
+/// Text lands at the cursor; if the clipboard holds no text but does hold an
+/// image, it is staged as an attachment instead — the same thing `/paste`
+/// does, so one gesture covers both kinds of "copy this in".
+///
+/// Runs off the UI thread: the clipboard helpers shell out, and PowerShell
+/// takes the better part of a second to start. The effect that comes back
+/// re-reads the cursor, so typing during the wait is not lost.
+fn paste_clipboard(fx: &mpsc::UnboundedSender<UiEffect>) {
+    let fx = fx.clone();
+    tokio::task::spawn_blocking(move || {
+        let text = crate::clipboard::paste_via_tool();
+        if let Some(text) = &text {
+            if !text.is_empty() {
+                let _ = fx.send(UiEffect::InsertInput(text.clone()));
+                return;
+            }
+        }
+        // No text — a copied screenshot is the other thing people mean.
+        if let Ok((url, kb)) = clipboard_image_data_url() {
+            let _ = fx.send(UiEffect::Pasted(url, kb));
+            return;
+        }
+        let _ = fx.send(UiEffect::Status(
+            if text.is_some() {
+                "nothing on the clipboard".to_string()
+            } else if cfg!(target_os = "macos") {
+                "no clipboard tool — pbpaste is missing from PATH".to_string()
+            } else if cfg!(windows) {
+                "no clipboard tool — powershell is missing from PATH".to_string()
+            } else {
+                "no clipboard tool — install wl-clipboard, xclip, or xsel".to_string()
+            },
+        ));
+    });
 }
 
 /// Grab an image from the system clipboard into a temp PNG and return it as
@@ -4115,6 +4187,16 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 "mouse capture off — the terminal's own selection is back (it spans both panes) · Ctrl+T to return".into();
                         }
                     }
+                    KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Terminals that claim Ctrl+V for themselves (Windows
+                        // Terminal, iTerm) never send this key — they paste as
+                        // a bracketed-paste event, handled below. This is for
+                        // the ones that pass the keystroke straight through
+                        // (conhost, plain xterm), where it used to fall to the
+                        // generic Char arm and type a literal "v".
+                        app.status = "reading clipboard…".into();
+                        paste_clipboard(&fx_ui);
+                    }
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.input.insert(app.cursor, '\n');
                         app.cursor += 1;
@@ -4811,6 +4893,15 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                             } else {
                                 pane.scroll_down(3);
                             }
+                            needs_redraw = true;
+                        }
+                        // Right-click pastes, the way a terminal's own context
+                        // menu does. Mouse capture takes the click away from the
+                        // terminal, so with capture on (the default) the TUI has
+                        // to answer it — otherwise the gesture just dies here.
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            app.status = "reading clipboard…".into();
+                            paste_clipboard(&fx_ui);
                             needs_redraw = true;
                         }
                         // Drag to select text inside a pane, copied on release
