@@ -3,6 +3,20 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.5 — 2026-08-22
+
+- **A right-click on a machine with no clipboard tool scribbled `sh: 1:
+  xclip: not found` over the TUI.** The image fallback shells out, and the
+  `2>/dev/null` in that script covered `wl-paste` only — the `xclip` after
+  the `||` was unredirected, and the shell itself inherited stderr. Fallout
+  from 2.8.3: before Ctrl+V and right-click existed, only an explicit
+  `/paste` reached that code, so the machine most likely to print the error
+  was the least likely to run it. Every platform branch now nulls stdout
+  and stderr (Windows PowerShell and macOS `pngpaste` had the same
+  exposure), and the redirect covers both commands in the script. Without a
+  clipboard tool you get the status line that was always intended —
+  `no clipboard tool — install wl-clipboard, xclip, or xsel`.
+
 ## v2.8.4 — 2026-08-22
 
 - **`/update` then `/restart` stranded your session on Linux.** The restart

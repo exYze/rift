@@ -3256,6 +3256,11 @@ fn paste_clipboard(fx: &mpsc::UnboundedSender<UiEffect>) {
 pub(crate) fn clipboard_image_data_url() -> anyhow::Result<(String, u64)> {
     let out = std::env::temp_dir().join(format!("rift-paste-{}.png", std::process::id()));
     let path_str = out.display().to_string();
+    // Every branch below MUST silence stdout and stderr. The TUI owns the
+    // screen: a helper that writes so much as "xclip: not found" scribbles
+    // over the rendered frame. That used to be rare (only /paste reached
+    // here), but Ctrl+V and right-click land here on any machine without a
+    // clipboard tool — which is precisely the machine that prints the error.
     #[cfg(windows)]
     let status = std::process::Command::new("powershell")
         .args([
@@ -3269,15 +3274,27 @@ pub(crate) fn clipboard_image_data_url() -> anyhow::Result<(String, u64)> {
                  $img.Save('{path_str}', [System.Drawing.Imaging.ImageFormat]::Png)"
             ),
         ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
     #[cfg(target_os = "macos")]
-    let status = std::process::Command::new("pngpaste").arg(&path_str).status();
+    let status = std::process::Command::new("pngpaste")
+        .arg(&path_str)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    // The redirect inside the script covered wl-paste only; xclip's "not
+    // found" sailed past the `||` and onto the screen. Belt and braces:
+    // silence both commands in the script AND the shell itself.
     #[cfg(all(unix, not(target_os = "macos")))]
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "wl-paste --type image/png > '{path_str}' 2>/dev/null || xclip -selection clipboard -t image/png -o > '{path_str}'"
+            "wl-paste --type image/png > '{path_str}' 2>/dev/null || \
+             xclip -selection clipboard -t image/png -o > '{path_str}' 2>/dev/null"
         ))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
     match status {
         Ok(s) if s.success() && out.is_file() && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) => {}

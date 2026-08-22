@@ -4,7 +4,7 @@
 # over the serve protocol, not by linking rift-core.
 [package]
 name = "rift-desktop"
-version = "2.8.4"
+version = "2.8.5"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/exYze/rift"
