@@ -3,6 +3,25 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.4 — 2026-08-22
+
+- **`/update` then `/restart` stranded your session on Linux.** The restart
+  never came back: it dropped to a shell, and the conversation you were in
+  the middle of stayed unresumed on disk. `/update` installs the new binary
+  by renaming it over the old one, which unlinks the running image — and
+  once that inode is unlinked, Linux appends `" (deleted)"` to
+  `/proc/self/exe`, which is what `current_exe()` reads. `/restart` then
+  tried to exec `…/rift (deleted)` and got ENOENT. So the single flow
+  `/restart` advertises — "relaunch and load updates" — was the one that
+  could not work. Windows was unaffected: its update parks the *running*
+  exe aside first, so the original path stays valid. The relaunch now
+  resolves a `" (deleted)"` path back to the real binary, and only when
+  that path is gone and the stripped one exists — a binary genuinely named
+  `foo (deleted)` still launches.
+- **A failed relaunch now tells you how to recover.** It used to end with a
+  bare io error and no hint that the session was still sitting on disk; it
+  prints the `rift --resume <path>` that brings it back.
+
 ## v2.8.3 — 2026-08-22
 
 - **Ctrl+V and right-click now paste into the input box.** `/paste` was the

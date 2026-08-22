@@ -819,20 +819,58 @@ fn restart_args(spec: &app::RestartSpec) -> Vec<std::ffi::OsString> {
     args
 }
 
+/// The binary `/restart` should relaunch, given what `current_exe()` reported.
+///
+/// On Linux `current_exe()` is `readlink("/proc/self/exe")`, and once the
+/// running image's inode is unlinked the kernel appends `" (deleted)"` to
+/// that link — which is exactly what `/update` does when it renames the new
+/// binary over the old one. Exec'ing `…/rift (deleted)` fails with ENOENT, so
+/// the one flow /restart advertises (pick up an update) was the one that
+/// broke, dropping the user to a shell with their session unresumed.
+///
+/// Stripping is deliberately conditional: only when the reported path is gone
+/// AND the stripped one exists. A binary genuinely named `foo (deleted)` still
+/// launches, and a path that resolves to nothing is returned untouched so the
+/// exec error names what was actually tried.
+fn restart_exe(reported: PathBuf) -> PathBuf {
+    if reported.exists() {
+        return reported;
+    }
+    let stripped = reported
+        .to_str()
+        .and_then(|s| s.strip_suffix(" (deleted)"))
+        .map(PathBuf::from);
+    match stripped {
+        Some(p) if p.exists() => p,
+        _ => reported,
+    }
+}
+
 fn restart_process(spec: app::RestartSpec) -> Result<()> {
-    let exe = std::env::current_exe()?;
+    let exe = restart_exe(std::env::current_exe()?);
     eprintln!("restarting rift — resuming {}", spec.session.display());
     let mut cmd = std::process::Command::new(exe);
     cmd.args(restart_args(&spec));
+    // A failed relaunch used to end the conversation with a bare io error,
+    // leaving the session on disk and no hint that it is recoverable. Say how.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // exec only returns on failure.
-        Err(anyhow::anyhow!("restart failed: {}", cmd.exec()))
+        Err(anyhow::anyhow!(
+            "restart failed: {} — your session is safe; resume it with:\n  rift --resume {}",
+            cmd.exec(),
+            spec.session.display()
+        ))
     }
     #[cfg(not(unix))]
     {
-        let status = cmd.status()?;
+        let status = cmd.status().with_context(|| {
+            format!(
+                "restart failed — your session is safe; resume it with:\n  rift --resume {}",
+                spec.session.display()
+            )
+        })?;
         std::process::exit(status.code().unwrap_or(0));
     }
 }
@@ -1219,5 +1257,37 @@ mod tests {
         assert_eq!(args[2], std::ffi::OsString::from("--model"));
         assert_eq!(args[3], std::ffi::OsString::from("vllm/deepseek"));
         assert_eq!(args[4], std::ffi::OsString::from("--resume"));
+    }
+
+    #[test]
+    fn restart_recovers_the_exe_path_after_an_update_unlinked_it() {
+        // The /update → /restart flow on Linux: the rename that installs the
+        // new binary unlinks the running image, so /proc/self/exe — and with
+        // it current_exe() — reads "<path> (deleted)". Exec'ing that failed
+        // with ENOENT and stranded the session.
+        let dir = std::env::temp_dir().join(format!("rift-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("rift");
+        std::fs::write(&real, "the new binary").unwrap();
+
+        // Ordinary restart: the reported path exists, so use it verbatim.
+        assert_eq!(restart_exe(real.clone()), real);
+
+        // Post-update: strip the suffix back to the path that now holds the
+        // NEW binary — which is the whole point of /restart.
+        let deleted = PathBuf::from(format!("{} (deleted)", real.display()));
+        assert_eq!(restart_exe(deleted), real);
+
+        // A binary genuinely named "… (deleted)" must still launch.
+        let literal = dir.join("weird (deleted)");
+        std::fs::write(&literal, "a real binary").unwrap();
+        assert_eq!(restart_exe(literal.clone()), literal);
+
+        // Nothing to fall back to: hand back the input untouched so the exec
+        // error names the path actually tried, rather than a stripped guess.
+        let missing = dir.join("gone (deleted)");
+        assert_eq!(restart_exe(missing.clone()), missing);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
