@@ -523,6 +523,47 @@ pub fn set_user_search_url(url: Option<&str>) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
+/// Startup defaults the TUI writes back when they are changed mid-session.
+/// Anything outside this list is a typo, not a setting.
+const STARTUP_DEFAULT_KEYS: &[&str] = &["host", "model", "num_ctx"];
+
+/// Persist a startup default (`/host`, `/model`, `/ctx`) so the next session
+/// starts with it instead of falling back to the old value.
+///
+/// Writes to whichever file actually *governs* the key: a project
+/// `.rift.json` that already sets it wins at load time, so writing user-side
+/// there would be silently overridden next launch; everything else goes to
+/// the user config (`~/.config/rift/config.json`), created if absent.
+/// Merge-preserving — every other key in the file is left untouched.
+/// Returns the file written.
+pub fn set_startup_default(
+    cwd: &Path,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<std::path::PathBuf> {
+    anyhow::ensure!(STARTUP_DEFAULT_KEYS.contains(&key), "not a startup default: '{key}'");
+    let project = cwd.join(".rift.json");
+    let project_owns = std::fs::read_to_string(&project)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .is_some_and(|v| v.get(key).is_some());
+    let path = if project_owns { project } else { dirs_config().join("rift/config.json") };
+    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
+        Err(_) => serde_json::json!({}),
+    };
+    let obj = root
+        .as_object_mut()
+        .with_context(|| format!("{} is not a JSON object", path.display()))?;
+    obj.insert(key.to_string(), value);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&root)? + "\n")
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 /// Persist an MCP server entry (`/mcp add`) into the user config or the
 /// project `.rift.json`, merge-preserving. Fails if the name is already
 /// configured — edits go through `/config edit`.
@@ -740,6 +781,31 @@ mod tests {
         assert!(cfg.permissions.approve.is_none() && cfg.permissions.approve_effective());
         let cfg: Config = serde_json::from_str(r#"{"permissions": {"approve": false}}"#).unwrap();
         assert!(!cfg.permissions.approve_effective());
+    }
+
+    #[test]
+    fn set_startup_default_updates_the_project_file_that_owns_the_key() {
+        // A project .rift.json outranks the user config at load, so a key it
+        // already sets must be updated THERE — writing user-side would look
+        // saved and then be overridden on the next launch.
+        let dir = std::env::temp_dir().join(format!("rift-default-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = dir.join(".rift.json");
+        std::fs::write(&project, r#"{"host": "http://old:11434", "model": "old:8b"}"#).unwrap();
+
+        let written = set_startup_default(&dir, "host", serde_json::json!("http://new:11434")).unwrap();
+        assert_eq!(written, project);
+        let written = set_startup_default(&dir, "model", serde_json::json!("new:70b")).unwrap();
+        assert_eq!(written, project);
+
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+        assert_eq!(root["host"], "http://new:11434");
+        assert_eq!(root["model"], "new:70b");
+        // num_ctx isn't in the project file, so it does NOT get added there.
+        assert!(root.get("num_ctx").is_none());
+        assert!(set_startup_default(&dir, "temperature", serde_json::json!(0.1)).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

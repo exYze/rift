@@ -3,6 +3,22 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.7 — 2026-08-28
+
+- **`/host`, `/model` and `/ctx` now stick.** Switching the server, model or
+  context window in the TUI changed only the running session — every setting
+  reverted on the next launch, so the one place you would naturally change
+  them was the one place that could not remember them. All three now write
+  the new value back to config the moment the switch succeeds, and the next
+  session starts on it. The write goes to whichever file actually governs the
+  key: a project `.rift.json` that already sets it (it outranks the user
+  config at load, so saving user-side would silently lose next launch),
+  otherwise `~/.config/rift/config.json`, created if absent. Every other key
+  in the file is preserved. An unwritable config warns instead of quietly
+  undoing the switch. `RIFT_HOST`/`RIFT_MODEL` still outrank the config at
+  launch by design — when one is set, the save now says so rather than
+  looking like it did nothing.
+
 ## v2.7.1 — 2026-08-09
 
 - **VS Code: the auto-approve button can no longer fail silently.** Clicking

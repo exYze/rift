@@ -101,13 +101,13 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/export", "", "save the transcript as markdown"),
     ("/goal", "<condition>|clear", "work until the model verifies the goal is met (auto-continues turns)"),
     ("/help", "", "list commands and keys"),
-    ("/host", "[url]", "show or switch the model server — Ollama or OpenAI-compatible, auto-detected"),
+    ("/host", "[url]", "show or switch the model server (saved as the default) — Ollama or OpenAI-compatible, auto-detected"),
     ("/init", "", "generate a RIFT.md project guide"),
     ("/loop", "[30s|5m|2h] <prompt>|stop", "re-run a prompt or /command on an interval (or back-to-back)"),
     ("/lsp", "", "LSP diagnostics servers: detected languages and status"),
     ("/mcp", "[add [--global] <name> <cmd> [args…]|new [--global] <desc>|trust <name>]", "list MCP servers, connect an existing one, generate one, manage trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
-    ("/model", "[name]", "list models on the server, or switch model"),
+    ("/model", "[name]", "list models on the server, or switch model (saved as the default)"),
     ("/paste", "", "attach a clipboard image to your next message (vision models)"),
     ("/permissions", "[add|remove <allow|ask|deny> <rule>]", "show or edit permission rules — Bash(git push *), Edit(src/**), Read(~/.ssh/**)"),
     ("/plan", "[clear]", "show or clear the agent's task checklist"),
@@ -127,7 +127,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/system", "[text|save [text]|edit|reset]", "show or override the system prompt; save/edit/reset manage your own persistent one"),
     ("/temp", "<0.0-2.0>", "set sampling temperature"),
     ("/theme", "[name]", "browse/switch color themes (13 built-in: dark, light, mono, dracula, nord, gruvbox, …)"),
-    ("/ctx", "<n>", "set context window (num_ctx)"),
+    ("/ctx", "<n>", "set context window (num_ctx) — saved as the default"),
     ("/remember", "[fact]", "save a durable fact to project memory (.rift/memory.md); bare = show memory"),
     ("/release-notes", "", "show what's new in this version (closable popup)"),
     ("/retry", "", "re-run the last prompt"),
@@ -202,7 +202,7 @@ pub async fn run_command(
         "/share" => cmd_share(agent, cx, fx),
         "/system" => cmd_system(rest, agent, cx, fx),
         "/temp" => cmd_temp(rest, agent, fx),
-        "/ctx" => cmd_ctx(rest, agent, fx),
+        "/ctx" => cmd_ctx(rest, agent, cx, fx),
         "/save" => cmd_save(rest, agent, cx, fx),
         "/tasks" => cmd_tasks(rest, agent, fx),
         "/search" => cmd_search(rest, agent, fx).await,
@@ -289,6 +289,43 @@ fn cmd_tasks(arg: &str, agent: &Agent, fx: &UnboundedSender<UiEffect>) -> Result
     Ok(format!("{running} running / {} total", tasks.len()))
 }
 
+/// Write a startup default (`host`/`model`/`num_ctx`) back to config so the
+/// next session opens with it — the whole point of switching in the TUI is
+/// that it sticks. Never fails the switch itself: an unwritable config is a
+/// warning, not a reason to un-switch. If the matching env var is set it
+/// outranks the file at launch, so say so rather than let the save look like
+/// it did nothing.
+fn persist_default(
+    cx: &CmdCx,
+    key: &str,
+    value: serde_json::Value,
+    fx: &UnboundedSender<UiEffect>,
+) {
+    match rift_core::config::set_startup_default(&cx.cwd, key, value) {
+        Ok(path) => {
+            let mut msg = format!("saved as the default {key} in {}", path.display());
+            let env = match key {
+                "host" => Some("RIFT_HOST"),
+                "model" => Some("RIFT_MODEL"),
+                _ => None,
+            };
+            if let Some(var) = env.filter(|v| std::env::var_os(v).is_some()) {
+                msg.push_str(&format!(
+                    "\n! {var} is set in this environment and overrides the config at launch — \
+                     unset it for the saved {key} to take effect"
+                ));
+            }
+            let _ = fx.send(UiEffect::Out(Kind::Info, msg));
+        }
+        Err(e) => {
+            let _ = fx.send(UiEffect::Out(
+                Kind::Warn,
+                format!("switched, but could not save {key} for future sessions: {e:#}"),
+            ));
+        }
+    }
+}
+
 async fn cmd_model(
     arg: &str,
     agent: &mut Agent,
@@ -371,6 +408,9 @@ async fn cmd_model(
     // what /restart relaunches with and what the status line shows.
     let _ = fx.send(UiEffect::Model(arg.to_string()));
     let _ = fx.send(UiEffect::Out(Kind::Info, format!("switched to {arg}{note}")));
+    // Save the addressable name: config `model` feeds the same resolver as
+    // `--model`, so `provider/model` round-trips.
+    persist_default(cx, "model", serde_json::Value::String(arg.to_string()), fx);
     Ok(format!("model: {arg}"))
 }
 
@@ -397,7 +437,12 @@ fn cmd_temp(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Res
     Ok(format!("temperature: {t}"))
 }
 
-fn cmd_ctx(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Result<String> {
+fn cmd_ctx(
+    arg: &str,
+    agent: &mut Agent,
+    cx: &CmdCx,
+    fx: &UnboundedSender<UiEffect>,
+) -> Result<String> {
     if arg.is_empty() {
         let _ = fx.send(UiEffect::Out(Kind::Info, format!("num_ctx: {}  (set with /ctx <n>)", agent.cfg.num_ctx)));
         return Ok("num_ctx shown".into());
@@ -411,6 +456,9 @@ fn cmd_ctx(arg: &str, agent: &mut Agent, fx: &UnboundedSender<UiEffect>) -> Resu
         Kind::Info,
         format!("num_ctx set to {n} (effective next turn; /model re-clamps to the model's max)"),
     ));
+    // Persist the REQUESTED value, not a clamped one — startup re-clamps
+    // against whatever model is loaded then.
+    persist_default(cx, "num_ctx", serde_json::Value::from(n), fx);
     Ok(format!("num_ctx: {n}"))
 }
 
@@ -1727,6 +1775,7 @@ async fn cmd_host(
             ));
         }
         let _ = fx.send(UiEffect::Out(if has_model { Kind::Info } else { Kind::Warn }, msg));
+        persist_default(cx, "host", serde_json::Value::String(url.clone()), fx);
         return Ok(format!("host: {url}"));
     }
     bail!("no model server answered at {arg}:\n  {}", errors.join("\n  "))
