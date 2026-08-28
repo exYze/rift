@@ -62,11 +62,13 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
       - name: install rust target
         shell: bash
+        timeout-minutes: 15
         run: |
           for i in 1 2 3; do
             rustup update stable && rustup target add ${{ matrix.target }} && exit 0
@@ -77,9 +79,21 @@ jobs:
       # Static Linux binaries: no glibc version requirements, run anywhere.
       - name: install musl toolchain
         if: contains(matrix.target, 'musl')
+        timeout-minutes: 15
         run: |
+          # `timeout` is what makes the retry loop worth anything: a hosted
+          # runner's apt mirror can hang after printing the mirrorlist and
+          # never return, and a retry around a command that never returns
+          # retries nothing. v2.8.0's release sat on this for 23 minutes.
+          # `sudo timeout`, NOT `timeout sudo`: timeout signals its direct
+          # child, and an unprivileged process cannot signal a root-owned
+          # sudo (EPERM), so `timeout sudo …` waits forever on a hung apt --
+          # a dev-build burned the full 6h job limit proving it. Under sudo,
+          # timeout runs as root and can actually kill apt-get.
           for i in 1 2 3; do
-            sudo apt-get update && sudo apt-get install -y musl-tools && exit 0
+            sudo timeout -k 30 180 apt-get update \
+              && sudo timeout -k 30 180 apt-get install -y musl-tools \
+              && exit 0
             echo "apt-get attempt $i failed; retrying in $((i * 10))s" && sleep $((i * 10))
           done
           exit 1
@@ -91,6 +105,35 @@ jobs:
           CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          # The whole point of the musl targets is a binary that runs on any
+          # Linux. rustc links x86_64-musl as a static PIE by default, and
+          # musl-gcc's specs then stamp `/lib/ld-musl-x86_64.so.1` into it as
+          # the interpreter — on a glibc host the kernel can't find that
+          # loader and exec fails with ENOENT, which the shell reports as the
+          # baffling `rift: not found` for a file that is plainly there.
+          # (aarch64-musl links non-PIE and was unaffected, which is why only
+          # half the Linux downloads were broken.) relocation-model=static
+          # takes the plain `-static` path instead.
+          RUSTFLAGS: ${{ contains(matrix.target, 'musl') && '-C target-feature=+crt-static -C relocation-model=static' || '' }}
+
+      # Never ship a "static" binary that isn't. A PT_INTERP segment means it
+      # needs a loader at runtime; that is exactly the bug above, and it is
+      # invisible until someone on a glibc box downloads it.
+      - name: verify the musl binary is static
+        if: contains(matrix.target, 'musl')
+        run: |
+          bin="target/${{ matrix.target }}/release/rift"
+          if readelf -l "$bin" | grep -q "INTERP"; then
+            readelf -l "$bin" | grep -A2 "INTERP"
+            echo "::error::$bin is dynamically linked — it will fail with 'not found' on hosts without a musl loader"
+            exit 1
+          fi
+          if readelf -d "$bin" 2>/dev/null | grep -q "NEEDED"; then
+            readelf -d "$bin" | grep "NEEDED"
+            echo "::error::$bin needs shared libraries — not portable"
+            exit 1
+          fi
+          echo "static: no PT_INTERP, no DT_NEEDED"
 
       # Archives for the install script + raw binaries for `rift update`.
       - name: package (unix)

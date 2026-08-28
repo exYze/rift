@@ -69,6 +69,9 @@ pub enum UiEffect {
     /// /paste grabbed a clipboard image (data URL, size KB): stage it for
     /// the next prompt.
     Pasted(String, u64),
+    /// Ctrl+V / right-click pulled TEXT off the clipboard: drop it into the
+    /// input box at the cursor. (Images take the `Pasted` path above.)
+    InsertInput(String),
     /// Command finished; status-line text. Always the final effect.
     Done(String),
 }
@@ -108,7 +111,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/mcp", "[add [--global] <name> <cmd> [args…]|new [--global] <desc>|trust <name>]", "list MCP servers, connect an existing one, generate one, manage trust"),
     ("/merge", "<name> [--cleanup]", "apply a swarm candidate's patch"),
     ("/model", "[name]", "list models on the server, or switch model (saved as the default)"),
-    ("/paste", "", "attach a clipboard image to your next message (vision models)"),
+    ("/paste", "", "attach a clipboard image to your next message (vision models) — Ctrl+V does this too"),
     ("/permissions", "[add|remove <allow|ask|deny> <rule>]", "show or edit permission rules — Bash(git push *), Edit(src/**), Read(~/.ssh/**)"),
     ("/plan", "[clear]", "show or clear the agent's task checklist"),
     ("/sessions", "[n]", "list saved sessions, or resume the nth"),
@@ -147,8 +150,11 @@ fn help_text() -> String {
         out.push_str(&format!("  {left:<30}{desc}\n"));
     }
     out.push_str(
-        "\nkeys: Enter send · Ctrl+J newline · Tab focus · Ctrl+L log · Ctrl+D live diff · Ctrl+T toggle \
-         mouse capture (off = select/copy text natively) · Esc cancel · /quit exit\n\
+        "\nkeys: Enter send · Ctrl+J newline · Ctrl+V paste · Tab focus · Ctrl+L log · Ctrl+D live diff · Esc cancel · /quit exit\n\
+         copy: drag the mouse inside either pane — the selection is copied on release, Esc clears it; \
+         /copy [all|log] grabs a whole pane; Ctrl+T toggles mouse capture (off = the terminal's own selection)\n\
+         paste: Ctrl+V or right-click drops the clipboard into the input — text at the cursor, an image \
+         staged as an attachment\n\
          @path in a prompt attaches a file outline; @photo.png attaches the image itself \
          (vision models) — Tab completes either",
     );
@@ -332,6 +338,16 @@ async fn cmd_model(
     cx: &mut CmdCx,
     fx: &UnboundedSender<UiEffect>,
 ) -> Result<String> {
+    // The provider the session is currently routed through, if any. Models it
+    // serves are addressed as `<prefix>/<name>`; a BARE name builds against the
+    // default host instead — a different server (often the unused localhost
+    // Ollama). Used to keep picker values round-trippable, and to recover a
+    // bare name typed from that list.
+    let prefix: Option<String> = cx
+        .model_addr
+        .split_once('/')
+        .map(|(p, _)| p.to_string())
+        .filter(|p| cx.providers.contains_key(p) || matches!(p.as_str(), "anthropic" | "openai"));
     if arg.is_empty() {
         let models = agent.client().tags().await.context("listing models")?;
         if models.is_empty() {
@@ -382,7 +398,11 @@ async fn cmd_model(
             } else {
                 m.capabilities.join(", ")
             };
-            PickerItem { value: m.name.clone(), label: m.name, detail }
+            let value = match &prefix {
+                Some(p) => format!("{p}/{}", m.name),
+                None => m.name.clone(),
+            };
+            PickerItem { value, label: m.name, detail }
         }));
         let _ = fx.send(UiEffect::Picker {
             title: format!("select model — {}", agent.client().base_url()),
@@ -401,7 +421,23 @@ async fn cmd_model(
     // Route `provider/model` through a configured provider; a bare name uses
     // the default Ollama host. Preflight the *target* client, then swap it in
     // so the rest of the session talks to the right endpoint.
-    let note = crate::switch_model(agent, arg, &cx.host, &cx.providers).await?;
+    let mut switched = crate::switch_model(agent, arg, &cx.host, &cx.providers).await;
+    let mut addr = arg.to_string();
+    // A bare name the default host can't serve, while the session is routed
+    // through a provider: the user means that provider's model — the /model
+    // list shows exactly those names. Retry prefixed rather than failing with
+    // a default-host error that names a server they never configured.
+    if switched.is_err() && !arg.contains('/') {
+        if let Some(p) = &prefix {
+            let prefixed = format!("{p}/{arg}");
+            if let Ok(n) = crate::switch_model(agent, &prefixed, &cx.host, &cx.providers).await {
+                addr = prefixed;
+                switched = Ok(n);
+            }
+        }
+    }
+    let note = switched?;
+    let arg = addr.as_str();
     // Keep the addressable name current so /fork relaunches with it.
     cx.model_addr = arg.to_string();
     // The UI carries the ADDRESSABLE name (provider prefix intact) — it's

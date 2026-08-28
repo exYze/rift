@@ -26,7 +26,7 @@ use crate::commands::{self, CmdCx, PickerItem, UiEffect};
 use crate::theme;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -157,6 +157,28 @@ impl WrappedLine {
     }
 }
 
+/// A mouse text selection inside a pane, in CONTENT coordinates: (wrapped-line
+/// index, char column). Content coordinates — not screen rows — so the
+/// selection stays anchored to its text while the pane scrolls under it, and
+/// while new output streams in below.
+#[derive(Clone, Copy)]
+pub(crate) struct Sel {
+    anchor: (usize, usize),
+    cursor: (usize, usize),
+}
+
+impl Sel {
+    /// (start, end) in reading order — the anchor may be after the cursor when
+    /// the drag went up or leftwards.
+    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+}
+
 /// A scrollable region with its own content and bottom-anchored scroll state.
 pub(crate) struct Pane {
     blocks: Vec<BlockEntry>,
@@ -175,6 +197,8 @@ pub(crate) struct Pane {
     pub(crate) view_height: usize,
     /// Last rendered screen area, for mouse-wheel routing.
     pub(crate) area: Rect,
+    /// Live drag-selection, highlighted on screen and copied on mouse-up.
+    pub(crate) sel: Option<Sel>,
 }
 
 /// Strip ANSI escape sequences and control characters before text enters a
@@ -235,6 +259,7 @@ impl Pane {
             scroll_from_bottom: 0,
             view_height: 0,
             area: Rect::default(),
+            sel: None,
         }
     }
 
@@ -284,6 +309,9 @@ impl Pane {
             self.first_dirty = 0;
             self.dirty = false;
             self.wrap_width = width;
+            // Every line index is about to move — a selection held across a
+            // re-wrap would highlight (and copy) unrelated text.
+            self.sel = None;
         }
         if self.first_dirty >= self.blocks.len() {
             return;
@@ -496,28 +524,140 @@ impl Pane {
         self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(n);
     }
 
+    /// Index of the first wrapped line currently on screen — the inverse of
+    /// the slice `visible_lines` renders, so screen rows map back to content.
+    pub(crate) fn view_start(&self) -> usize {
+        let total = self.wrapped.len();
+        let end = total - self.scroll_from_bottom.min(total);
+        end.saturating_sub(self.view_height)
+    }
+
+    /// Content position under a screen cell, clamped to real text: a click
+    /// past the end of a line lands at its end, past the last line at the
+    /// last line.
+    pub(crate) fn pos_at(&self, col: u16, row: u16) -> (usize, usize) {
+        if self.wrapped.is_empty() {
+            return (0, 0);
+        }
+        let rel = row.saturating_sub(self.area.y) as usize;
+        let idx = (self.view_start() + rel).min(self.wrapped.len() - 1);
+        let len = self.wrapped[idx].text.chars().count();
+        (idx, (col.saturating_sub(self.area.x) as usize).min(len))
+    }
+
+    /// Start a selection at a screen cell (a bare click selects nothing).
+    pub(crate) fn select_from(&mut self, col: u16, row: u16) {
+        let pos = self.pos_at(col, row);
+        self.sel = Some(Sel { anchor: pos, cursor: pos });
+    }
+
+    /// Extend the live selection to a screen cell (mouse drag).
+    pub(crate) fn select_to(&mut self, col: u16, row: u16) {
+        let pos = self.pos_at(col, row);
+        if let Some(sel) = &mut self.sel {
+            sel.cursor = pos;
+        }
+    }
+
+    /// The selected text, or None when nothing (or only blank space) is
+    /// selected. Code renders inside a `│ ` gutter box; a selection that
+    /// covers the gutter means the code, not the border, so the gutter is
+    /// dropped — pasted code stays pasteable.
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        let ((l0, c0), (l1, c1)) = self.sel?.ordered();
+        let last = self.wrapped.len().checked_sub(1)?;
+        // A streaming re-wrap can shrink the buffer under a live selection.
+        let (l0, l1) = (l0.min(last), l1.min(last));
+        let mut out = String::new();
+        for i in l0..=l1 {
+            let text = &self.wrapped[i].text;
+            let n = text.chars().count();
+            let from = if i == l0 { c0.min(n) } else { 0 };
+            let to = if i == l1 { c1.min(n) } else { n };
+            let piece: String = text.chars().skip(from).take(to.saturating_sub(from)).collect();
+            let piece = match piece.strip_prefix("│ ") {
+                Some(rest) => rest,
+                None => piece.strip_prefix('│').unwrap_or(&piece),
+            };
+            out.push_str(piece.trim_end());
+            if i < l1 {
+                out.push('\n');
+            }
+        }
+        (!out.trim().is_empty()).then_some(out)
+    }
+
     pub(crate) fn visible_lines(&mut self, t: &theme::Theme) -> Vec<Line<'static>> {
         self.scroll_from_bottom = self.scroll_from_bottom.min(self.max_scroll());
         let total = self.wrapped.len();
         let end = total - self.scroll_from_bottom.min(total);
         let start = end.saturating_sub(self.view_height);
+        let sel = self.sel.map(|s| s.ordered());
         self.wrapped[start..end]
             .iter()
-            .map(|wl| match &wl.spans {
-                Some(spans) => Line::from(
-                    spans
-                        .iter()
-                        .map(|(c, s)| Span::styled(s.clone(), Style::default().fg(*c)))
-                        .collect::<Vec<_>>(),
-                ),
-                None => Line::from(Span::styled(wl.text.clone(), style_for(wl.kind, t))),
-            })
+            .enumerate()
+            .map(|(row, wl)| render_wrapped(wl, t, selected_cols(sel, start + row)))
             .collect()
     }
 
     pub(crate) fn contains(&self, col: u16, row: u16) -> bool {
         self.area.contains(Position { x: col, y: row })
     }
+}
+
+/// The selected char range within wrapped line `idx`, if any. `usize::MAX`
+/// as the end means "to the end of the line" (a middle line of a multi-line
+/// selection) — `render_wrapped` clamps it to the line's own length.
+fn selected_cols(sel: Option<((usize, usize), (usize, usize))>, idx: usize) -> Option<(usize, usize)> {
+    let ((l0, c0), (l1, c1)) = sel?;
+    if idx < l0 || idx > l1 {
+        return None;
+    }
+    let from = if idx == l0 { c0 } else { 0 };
+    let to = if idx == l1 { c1 } else { usize::MAX };
+    (from < to).then_some((from, to))
+}
+
+/// One wrapped line as a ratatui `Line`, with `sel`'s char range drawn
+/// reversed. Reverse video rather than a fixed highlight color: it reads
+/// correctly on every theme, including the syntect-colored code spans.
+fn render_wrapped(wl: &WrappedLine, t: &theme::Theme, sel: Option<(usize, usize)>) -> Line<'static> {
+    let base: Vec<(Style, &str)> = match &wl.spans {
+        Some(spans) => spans.iter().map(|(c, s)| (Style::default().fg(*c), s.as_str())).collect(),
+        None => vec![(style_for(wl.kind, t), wl.text.as_str())],
+    };
+    let Some((from, to)) = sel else {
+        return Line::from(
+            base.into_iter().map(|(st, s)| Span::styled(s.to_string(), st)).collect::<Vec<_>>(),
+        );
+    };
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(base.len() + 2);
+    // Walk the spans in char space, splitting each one where it crosses a
+    // selection edge.
+    let mut span_start = 0usize;
+    for (st, text) in base {
+        let n = text.chars().count();
+        let mut i = 0usize;
+        while i < n {
+            let abs = span_start + i;
+            let inside = abs >= from && abs < to;
+            // Next boundary in absolute chars: the selection's start when
+            // we're before it, its end when we're inside it.
+            let boundary = if inside {
+                to
+            } else if abs < from {
+                from
+            } else {
+                usize::MAX
+            };
+            let stop = boundary.saturating_sub(span_start).min(n).max(i + 1);
+            let piece: String = text.chars().skip(i).take(stop - i).collect();
+            out.push(Span::styled(piece, if inside { st.add_modifier(Modifier::REVERSED) } else { st }));
+            i = stop;
+        }
+        span_start += n;
+    }
+    Line::from(out)
 }
 
 /// Classify a unified-diff line for coloring (shared with the swarm TUI).
@@ -1185,6 +1325,27 @@ mod tests {
     }
 
     #[test]
+    fn pasted_text_lands_at_the_cursor_as_one_insert() {
+        // Ctrl+V / right-click arrive as an InsertInput effect, because the
+        // clipboard read runs off the UI thread. The insert must behave like
+        // bracketed paste: whole clipboard at once, CRLF normalized, so a
+        // pasted stack trace cannot send its first line by itself.
+        let mut app = App::new("m".into(), vec![], theme::DARK, std::env::temp_dir());
+        app.input = "see: ".into();
+        app.cursor = app.input.len();
+        app.handle_ui_effect(UiEffect::InsertInput("one\r\ntwo\rthree".into()));
+        assert_eq!(app.input, "see: one\ntwo\nthree");
+        assert_eq!(app.cursor, app.input.len());
+        assert!(app.status.contains("pasted 13 chars"), "status was {:?}", app.status);
+
+        // A second paste goes in wherever the cursor now sits, not at the end.
+        app.cursor = 3; // between "see" and ":"
+        app.handle_ui_effect(UiEffect::InsertInput("!".into()));
+        assert_eq!(app.input, "see!: one\ntwo\nthree");
+        assert_eq!(app.cursor, 4);
+    }
+
+    #[test]
     fn apply_theme_switches_and_rejects_unknown() {
         // Regression: theme switching is UI-side; both the typed form and
         // the picker route through apply_theme (the picker used to forward
@@ -1416,6 +1577,92 @@ mod tests {
     }
 
     #[test]
+    fn paste_bursts_are_told_apart_from_typing() {
+        let ms = Duration::from_millis;
+        // A console paste: keys arrive back to back.
+        assert!(is_paste_burst(ms(0), 0, true));
+        assert!(is_paste_burst(ms(1), 5, false));
+        // Human typing, even fast (200 wpm is ~60ms/char), is not a paste —
+        // and a queued mouse-move event must not make it look like one.
+        assert!(!is_paste_burst(ms(40), 0, true));
+        assert!(!is_paste_burst(ms(300), 0, false));
+        // A chunked paste can pause between chunks: the queue signal carries
+        // it, but only once a run of keys has already looked pasted.
+        assert!(is_paste_burst(ms(40), 9, true));
+        assert!(!is_paste_burst(ms(40), 1, true));
+        // Nothing queued and a human-sized gap: a keystroke, whatever came
+        // before it — this is the Enter that finally sends a pasted block.
+        assert!(!is_paste_burst(ms(40), 9, false));
+    }
+
+    #[test]
+    fn drag_selection_extracts_pane_text() {
+        let mut p = Pane::new();
+        p.push_line(Kind::Info, "first line".into());
+        p.push_line(Kind::Info, "second line".into());
+        p.push_line(Kind::Info, "third line".into());
+        p.rebuild(40, &theme::DARK);
+        p.area = Rect { x: 0, y: 0, width: 40, height: 10 };
+        p.view_height = 10;
+        // Fewer lines than the viewport: screen row N is wrapped line N.
+        p.select_from(6, 0);
+        p.select_to(6, 2);
+        assert_eq!(p.selected_text().unwrap(), "line\nsecond line\nthird");
+        // Dragging backwards selects the same span.
+        p.select_from(6, 2);
+        p.select_to(6, 0);
+        assert_eq!(p.selected_text().unwrap(), "line\nsecond line\nthird");
+        // A click without a drag selects nothing.
+        p.select_from(3, 1);
+        assert!(p.selected_text().is_none());
+        // Past the right edge clamps to the end of the line.
+        p.select_from(0, 1);
+        p.select_to(200, 1);
+        assert_eq!(p.selected_text().unwrap(), "second line");
+        // A re-wrap moves every line index — the selection must not survive it.
+        p.rebuild(20, &theme::DARK);
+        assert!(p.sel.is_none());
+    }
+
+    #[test]
+    fn selection_drops_the_code_box_gutter() {
+        let mut p = Pane::new();
+        p.set_syntax(None);
+        p.push_block(Kind::Assistant, "```\nlet x = 1;\nlet y = 2;\n```".into());
+        p.rebuild(40, &theme::DARK);
+        p.area = Rect { x: 0, y: 0, width: 40, height: 10 };
+        p.view_height = 10;
+        // Rows: 0 = ╭─ code ─…, 1..=2 = gutter-prefixed content.
+        assert!(p.wrapped[1].text.starts_with("│ "));
+        p.select_from(0, 1);
+        p.select_to(200, 2);
+        assert_eq!(p.selected_text().unwrap(), "let x = 1;\nlet y = 2;");
+    }
+
+    #[test]
+    fn selection_highlight_splits_only_the_selected_run() {
+        let wl = WrappedLine::plain(Kind::Info, "abcdef".into());
+        let line = render_wrapped(&wl, &theme::DARK, Some((2, 4)));
+        let texts: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, vec!["ab", "cd", "ef"]);
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!line.spans[2].style.add_modifier.contains(Modifier::REVERSED));
+        // No selection on this line → one span, untouched.
+        let plain = render_wrapped(&wl, &theme::DARK, None);
+        assert_eq!(plain.spans.len(), 1);
+        assert!(!plain.spans[0].style.add_modifier.contains(Modifier::REVERSED));
+
+        // Middle lines of a multi-line selection highlight to end of line.
+        let sel = Some(((1usize, 3usize), (3usize, 2usize)));
+        assert_eq!(selected_cols(sel, 0), None);
+        assert_eq!(selected_cols(sel, 1), Some((3, usize::MAX)));
+        assert_eq!(selected_cols(sel, 2), Some((0, usize::MAX)));
+        assert_eq!(selected_cols(sel, 3), Some((0, 2)));
+        assert_eq!(selected_cols(sel, 4), None);
+    }
+
+    #[test]
     fn cut_spans_preserves_text_and_colors_across_cuts() {
         let spans = vec![
             (Color::Red, "let x".to_string()),
@@ -1487,6 +1734,15 @@ enum Focus {
     Log,
 }
 
+/// Which pane a mouse event landed in. Distinct from `Focus`: the right-hand
+/// slot holds two panes (log and diff) and only one of them is on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneId {
+    Transcript,
+    Log,
+    Diff,
+}
+
 /// What the right-hand pane shows: the activity log or the live working-tree
 /// diff (Ctrl+D toggles).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1539,9 +1795,11 @@ struct App {
     palette_idx: usize,
     /// Popup dismissed with Esc; cleared on the next input change.
     palette_off: bool,
-    /// Mouse capture on = wheel scrolls panes; off = the terminal's native
-    /// text selection works (Ctrl+T toggles).
+    /// Mouse capture on = wheel scrolls panes and drag selects text; off =
+    /// the terminal's own selection works instead (Ctrl+T toggles).
     mouse_capture: bool,
+    /// Pane a left-button drag started in, while the button is still down.
+    drag: Option<PaneId>,
     /// When the in-flight turn/command started (drives the spinner + elapsed
     /// time so long prompt-processing waits visibly aren't a hang).
     turn_started: Option<Instant>,
@@ -1625,7 +1883,7 @@ impl App {
             history: vec![],
             history_idx: None,
             busy: false,
-            status: "Enter send · /help commands · Ctrl+T select/copy · Ctrl+L log · Esc cancel · /quit exit".into(),
+            status: "Enter send · /help commands · drag to select+copy · Ctrl+L log · Esc cancel · /quit exit".into(),
             cancel: None,
             quit: false,
             restart: false,
@@ -1636,6 +1894,7 @@ impl App {
             palette_idx: 0,
             palette_off: false,
             mouse_capture: true,
+            drag: None,
             turn_started: None,
             picker: None,
             answering: None,
@@ -1779,6 +2038,38 @@ impl App {
             Focus::Transcript => &mut self.transcript,
             Focus::Log => self.log_like_pane(),
         }
+    }
+
+    /// The pane under a screen cell, if any — hidden panes render at a zero
+    /// area, so at most one can match.
+    fn pane_at(&self, col: u16, row: u16) -> Option<PaneId> {
+        if self.log.contains(col, row) {
+            Some(PaneId::Log)
+        } else if self.diff.contains(col, row) {
+            Some(PaneId::Diff)
+        } else if self.transcript.contains(col, row) {
+            Some(PaneId::Transcript)
+        } else {
+            None
+        }
+    }
+
+    fn pane(&mut self, id: PaneId) -> &mut Pane {
+        match id {
+            PaneId::Transcript => &mut self.transcript,
+            PaneId::Log => &mut self.log,
+            PaneId::Diff => &mut self.diff,
+        }
+    }
+
+    /// Drop any live text selection; true when there was one to drop.
+    fn clear_selection(&mut self) -> bool {
+        let had = self.transcript.sel.is_some() || self.log.sel.is_some() || self.diff.sel.is_some();
+        self.transcript.sel = None;
+        self.log.sel = None;
+        self.diff.sel = None;
+        self.drag = None;
+        had
     }
 
     /// Whichever pane the right-hand slot currently displays.
@@ -2112,6 +2403,19 @@ impl App {
                     ),
                 );
                 self.status = "image staged — type your message".into();
+            }
+            UiEffect::InsertInput(text) => {
+                // One insert for the whole clipboard, exactly like bracketed
+                // paste: embedded newlines must not act as Enter presses.
+                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                let chars = text.chars().count();
+                self.input.insert_str(self.cursor, &text);
+                self.cursor += text.len();
+                self.palette_off = false;
+                self.palette_idx = 0;
+                // Status only (not Done) — a paste can land mid-turn, and
+                // resetting busy there would strand the running turn.
+                self.status = format!("pasted {chars} chars");
             }
             UiEffect::Btw { question, reply, ok } => {
                 self.btw_busy = false;
@@ -2908,12 +3212,55 @@ fn expand_mentions(input: &str, cwd: &std::path::Path) -> (String, Vec<String>, 
     (expanded, notes, images)
 }
 
+/// Ctrl+V / right-click: pull the system clipboard into the input box.
+///
+/// Text lands at the cursor; if the clipboard holds no text but does hold an
+/// image, it is staged as an attachment instead — the same thing `/paste`
+/// does, so one gesture covers both kinds of "copy this in".
+///
+/// Runs off the UI thread: the clipboard helpers shell out, and PowerShell
+/// takes the better part of a second to start. The effect that comes back
+/// re-reads the cursor, so typing during the wait is not lost.
+fn paste_clipboard(fx: &mpsc::UnboundedSender<UiEffect>) {
+    let fx = fx.clone();
+    tokio::task::spawn_blocking(move || {
+        let text = crate::clipboard::paste_via_tool();
+        if let Some(text) = &text {
+            if !text.is_empty() {
+                let _ = fx.send(UiEffect::InsertInput(text.clone()));
+                return;
+            }
+        }
+        // No text — a copied screenshot is the other thing people mean.
+        if let Ok((url, kb)) = clipboard_image_data_url() {
+            let _ = fx.send(UiEffect::Pasted(url, kb));
+            return;
+        }
+        let _ = fx.send(UiEffect::Status(
+            if text.is_some() {
+                "nothing on the clipboard".to_string()
+            } else if cfg!(target_os = "macos") {
+                "no clipboard tool — pbpaste is missing from PATH".to_string()
+            } else if cfg!(windows) {
+                "no clipboard tool — powershell is missing from PATH".to_string()
+            } else {
+                "no clipboard tool — install wl-clipboard, xclip, or xsel".to_string()
+            },
+        ));
+    });
+}
+
 /// Grab an image from the system clipboard into a temp PNG and return it as
 /// a data URL (for /paste). Best-effort per platform: PowerShell on Windows,
 /// pngpaste on macOS, wl-paste/xclip on Linux.
 pub(crate) fn clipboard_image_data_url() -> anyhow::Result<(String, u64)> {
     let out = std::env::temp_dir().join(format!("rift-paste-{}.png", std::process::id()));
     let path_str = out.display().to_string();
+    // Every branch below MUST silence stdout and stderr. The TUI owns the
+    // screen: a helper that writes so much as "xclip: not found" scribbles
+    // over the rendered frame. That used to be rare (only /paste reached
+    // here), but Ctrl+V and right-click land here on any machine without a
+    // clipboard tool — which is precisely the machine that prints the error.
     #[cfg(windows)]
     let status = std::process::Command::new("powershell")
         .args([
@@ -2927,15 +3274,27 @@ pub(crate) fn clipboard_image_data_url() -> anyhow::Result<(String, u64)> {
                  $img.Save('{path_str}', [System.Drawing.Imaging.ImageFormat]::Png)"
             ),
         ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
     #[cfg(target_os = "macos")]
-    let status = std::process::Command::new("pngpaste").arg(&path_str).status();
+    let status = std::process::Command::new("pngpaste")
+        .arg(&path_str)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    // The redirect inside the script covered wl-paste only; xclip's "not
+    // found" sailed past the `||` and onto the screen. Belt and braces:
+    // silence both commands in the script AND the shell itself.
     #[cfg(all(unix, not(target_os = "macos")))]
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "wl-paste --type image/png > '{path_str}' 2>/dev/null || xclip -selection clipboard -t image/png -o > '{path_str}'"
+            "wl-paste --type image/png > '{path_str}' 2>/dev/null || \
+             xclip -selection clipboard -t image/png -o > '{path_str}' 2>/dev/null"
         ))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
     match status {
         Ok(s) if s.success() && out.is_file() && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) => {}
@@ -3024,6 +3383,28 @@ const INIT_PROMPT: &str = "Explore this repository (use repo_map and outline to 
 
 /// /goal auto-continuation cap — the backstop against a condition the model
 /// can never verify. /goal again resumes where it stopped.
+/// Below this gap between two key events, the second is treated as pasted
+/// text rather than a keystroke — so its Enter inserts a newline instead of
+/// sending, and its Tab indents instead of completing. Windows has no
+/// bracketed paste, so this heuristic is the only thing separating the two.
+/// 15ms is ~4x faster than the fastest sustained human typing and ~100x
+/// slower than the back-to-back delivery of a console paste, so both sides
+/// have a wide margin; time spent redrawing is discounted from the gap.
+const PASTE_BURST_GAP: Duration = Duration::from_millis(15);
+
+/// Does the key event that just arrived belong to a paste rather than to a
+/// person? `gap` is the time since the previous key event with any redraw
+/// time already subtracted, `burst_run` how many keys in a row have already
+/// looked pasted, and `more_queued` whether further input is waiting behind
+/// this one.
+///
+/// The queue signal only counts inside an established run: on its own it
+/// would fire on any queued mouse-move event and turn a hand-pressed Enter
+/// into a newline.
+fn is_paste_burst(gap: Duration, burst_run: u32, more_queued: bool) -> bool {
+    gap < PASTE_BURST_GAP || (burst_run >= 2 && more_queued)
+}
+
 const GOAL_MAX_RUNS: u32 = 25;
 /// /loop run cap — a week of half-hourly runs; /loop again re-arms.
 const LOOP_MAX_RUNS: u32 = 336;
@@ -3385,6 +3766,14 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     let result = (|| -> Result<()> {
         let mut needs_redraw = true;
         let mut last_tick = Instant::now();
+        // Paste-burst detection state (see PASTE_BURST_GAP): when the last key
+        // event arrived, and how much of the time since then we spent drawing
+        // rather than waiting — a frame in the middle of a paste must not read
+        // as a human-sized pause.
+        let mut last_key_at = Instant::now();
+        let mut draw_cost = Duration::ZERO;
+        // How many keys in a row have looked like a paste.
+        let mut burst_run: u32 = 0;
         // A GUI editor we're waiting on (see UiEffect::EditFile), paired
         // with the command to dispatch when it closes cleanly. While Some,
         // the modal is up and input is frozen.
@@ -3541,7 +3930,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
             // buffer, which then silently drops the tail of long pastes. Drain
             // the queue first, draw once — no more truncated pastes.
             if needs_redraw && !event::poll(Duration::from_millis(0))? {
+                let drawing = Instant::now();
                 terminal.draw(|f| draw(f, &mut app))?;
+                draw_cost += drawing.elapsed();
                 needs_redraw = false;
             }
             if app.quit {
@@ -3565,7 +3956,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     // idle): feed their reports back as ONE notification turn
                     // so the model can react — the Claude Code-style flow.
                     if app.pending_auto.is_none() && !app.task_notes.is_empty() {
-                        let notes = app.task_notes.drain(..).collect::<Vec<_>>().join("\n\n");
+                        let notes = std::mem::take(&mut app.task_notes).join("\n\n");
                         app.transcript.push_block(Kind::Info, "⚙ reporting finished background work to the model".into());
                         app.pending_auto = Some(format!(
                             "[task notification] Background work you started has finished:\n\n{notes}\n\n\
@@ -3630,6 +4021,21 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
             match input_event {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     needs_redraw = true;
+                    // Is this key part of a paste rather than a keystroke?
+                    // Windows has no bracketed paste (crossterm reads console
+                    // records, not VT sequences), so a pasted block arrives as
+                    // ordinary key events and its newlines are indistinguishable
+                    // from Enter — which used to send the first line and strand
+                    // the rest. A paste arrives far faster than anyone types, so
+                    // the gap to the previous key tells them apart; time spent
+                    // drawing doesn't count, or a frame mid-paste would look
+                    // like a pause.
+                    let gap = last_key_at.elapsed().saturating_sub(draw_cost);
+                    let paste_burst =
+                        is_paste_burst(gap, burst_run, event::poll(Duration::from_millis(0))?);
+                    burst_run = if paste_burst { burst_run + 1 } else { 0 };
+                    last_key_at = Instant::now();
+                    draw_cost = Duration::ZERO;
                     let palette = app.palette();
                     let mention = if palette.is_empty() { app.mention_palette() } else { vec![] };
                     let popup_len = palette.len().max(mention.len());
@@ -3730,6 +4136,27 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                         continue;
                     }
                     match key.code {
+                    // ── Pasted characters, not keystrokes ──────────────────
+                    // Enter and Tab are commands (send, complete) when a human
+                    // presses them and plain text when they arrive inside a
+                    // paste. Getting this wrong sends the first line of a
+                    // stack trace and strands the rest in the box.
+                    KeyCode::Enter if paste_burst && app.picker.is_none() => {
+                        app.input.insert(app.cursor, '\n');
+                        app.cursor += 1;
+                        app.palette_off = false;
+                        app.palette_idx = 0;
+                        app.status = "multi-line paste — Enter sends it".into();
+                    }
+                    KeyCode::Tab if paste_burst && app.picker.is_none() => {
+                        // Indentation from the pasted text. Spaces, not a tab: the
+                        // input box measures width in chars, and a tab renders
+                        // wider than it counts, desyncing the cursor.
+                        app.input.insert_str(app.cursor, "    ");
+                        app.cursor += 4;
+                        app.palette_off = false;
+                        app.palette_idx = 0;
+                    }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl+C no longer exits; that is what /quit is for. If a turn is
                         // running, interrupt it (like Esc); otherwise remind the user.
@@ -3767,12 +4194,25 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                         app.mouse_capture = !app.mouse_capture;
                         if app.mouse_capture {
                             let _ = execute!(stdout(), EnableMouseCapture);
-                            app.status = "mouse capture on — wheel scrolls panes".into();
+                            app.status = "mouse capture on — drag selects text, wheel scrolls panes".into();
                         } else {
                             let _ = execute!(stdout(), DisableMouseCapture);
+                            // The terminal can't see the TUI's selection, so
+                            // drop it rather than leave a frozen highlight.
+                            app.clear_selection();
                             app.status =
-                                "mouse capture off — select & copy text natively · Ctrl+T to re-enable scrolling".into();
+                                "mouse capture off — the terminal's own selection is back (it spans both panes) · Ctrl+T to return".into();
                         }
+                    }
+                    KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Terminals that claim Ctrl+V for themselves (Windows
+                        // Terminal, iTerm) never send this key — they paste as
+                        // a bracketed-paste event, handled below. This is for
+                        // the ones that pass the keystroke straight through
+                        // (conhost, plain xterm), where it used to fall to the
+                        // generic Char arm and type a literal "v".
+                        app.status = "reading clipboard…".into();
+                        paste_clipboard(&fx_ui);
                     }
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.input.insert(app.cursor, '\n');
@@ -3812,7 +4252,13 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                         }
                     }
                     KeyCode::Esc => {
-                        if popup_len > 0 {
+                        // A live selection is the most local thing Esc can
+                        // dismiss — but never at the cost of interrupting a
+                        // running turn, so it yields to the busy path below.
+                        let cleared = app.clear_selection();
+                        if cleared && popup_len == 0 && app.answering.is_none() && !app.busy {
+                            app.status = "selection cleared".into();
+                        } else if popup_len > 0 {
                             app.palette_off = true;
                         } else if app.answering.is_some() {
                             // Dropping the sender tells the tool the user skipped.
@@ -4407,6 +4853,10 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                         }
                     }
                     KeyCode::Char(c) => {
+                        // A pasted newline can also arrive as a character;
+                        // normalize CR/CRLF so the prompt never carries a
+                        // stray CR into the model's context.
+                        let c = if c == '\r' { '\n' } else { c };
                         app.input.insert(app.cursor, c);
                         app.cursor += c.len_utf8();
                         app.palette_off = false;
@@ -4461,6 +4911,76 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 pane.scroll_down(3);
                             }
                             needs_redraw = true;
+                        }
+                        // Right-click pastes, the way a terminal's own context
+                        // menu does. Mouse capture takes the click away from the
+                        // terminal, so with capture on (the default) the TUI has
+                        // to answer it — otherwise the gesture just dies here.
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            app.status = "reading clipboard…".into();
+                            paste_clipboard(&fx_ui);
+                            needs_redraw = true;
+                        }
+                        // Drag to select text inside a pane, copied on release
+                        // — the panes sit side by side, so the terminal's own
+                        // selection would splice both columns of every row
+                        // together. Selecting one pane's text needs the TUI's
+                        // help; Ctrl+T still hands selection back to the
+                        // terminal for anyone who prefers it.
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            app.clear_selection();
+                            if let Some(id) = app.pane_at(mouse.column, mouse.row) {
+                                // Clicking a pane focuses it, so the keyboard
+                                // (PageUp, End) follows the mouse.
+                                app.focus = match id {
+                                    PaneId::Transcript => Focus::Transcript,
+                                    PaneId::Log | PaneId::Diff => Focus::Log,
+                                };
+                                app.pane(id).select_from(mouse.column, mouse.row);
+                                app.drag = Some(id);
+                            }
+                            needs_redraw = true;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if let Some(id) = app.drag {
+                                let pane = app.pane(id);
+                                // Dragging past an edge scrolls the pane, so a
+                                // selection can run past one screenful.
+                                // `.max(top)` keeps the clamp below well-formed
+                                // if the layout collapsed the pane mid-drag
+                                // (Ctrl+L, a resize) — an inverted range panics.
+                                let top = pane.area.y;
+                                let bottom = pane.area.bottom().saturating_sub(1).max(top);
+                                if mouse.row < top {
+                                    pane.scroll_up(1);
+                                } else if mouse.row > bottom {
+                                    pane.scroll_down(1);
+                                }
+                                pane.select_to(mouse.column, mouse.row.clamp(top, bottom));
+                                needs_redraw = true;
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            if let Some(id) = app.drag.take() {
+                                if let Some(text) = app.pane(id).selected_text() {
+                                    let fx2 = fx_ui.clone();
+                                    tokio::spawn(async move {
+                                        let chars = text.chars().count();
+                                        let msg = match crate::clipboard::copy_via_tool(&text).await {
+                                            Some(tool) => format!("copied {chars} chars (via {tool}) — Esc clears the selection"),
+                                            None => {
+                                                let _ = fx2.send(UiEffect::Osc52(text));
+                                                format!("sent {chars} chars to the terminal clipboard (OSC 52)")
+                                            }
+                                        };
+                                        // Status only: a Done here would reset
+                                        // the busy state of a turn running
+                                        // while the user selects text.
+                                        let _ = fx2.send(UiEffect::Status(msg));
+                                    });
+                                }
+                                needs_redraw = true;
+                            }
                         }
                         _ => {}
                     }

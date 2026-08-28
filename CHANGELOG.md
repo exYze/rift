@@ -3,6 +3,22 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.8.8 — 2026-08-28
+
+- **Restores everything from v2.8.0–v2.8.6.** v2.8.7 was cut from a branch
+  that had not seen the 2.8.x line, so it shipped the `/host`, `/model` and
+  `/ctx` persistence fix on top of a v2.7.1 tree — meaning anyone who updated
+  to it lost drag-to-select, Ctrl+V and right-click paste, the multi-line
+  paste fix, the `/restart`-after-`/update` fix on Linux, the clipboard
+  helpers no longer printing over the TUI, the TCP keepalive that keeps a NAT
+  from reaping a turn mid-stream, and the musl/CI build fixes. This release
+  merges those branches back together: the TUI, the VS Code extension and the
+  desktop app are all built from one tree again. **If you are on v2.8.7,
+  update.**
+- **`cargo clippy -D warnings` passes on current stable again.** A
+  `drain(..).collect()` in the task-notes handler became a hard error under
+  clippy's `drain_collect` lint, failing CI on all three platforms.
+
 ## v2.8.7 — 2026-08-28
 
 - **`/host`, `/model` and `/ctx` now stick.** Switching the server, model or
@@ -18,6 +34,146 @@ All notable changes to rift. Versions follow the roadmap phases in
   undoing the switch. `RIFT_HOST`/`RIFT_MODEL` still outrank the config at
   launch by design — when one is set, the save now says so rather than
   looking like it did nothing.
+## v2.8.6 — 2026-08-22
+
+- **Turns died mid-stream behind a NAT with `error reading a body from
+  connection: Operation timed out (os error 110)`.** That errno is the
+  kernel giving up on the socket, not rift giving up on the request: a
+  streaming turn sends its prompt, gets headers back immediately, then goes
+  completely silent for the whole prefill — minutes, on a large context
+  grown by a long tool loop. Anything tracking connections in the middle (a
+  VM's NAT, a router's conntrack table, a VPN) reaps that idle mapping, and
+  the server's reply has nowhere to land. It failed *after* headers, so
+  `send_with_retry` could not retry it either — by then tokens may already
+  have been emitted. rift set **no TCP keepalive at all**, so nothing kept
+  the mapping warm. It now sends keepalive probes every 20s (NAT idle
+  timeouts of 30s are common, and a probe is one empty packet), and parks
+  pooled connections for 30s instead of reqwest's 90s so a connection idled
+  across a long tool run is discarded rather than handed to the next turn.
+- **The read-idle timeout is adjustable.** It was hardcoded at 120s, which a
+  long prefill on a very large context can legitimately exceed;
+  `RIFT_READ_TIMEOUT` (seconds, `0` = no limit) overrides it. A typo falls
+  back to the default rather than reading as "no limit" — silently removing
+  the only bound on a stalled stream is the worse failure.
+
+## v2.8.5 — 2026-08-22
+
+- **A right-click on a machine with no clipboard tool scribbled `sh: 1:
+  xclip: not found` over the TUI.** The image fallback shells out, and the
+  `2>/dev/null` in that script covered `wl-paste` only — the `xclip` after
+  the `||` was unredirected, and the shell itself inherited stderr. Fallout
+  from 2.8.3: before Ctrl+V and right-click existed, only an explicit
+  `/paste` reached that code, so the machine most likely to print the error
+  was the least likely to run it. Every platform branch now nulls stdout
+  and stderr (Windows PowerShell and macOS `pngpaste` had the same
+  exposure), and the redirect covers both commands in the script. Without a
+  clipboard tool you get the status line that was always intended —
+  `no clipboard tool — install wl-clipboard, xclip, or xsel`.
+
+## v2.8.4 — 2026-08-22
+
+- **`/update` then `/restart` stranded your session on Linux.** The restart
+  never came back: it dropped to a shell, and the conversation you were in
+  the middle of stayed unresumed on disk. `/update` installs the new binary
+  by renaming it over the old one, which unlinks the running image — and
+  once that inode is unlinked, Linux appends `" (deleted)"` to
+  `/proc/self/exe`, which is what `current_exe()` reads. `/restart` then
+  tried to exec `…/rift (deleted)` and got ENOENT. So the single flow
+  `/restart` advertises — "relaunch and load updates" — was the one that
+  could not work. Windows was unaffected: its update parks the *running*
+  exe aside first, so the original path stays valid. The relaunch now
+  resolves a `" (deleted)"` path back to the real binary, and only when
+  that path is gone and the stripped one exists — a binary genuinely named
+  `foo (deleted)` still launches.
+- **A failed relaunch now tells you how to recover.** It used to end with a
+  bare io error and no hint that the session was still sitting on disk; it
+  prints the `rift --resume <path>` that brings it back.
+
+## v2.8.3 — 2026-08-22
+
+- **Ctrl+V and right-click now paste into the input box.** `/paste` was the
+  only way in, and it only ever took images. Worse, in terminals that pass
+  the keystroke through rather than claiming it (conhost, plain xterm),
+  `Ctrl+V` typed a literal `v` into the prompt — the generic character arm
+  caught it, because nothing matched it first. Both gestures now read the
+  system clipboard: text goes in at the cursor as one insert (so newlines in
+  a pasted stack trace never act as Enter), and if there is no text but
+  there is an image, it stages as an attachment exactly like `/paste`.
+  Terminals that already intercept `Ctrl+V` are unaffected — they paste as a
+  bracketed-paste event, which rift has always handled. Right-click needs
+  rift's help regardless, since mouse capture takes the click away from the
+  terminal's own context menu.
+- **`/copy` on Windows prepended an invisible BOM to everything.** `clip.exe`
+  is fed UTF-16LE with a byte-order mark so it does not mangle non-ASCII,
+  but it stores that mark as clipboard *content* — so every `/copy` and
+  every drag-selection came back with a leading U+FEFF, which is invisible
+  and breaks compilers, JSON parsers, and shells when pasted into a file.
+  Reads now strip a leading BOM. (The write side still sends one; dropping
+  it would leave clip.exe guessing the encoding.)
+
+## v2.8.2 — 2026-08-20
+
+- **The Linux x86_64 download could not run at all.** `curl … | sh` installed
+  it and every attempt to start it answered `rift: not found` — for a file
+  sitting right there, executable, 15MB. The binary carried a PT_INTERP of
+  `/lib/ld-musl-x86_64.so.1` (with no shared libraries needed at all), so on
+  a glibc host the kernel could not find its loader and exec failed with
+  ENOENT, which the shell reports as the *binary* being missing. rustc links
+  x86_64-musl as a static PIE and musl-gcc's specs stamped the dynamic
+  linker in regardless; aarch64-musl links non-PIE and was unaffected, which
+  is why only half the Linux downloads were broken and why nothing looked
+  wrong in CI. musl targets now build with `-C relocation-model=static`.
+- **CI now proves the static binary is static.** Both release jobs fail if
+  the built binary has a PT_INTERP or any DT_NEEDED entry, and `dev-build`
+  gained a linux-musl job that runs those checks and then executes
+  `--version` on a glibc runner — the test that would have caught this
+  before a tag existed.
+- **The apt timeout added in 2.8.1 never worked.** `timeout` signals its
+  direct child, and an unprivileged process cannot signal a root-owned
+  `sudo` (EPERM), so a hung apt was never killed; 2.8.1 only looked fixed
+  because apt happened not to hang. It runs as `sudo timeout` now, with
+  job-level caps so no future variant can burn six hours of runner time.
+
+## v2.8.1 — 2026-08-19
+
+- **Pasting multi-line text no longer sends the first line by itself.**
+  Windows has no bracketed paste — crossterm reads console records, not VT
+  sequences — so a pasted block arrives as ordinary key events and its
+  newlines were indistinguishable from Enter. Pasting a stack trace sent its
+  first line to the model and stranded the second in the input box, which is
+  precisely the case (dumping an error) where you want the whole thing.
+  Keys that arrive faster than anyone can type are now treated as pasted
+  text: Enter inserts a newline instead of sending, and Tab indents instead
+  of running command completion. Redraw time is discounted from the gap, and
+  a paste that arrives in chunks is carried across the pauses, so long
+  pastes land whole. Press Enter afterwards to send.
+- **A hung apt mirror can no longer stall a release.** v2.8.0's linux-musl
+  build sat on `apt-get update` for 23 minutes without returning; the retry
+  loop around it was useless, since a retry only helps a command that fails,
+  not one that hangs. Each attempt now runs under `timeout 180`, with a
+  15-minute step cap as a backstop.
+
+## v2.8.0 — 2026-08-19
+
+- **Drag the mouse across a pane to copy what you selected.** The transcript
+  and the activity/diff pane sit side by side, so the terminal's own
+  selection splices both columns of every row together — copying one error
+  message, one path, or one code block out of rift meant hand-editing the
+  result. Dragging inside a pane now selects that pane's text and copies it
+  on release (system clipboard, OSC 52 over ssh). The selection is anchored
+  to the text, not the screen, so it survives scrolling and streaming
+  output; dragging past an edge scrolls; a code block's `│ ` gutter is
+  dropped from the copy so pasted code stays pasteable; Esc clears the
+  highlight. `Ctrl+T` still hands selection back to the terminal, and
+  `/copy [all|log]` still takes a whole pane at once.
+- **`/model` list picks now work when the session runs through a provider.**
+  The picker listed the *current* server's models but emitted them as bare
+  names, and a bare name is resolved against the default `host` — a
+  different server, usually the localhost Ollama nobody configured. Picking
+  a model from the list therefore failed with `error sending request for url
+  (http://localhost:11434/api/show)`. Picker entries now carry the provider
+  prefix, and a bare name the default host can't serve is retried against
+  the session's provider instead of failing.
 
 ## v2.7.1 — 2026-08-09
 
