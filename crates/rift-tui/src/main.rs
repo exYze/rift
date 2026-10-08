@@ -26,9 +26,10 @@ use rift_openai::OpenAiClient;
 
 /// Build a provider (and the actual model name) from a possibly-prefixed model
 /// string. `openrouter/qwen3` routes through the configured `openrouter`
-/// provider with model `qwen3`. `anthropic/<model>` and `openai/<model>` work
-/// with no config entry at all — just ANTHROPIC_API_KEY / OPENAI_API_KEY in
-/// the environment (cloud is an option, never a requirement). Any other model
+/// provider with model `qwen3`. `anthropic/<model>`, `openai/<model>` and
+/// `kimi/<model>` work with no config entry — just ANTHROPIC_API_KEY /
+/// OPENAI_API_KEY / KIMI_CODE_API_KEY in the environment (cloud is an option,
+/// never a requirement). Any other model
 /// uses the default Ollama server.
 pub(crate) fn build_provider(
     model: &str,
@@ -44,16 +45,12 @@ pub(crate) fn build_provider(
             return (client, rest.to_string());
         }
         // Built-in cloud providers (config entries with the same name override).
-        match name {
-            "anthropic" => {
-                let key = std::env::var("ANTHROPIC_API_KEY").ok();
-                return (Arc::new(AnthropicClient::new("https://api.anthropic.com", key)), rest.to_string());
-            }
-            "openai" => {
-                let key = std::env::var("OPENAI_API_KEY").ok();
-                return (Arc::new(OpenAiClient::new("https://api.openai.com/v1", key)), rest.to_string());
-            }
-            _ => {}
+        if let Some(pc) = builtin_provider_config(name) {
+            let client: Arc<dyn Provider> = match pc.kind.as_deref() {
+                Some("anthropic") => Arc::new(AnthropicClient::new(&pc.base_url, pc.resolve_key())),
+                _ => Arc::new(OpenAiClient::new(&pc.base_url, pc.resolve_key())),
+            };
+            return (client, rest.to_string());
         }
     }
     // An OpenAI-style default host (…/v1 — vLLM, LM Studio, llama.cpp
@@ -66,9 +63,102 @@ pub(crate) fn build_provider(
     (Arc::new(OllamaClient::new(host)), model.to_string())
 }
 
+/// Defaults also identify the built-ins for model pickers without resolving secrets.
+pub(crate) fn builtin_provider_config(name: &str) -> Option<ProviderConfig> {
+    let (base_url, kind, api_key_env) = match name {
+        "anthropic" => (
+            "https://api.anthropic.com",
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+        ),
+        "openai" => ("https://api.openai.com/v1", "openai", "OPENAI_API_KEY"),
+        "kimi" => (
+            "https://api.kimi.ai/coding/v1",
+            "openai",
+            "KIMI_CODE_API_KEY",
+        ),
+        _ => return None,
+    };
+    Some(ProviderConfig {
+        base_url: base_url.into(),
+        kind: Some(kind.into()),
+        api_key: None,
+        api_key_env: Some(api_key_env.into()),
+    })
+}
+
 #[cfg(test)]
 mod provider_tests {
     use super::*;
+
+    #[test]
+    fn kimi_factory_routes_each_model_independently() {
+        let factory = provider_factory("http://unused:11434", &HashMap::new());
+        let (kimi, model) = factory("kimi/kimi-for-coding").unwrap();
+        assert_eq!(kimi.base_url(), "https://api.kimi.ai/coding/v1");
+        assert_eq!(model, "kimi-for-coding");
+        let (local, model) = factory("local-model").unwrap();
+        assert_eq!(local.base_url(), "http://unused:11434");
+        assert_eq!(model, "local-model");
+    }
+
+    #[test]
+    fn kimi_builtin_declares_api_key_environment_and_openai_protocol() {
+        let pc = builtin_provider_config("kimi").unwrap();
+        assert_eq!(pc.base_url, "https://api.kimi.ai/coding/v1");
+        assert_eq!(pc.kind.as_deref(), Some("openai"));
+        assert_eq!(pc.api_key_env.as_deref(), Some("KIMI_CODE_API_KEY"));
+        assert!(pc.api_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn kimi_config_takes_precedence_for_endpoint_protocol_and_key() {
+        use rift_ollama::test_support::{MockResponse, MockServer};
+        for kind in ["openai", "anthropic"] {
+            for key in [Some("fake-kimi-key".to_string()), None] {
+                let body = if kind == "anthropic" {
+                    r#"{"data":[{"id":"kimi-for-coding","display_name":"Kimi"}]}"#
+                } else {
+                    r#"{"data":[{"id":"kimi-for-coding"}]}"#
+                };
+                let server = MockServer::start(vec![MockResponse::json(200, body)]).await;
+                let providers = HashMap::from([(
+                    "kimi".into(),
+                    ProviderConfig {
+                        base_url: format!("{}/custom", server.base_url),
+                        kind: Some(kind.into()),
+                        api_key: key.clone(),
+                        api_key_env: None,
+                    },
+                )]);
+                let factory = provider_factory("http://unused:11434", &providers);
+                let (client, model) = factory("kimi/kimi-for-coding").unwrap();
+                assert_eq!(model, "kimi-for-coding");
+                assert_eq!(client.tags().await.unwrap()[0].name, model);
+                let requests = server.requests().await;
+                assert_eq!(requests.len(), 1);
+                let (head, _) = requests[0].split_once("\r\n\r\n").unwrap();
+                let head = head.to_lowercase();
+                if kind == "anthropic" {
+                    assert!(head.starts_with("get /custom/v1/models?limit=100 "));
+                    assert!(head.contains("anthropic-version:"));
+                    assert_eq!(head.contains("x-api-key: fake-kimi-key"), key.is_some());
+                    assert!(!head.contains("authorization:"));
+                } else {
+                    assert!(head.starts_with("get /custom/v1/models "));
+                    assert_eq!(
+                        head.contains("authorization: bearer fake-kimi-key"),
+                        key.is_some()
+                    );
+                    assert!(!head.contains("x-api-key:"));
+                }
+                if key.is_none() {
+                    assert!(!head.contains("authorization:"));
+                    assert!(!head.contains("x-api-key:"));
+                }
+            }
+        }
+    }
 
     #[test]
     fn bare_models_follow_the_host_kind() {

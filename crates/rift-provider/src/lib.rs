@@ -302,6 +302,7 @@ fn read_timeout() -> Option<std::time::Duration> {
 /// rather than handed to the next turn after the NAT has already dropped it.
 pub fn http_client() -> reqwest::Client {
     let mut b = reqwest::Client::builder()
+        .user_agent(concat!("rift/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(10))
         .tcp_keepalive(std::time::Duration::from_secs(20))
         .pool_idle_timeout(std::time::Duration::from_secs(30));

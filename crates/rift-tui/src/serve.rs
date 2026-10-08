@@ -147,12 +147,31 @@ fn segments_json(old: &str, new: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Provider names to probe: configured names and the active built-in, sorted.
+fn discovery_provider_names(
+    providers: &HashMap<String, ProviderConfig>,
+    current: &str,
+) -> Vec<String> {
+    let mut names: Vec<String> = providers.keys().cloned().collect();
+    if let Some((name, _)) = current.split_once('/') {
+        if crate::builtin_provider_config(name).is_some() && !providers.contains_key(name) {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names
+}
+
 /// Every model rift can currently reach, exactly as the `/model` argument
 /// expects it: the default host's list (bare names), then each configured
-/// provider's list as `provider/model`. Unreachable servers are skipped
-/// (short timeout — an offline provider must not wedge the picker). This is
-/// what lets consumers drop their own provider-routing reimplementations.
-async fn discover_models(host: &str, providers: &HashMap<String, ProviderConfig>) -> Vec<String> {
+/// provider's list as `provider/model`, including the active built-in.
+/// Unreachable servers are skipped (short timeout — an offline provider must
+/// not wedge the picker). Consumers can use this list directly for routing.
+async fn discover_models(
+    host: &str,
+    providers: &HashMap<String, ProviderConfig>,
+    current: &str,
+) -> Vec<String> {
     const PROBE: std::time::Duration = std::time::Duration::from_millis(2500);
     let mut out = Vec::new();
     // build_provider's bare-name path: the model string doesn't matter, the
@@ -161,15 +180,27 @@ async fn discover_models(host: &str, providers: &HashMap<String, ProviderConfig>
     if let Ok(Ok(models)) = tokio::time::timeout(PROBE, client.tags()).await {
         out.extend(models.into_iter().map(|m| m.name));
     }
-    let mut names: Vec<&String> = providers.keys().collect();
-    names.sort();
-    for name in names {
+    for name in discovery_provider_names(providers, current) {
         let (client, _) = crate::build_provider(&format!("{name}/_"), host, providers);
         if let Ok(Ok(models)) = tokio::time::timeout(PROBE, client.tags()).await {
             out.extend(models.into_iter().map(|m| format!("{name}/{}", m.name)));
         }
     }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|name| seen.insert(name.clone()));
     out
+}
+
+/// Build a model-list event while discovery runs outside the model-address lock.
+async fn models_event<F, Fut>(addr: &std::sync::Mutex<String>, discover: F) -> Value
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Vec<String>>,
+{
+    let discovery_current = addr.lock().map(|m| m.clone()).unwrap_or_default();
+    let models = discover(discovery_current).await;
+    let current = addr.lock().map(|m| m.clone()).unwrap_or_default();
+    json!({"event": "models", "models": models, "current": current})
 }
 
 /// Metadata for the past-chats picker: every saved session, newest first,
@@ -689,9 +720,10 @@ pub async fn run_serve(
                         let providers = providers.clone();
                         let addr = model_addr.clone();
                         tokio::spawn(async move {
-                            let models = discover_models(&host, &providers).await;
-                            let current = addr.lock().map(|m| m.clone()).unwrap_or_default();
-                            emit(json!({"event": "models", "models": models, "current": current}));
+                            let event = models_event(&addr, |discovery_current| async move {
+                                discover_models(&host, &providers, &discovery_current).await
+                            }).await;
+                            emit(event);
                         });
                     }
                     Some("set_model") => {
@@ -742,6 +774,100 @@ pub async fn run_serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn models_event_reports_model_selected_during_discovery() {
+        let addr = std::sync::Arc::new(std::sync::Mutex::new("kimi/kimi-for-coding".into()));
+        let task_addr = addr.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let discovery = tokio::spawn(async move {
+            models_event(&task_addr, |discovery_current| async move {
+                started_tx.send(discovery_current).unwrap();
+                release_rx.await.unwrap();
+                vec!["kimi/kimi-for-coding".into()]
+            })
+            .await
+        });
+        assert_eq!(started_rx.await.unwrap(), "kimi/kimi-for-coding");
+        *addr.lock().unwrap() = "openai/new-model".into();
+        release_tx.send(()).unwrap();
+        let event = discovery.await.unwrap();
+        assert_eq!(
+            event,
+            json!({
+                "event": "models", "models": ["kimi/kimi-for-coding"], "current": "openai/new-model"
+            })
+        );
+    }
+
+    #[test]
+    fn active_builtin_is_included_in_discovery() {
+        for name in ["kimi", "openai", "anthropic"] {
+            assert_eq!(
+                discovery_provider_names(&HashMap::new(), &format!("{name}/model")),
+                vec![name]
+            );
+        }
+        assert!(discovery_provider_names(&HashMap::new(), "unknown/model").is_empty());
+        assert!(discovery_provider_names(&HashMap::new(), "bare-model").is_empty());
+    }
+
+    #[test]
+    fn configured_discovery_providers_are_sorted_and_not_duplicated() {
+        let pc = ProviderConfig {
+            base_url: "http://unused/v1".into(),
+            kind: None,
+            api_key: None,
+            api_key_env: None,
+        };
+        let providers = HashMap::from([("zeta".into(), pc.clone()), ("kimi".into(), pc)]);
+        assert_eq!(
+            discovery_provider_names(&providers, "kimi/model"),
+            vec!["kimi", "zeta"]
+        );
+        assert_eq!(
+            discovery_provider_names(&providers, "openai/model"),
+            vec!["kimi", "openai", "zeta"]
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_returns_unique_addressable_names_with_configured_override() {
+        use rift_ollama::test_support::{MockResponse, MockServer};
+        let body = r#"{"data":[{"id":"kimi-for-coding"},{"id":"kimi-for-coding"}]}"#;
+        let server = MockServer::start(vec![
+            MockResponse::json(200, body),
+            MockResponse::json(200, body),
+        ])
+        .await;
+        let providers = HashMap::from([(
+            "kimi".into(),
+            ProviderConfig {
+                base_url: format!("{}/coding/v1", server.base_url),
+                kind: None,
+                api_key: Some("fake-key".into()),
+                api_key_env: None,
+            },
+        )]);
+        let models = discover_models(
+            &format!("{}/v1", server.base_url),
+            &providers,
+            "kimi/kimi-for-coding",
+        )
+        .await;
+        assert_eq!(models, vec!["kimi-for-coding", "kimi/kimi-for-coding"]);
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].lines().next().unwrap(),
+            "GET /v1/models HTTP/1.1"
+        );
+        assert_eq!(
+            requests[1].lines().next().unwrap(),
+            "GET /coding/v1/models HTTP/1.1"
+        );
+    }
 
     /// The protocol-v1 conformance suite: every event's wire shape, pinned
     /// exactly as docs/SERVE.md documents it. A failure here means a

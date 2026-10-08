@@ -2,6 +2,10 @@
   "host": "http://localhost:11434",
   "model": "gemma4:26b",
   "providers": {
+    "kimi": {
+      "base_url": "https://api.kimi.ai/coding/v1",
+      "api_key_env": "KIMI_CODE_API_KEY"
+    },
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY"

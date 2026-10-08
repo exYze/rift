@@ -89,9 +89,10 @@ pub struct Config {
     /// Named cloud providers. Address a model as `<name>/<model>` (e.g.
     /// `openrouter/qwen3`, `anthropic/claude-opus-4-8`) to route it through
     /// one of these. `kind` selects the wire protocol ("openai" default,
-    /// "anthropic" for the native Messages API). The names `anthropic` and
-    /// `openai` have built-in defaults that need only the ANTHROPIC_API_KEY /
-    /// OPENAI_API_KEY env var — no config entry required.
+    /// "anthropic" for the native Messages API). The names `anthropic`,
+    /// `openai` and `kimi` have built-in defaults that need only the
+    /// ANTHROPIC_API_KEY / OPENAI_API_KEY / KIMI_CODE_API_KEY env var
+    /// — no config entry required.
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     /// Cost display rates ($ per million tokens) keyed by a model-name

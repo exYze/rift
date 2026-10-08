@@ -312,6 +312,50 @@ rift --model openrouter/qwen/qwen3-30b-a3b       # one-off
 
 Each provider takes a `base_url` (a `/v1` suffix is added if you omit it) and, if the endpoint needs auth, either `api_key_env` (name of an environment variable to read — keeps the secret out of the file) or a literal `api_key`. `/model provider/model` switches providers live within a session; a bare model name always routes to the Ollama `host`.
 
+#### Kimi Code subscription
+
+Create a Kimi Code subscription key in the console for your region. This is not a Moonshot Platform API key.
+
+| Region | Console | OpenAI-compatible API |
+| --- | --- | --- |
+| Global | [kimi.ai/code/console](https://www.kimi.ai/code/console) | `https://api.kimi.ai/coding/v1` (built-in default) |
+| Mainland China | [kimi.com/code/console](https://www.kimi.com/code/console) | `https://api.kimi.com/coding/v1` |
+
+Set the key in your shell and select the documented subscription model alias:
+
+```sh
+export KIMI_CODE_API_KEY='your-kimi-code-key'
+rift --model kimi/kimi-for-coding
+```
+
+The built-in `kimi` provider uses the global API URL. To use the China endpoint or another compatible endpoint, set `providers.kimi` in your user-wide `~/.config/rift/config.json` or project `.rift.json`. This entry replaces the complete built-in provider configuration, so include `api_key_env`:
+
+```json
+{
+  "providers": {
+    "kimi": {
+      "base_url": "https://api.kimi.com/coding/v1",
+      "api_key_env": "KIMI_CODE_API_KEY"
+    }
+  }
+}
+```
+
+This provider setting overrides the built-in URL and applies to CLI, TUI, `--serve`, and delegated tasks. Keep the `kimi/kimi-for-coding` model address the same.
+
+Model roles can mix providers; delegated tasks can select a role or a full provider/model address:
+
+```json
+{
+  "models": {
+    "implement": "kimi/kimi-for-coding",
+    "review": "gemma4:26b"
+  }
+}
+```
+
+Requests use your subscription's shared quota across keys and devices, and account, model, and rate limits apply. If Extra Usage is enabled on your account, usage after the included quota may be billed. Rift identifies itself truthfully with `rift/<version>` and does not impersonate an official Kimi Code client. See the [Kimi Code API documentation](https://www.kimi.com/code/docs/en/), [membership and quota guide](https://www.kimi.com/code/docs/en/kimi-code/membership.html), and [third-party agent guidance](https://www.kimi.com/en/help/kimi-code/third-party-agents).
+
 ### Typed decisions (TypeSafe System One / Jev)
 
 A **System One model** is not a chat model. It generates no text, calls no tools, and does not stream — it takes some state plus typed questions and returns typed answers with calibrated probabilities, in one round trip. That makes it the wrong shape for a `Provider` and the right shape for the decisions rift would otherwise have to phrase as a prompt and parse back out of prose.

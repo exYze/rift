@@ -347,7 +347,7 @@ async fn cmd_model(
         .model_addr
         .split_once('/')
         .map(|(p, _)| p.to_string())
-        .filter(|p| cx.providers.contains_key(p) || matches!(p.as_str(), "anthropic" | "openai"));
+        .filter(|p| cx.providers.contains_key(p) || crate::builtin_provider_config(p).is_some());
     if arg.is_empty() {
         let models = agent.client().tags().await.context("listing models")?;
         if models.is_empty() {
@@ -2049,6 +2049,49 @@ white-space:pre-wrap;overflow-wrap:anywhere}\n\
 mod share_tests {
     use super::*;
     use rift_ollama::{ToolCall, ToolCallFunction};
+
+    #[tokio::test]
+    async fn kimi_picker_preserves_provider_prefix() {
+        use rift_ollama::test_support::{MockResponse, MockServer};
+        let server = MockServer::start(vec![MockResponse::json(
+            200,
+            r#"{"data":[{"id":"kimi-for-coding"},{"id":"another-model"}]}"#,
+        )])
+        .await;
+        let client = Arc::new(rift_openai::OpenAiClient::new(
+            &server.base_url,
+            Some("fake-key".into()),
+        ));
+        let mut agent = Agent::new(
+            client,
+            rift_core::AgentConfig {
+                model: "kimi-for-coding".into(),
+                ..Default::default()
+            },
+            rift_core::ToolRegistry::standard(),
+            rift_core::ToolCtx::new("/tmp"),
+            "system".into(),
+        );
+        let mut cx = CmdCx {
+            store: SessionStore::at("/tmp/kimi-picker-unused.json".into()),
+            cwd: "/tmp".into(),
+            mcp: vec![],
+            config_path: None,
+            host: "http://unused:11434".into(),
+            providers: Default::default(),
+            model_addr: "kimi/kimi-for-coding".into(),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cmd_model("", &mut agent, &mut cx, &tx).await.unwrap();
+        match rx.try_recv().unwrap() {
+            UiEffect::Picker { items, .. } => assert_eq!(
+                items.iter().map(|i| i.value.as_str()).collect::<Vec<_>>(),
+                vec!["kimi/kimi-for-coding", "kimi/another-model"]
+            ),
+            _ => panic!("expected model picker"),
+        }
+        assert_eq!(server.requests().await.len(), 1);
+    }
 
     fn tool_call(name: &str, key: &str, value: &str) -> ToolCall {
         let mut arguments = serde_json::Map::new();

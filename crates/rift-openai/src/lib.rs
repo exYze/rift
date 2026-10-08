@@ -203,7 +203,21 @@ fn to_oai_message(m: &Message) -> OaiMessage {
 fn build_request(req: &ChatRequest) -> OaiRequest {
     OaiRequest {
         model: req.model.clone(),
-        messages: req.messages.iter().map(to_oai_message).collect(),
+        // Empty replies can survive in saved history, including reasoning-only
+        // replies after the agent strips old thinking. Strict providers such as
+        // Kimi reject these turns. Filter only at the wire boundary, preserving
+        // tool calls and reasoning that this adapter actually replays.
+        messages: req
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role != Role::Assistant
+                    || !m.content.trim().is_empty()
+                    || !m.tool_calls.is_empty()
+                    || m.thinking.as_deref().is_some_and(|t| !t.trim().is_empty())
+            })
+            .map(to_oai_message)
+            .collect(),
         tools: req
             .tools
             .iter()
@@ -583,6 +597,117 @@ impl Provider for OpenAiClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn request_with_messages(messages: Vec<Message>) -> ChatRequest {
+        ChatRequest {
+            model: "kimi-for-coding".into(),
+            messages,
+            tools: vec![],
+            stream: true,
+            think: None,
+            effort: None,
+            keep_alive: None,
+            options: None,
+        }
+    }
+
+    #[test]
+    fn request_drops_empty_assistant_history() {
+        for content in ["", " \t\n", "\u{2003}"] {
+            for thinking in [None, Some(""), Some(" \t\n")] {
+                let empty: Message = serde_json::from_value(json!({
+                    "role": "assistant", "content": content, "thinking": thinking,
+                    // Raw Anthropic blocks are not replayed by this adapter.
+                    "provider_data": [{"type": "thinking", "signature": "sig"}],
+                }))
+                .unwrap();
+                let answer: Message = serde_json::from_value(json!({
+                    "role": "assistant", "content": "  answer\n",
+                }))
+                .unwrap();
+                let req = request_with_messages(vec![
+                    empty.clone(),
+                    Message::system("instructions"),
+                    Message::user("hi"),
+                    empty.clone(),
+                    answer,
+                    empty,
+                    Message::user("continue"),
+                ]);
+                let original = serde_json::to_value(&req).unwrap();
+                let body = serde_json::to_value(build_request(&req)).unwrap();
+                assert_eq!(
+                    body["messages"],
+                    json!([
+                        {"role": "system", "content": "instructions"},
+                        {"role": "user", "content": "hi"},
+                        {"role": "assistant", "content": "  answer\n"},
+                        {"role": "user", "content": "continue"},
+                    ]),
+                    "content={content:?}, thinking={thinking:?}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&req).unwrap(),
+                    original,
+                    "request conversion must not mutate saved history"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn request_preserves_reasoning_tool_calls_and_other_roles() {
+        let reasoning: Message = serde_json::from_value(json!({
+            "role": "assistant", "content": "", "thinking": "  pondering\n",
+        }))
+        .unwrap();
+        let calls: Message = serde_json::from_value(json!({
+            "role": "assistant", "content": "", "thinking": "inspect the file",
+            "tool_calls": [{"id": "call_9", "function": {
+                "name": "read", "arguments": {"path": "a.rs"},
+            }}],
+        }))
+        .unwrap();
+        let mut result = Message::tool_result("read", "");
+        result.tool_call_id = Some("call_9".into());
+        let mut calls_without_reasoning = calls.clone();
+        calls_without_reasoning.thinking = None;
+        for calls in [calls, calls_without_reasoning] {
+            let req = request_with_messages(vec![
+                Message::system(""),
+                Message::user(""),
+                reasoning.clone(),
+                calls,
+                result.clone(),
+            ]);
+            let body = serde_json::to_value(build_request(&req)).unwrap();
+            let messages = body["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 5);
+            assert_eq!(messages[0], json!({"role": "system", "content": ""}));
+            assert_eq!(messages[1], json!({"role": "user", "content": ""}));
+            assert_eq!(
+                messages[2],
+                json!({
+                    "role": "assistant", "content": "", "reasoning_content": "  pondering\n",
+                })
+            );
+            assert_eq!(
+                messages[3]["tool_calls"],
+                json!([{
+                    "id": "call_9", "type": "function", "function": {
+                        "name": "read", "arguments": "{\"path\":\"a.rs\"}",
+                    },
+                }])
+            );
+            assert!(messages[3].get("content").is_none());
+            assert_eq!(
+                messages[4],
+                json!({
+                    "role": "tool", "content": "", "name": "read", "tool_call_id": "call_9",
+                })
+            );
+        }
+    }
 
     #[test]
     fn tool_result_maps_to_tool_call_id_and_string_args() {
