@@ -1996,7 +1996,7 @@ impl Tool for FetchTool {
         "fetch"
     }
     fn description(&self) -> &str {
-        "Fetch a URL (GET) and return its content as readable text: HTML is stripped to text,          JSON and plain text pass through. For docs, READMEs, changelogs, API references.          Output is capped; no auth, no JS rendering."
+        "Fetch a URL (GET) and return its content as readable text: HTML is stripped to text, JSON and plain text pass through. For docs, READMEs, changelogs, API references. Output is capped; no auth, no JS rendering."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -2074,7 +2074,7 @@ impl Tool for WebSearchTool {
         "web_search"
     }
     fn description(&self) -> &str {
-        "Search the web (via the configured SearXNG instance). Returns titles, URLs, and          snippets; follow up with the fetch tool to read a result in full."
+        "Search the web (via the configured SearXNG instance). Returns titles, URLs, and snippets; follow up with the fetch tool to read a result in full."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -2089,7 +2089,7 @@ impl Tool for WebSearchTool {
         let query = req_str(args, "query")?;
         let Some(base) = ctx.search_url() else {
             bail!(
-                "web search is not configured — the user can set it with /search <searxng-url> or                  search_url in the config. Proceed without web results or ask them to configure it."
+                "web search is not configured — the user can set it with /search <searxng-url> or search_url in the config. Proceed without web results or ask them to configure it."
             );
         };
         let client = rift_provider::http_client();
@@ -2108,16 +2108,32 @@ impl Tool for WebSearchTool {
         let status = resp.status();
         if !status.is_success() {
             bail!(
-                "search endpoint {base} returned {status} — if this is 403, the SearXNG instance                  must allow format=json (settings.yml: search.formats)"
+                "search endpoint {base} returned {status} — if this is 403, the SearXNG instance must allow format=json (settings.yml: search.formats)"
             );
         }
         let body: Value = resp.json().await.with_context(|| format!("invalid JSON from {base}"))?;
         let results = body.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let down = unresponsive_engines(&body);
         if results.is_empty() {
+            // Blocked upstream engines (CAPTCHA, rate limits) also come back
+            // as zero results — tell the model the backend failed, or it
+            // reads "no results" as "nothing exists".
+            if !down.is_empty() {
+                bail!(
+                    "web search is degraded, not empty — every engine that answered failed: {}. \
+                     These are upstream blocks on the SearXNG instance, usually temporary. Don't treat \
+                     this as evidence the topic has no results; proceed without web results or tell the user.",
+                    down.join(", ")
+                );
+            }
             return Ok(format!("no results for: {query}"));
         }
         let mut out = format!("results for: {query}
 ");
+        if !down.is_empty() {
+            out.push_str(&format!("(may be incomplete — engines unavailable: {})
+", down.join(", ")));
+        }
         for r in results.iter().take(SEARCH_MAX_RESULTS) {
             let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)");
             let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -2131,6 +2147,23 @@ impl Tool for WebSearchTool {
         }
         Ok(out)
     }
+}
+
+/// SearXNG's `unresponsive_engines`: `[[name, reason], …]` → `"name (reason)"`.
+fn unresponsive_engines(body: &Value) -> Vec<String> {
+    let Some(list) = body.get("unresponsive_engines").and_then(|v| v.as_array()) else {
+        return vec![];
+    };
+    list.iter()
+        .filter_map(|e| {
+            let pair = e.as_array()?;
+            let name = pair.first()?.as_str()?;
+            Some(match pair.get(1).and_then(|r| r.as_str()).filter(|r| !r.is_empty()) {
+                Some(reason) => format!("{name} ({reason})"),
+                None => name.to_string(),
+            })
+        })
+        .collect()
 }
 
 // ----------------------------------------------------------------- decide
@@ -2340,7 +2373,7 @@ impl Tool for RememberTool {
         "remember"
     }
     fn description(&self) -> &str {
-        "Save a short durable fact to project memory (.rift/memory.md), loaded in every future          session. Use for non-obvious, lasting discoveries: build quirks, hidden conventions,          decisions and their reasons. Not for session-scoped state or anything obvious from the code."
+        "Save a short durable fact to project memory (.rift/memory.md), loaded in every future session. Use for non-obvious, lasting discoveries: build quirks, hidden conventions, decisions and their reasons. Not for session-scoped state or anything obvious from the code."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -2911,6 +2944,16 @@ impl Tool for GlobTool {
 mod tests {
     use super::*;
 
+    // Descriptions ride every request. A wrapped string literal that lost its
+    // `\` continuation keeps the next line's indent as a run of spaces —
+    // wasted tokens the model reads as a gap, and it went unnoticed for months.
+    #[test]
+    fn tool_descriptions_have_no_wrap_gaps() {
+        for t in &ToolRegistry::standard().tools {
+            assert!(!t.description().contains("   "), "{}: stray space run in description", t.name());
+        }
+    }
+
     #[test]
     fn lean_schema_trims_annotations_but_never_structure() {
         let def = lean_def(
@@ -2996,6 +3039,36 @@ mod tests {
         assert!(out.contains("A systems language."));
         let req = &server.requests().await[0];
         assert!(req.contains("format=json"), "must use the JSON API: {req}");
+    }
+
+    #[tokio::test]
+    async fn web_search_reports_blocked_engines() {
+        let mut args = Map::new();
+        args.insert("query".into(), Value::String("rust".into()));
+        let server = rift_provider::test_support::MockServer::start(vec![
+            // Every engine blocked: zero results must not read as "nothing exists".
+            rift_provider::test_support::MockResponse::json(
+                200,
+                "{\"results\":[],\"unresponsive_engines\":[[\"brave\",\"Suspended: too many requests\"],[\"duckduckgo\",\"CAPTCHA\"]]}",
+            ),
+            // Partly blocked: results come through, flagged as incomplete.
+            rift_provider::test_support::MockResponse::json(
+                200,
+                "{\"results\":[{\"title\":\"Rust Language\",\"url\":\"https://rust-lang.org\",\"content\":\"\"}],\"unresponsive_engines\":[[\"brave\",\"too many requests\"]]}",
+            ),
+        ])
+        .await;
+        let ctx = ToolCtx::new("/tmp");
+        ctx.set_search_url(Some(server.base_url.clone()));
+
+        let err = WebSearchTool.execute(&args, &ctx).await.unwrap_err().to_string();
+        assert!(err.contains("degraded"), "got: {err}");
+        assert!(err.contains("brave (Suspended: too many requests)"), "got: {err}");
+        assert!(err.contains("duckduckgo (CAPTCHA)"), "got: {err}");
+
+        let out = WebSearchTool.execute(&args, &ctx).await.unwrap();
+        assert!(out.contains("Rust Language"), "got: {out}");
+        assert!(out.contains("engines unavailable: brave (too many requests)"), "got: {out}");
     }
 
     #[test]

@@ -450,7 +450,7 @@ impl Config {
         }
         if p.permissions.bash_wrapper.is_some() {
             warnings.push(
-                "project .rift.json 'bash_wrapper' ignored — the sandbox wrapper can only come from the                  user config (a cloned repo must not be able to re-route shell commands)"
+                "project .rift.json 'bash_wrapper' ignored — the sandbox wrapper can only come from the user config (a cloned repo must not be able to re-route shell commands)"
                     .into(),
             );
         }

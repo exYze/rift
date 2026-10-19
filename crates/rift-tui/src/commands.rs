@@ -1464,7 +1464,7 @@ change with /search <url>, disable with /search off"),
             .map_err(|e| anyhow!("cannot reach {base}: {e}"))?;
             if !resp.status().is_success() {
                 bail!(
-                    "{base} answered {} — a SearXNG instance with format=json enabled is required                      (settings.yml: search.formats include json)",
+                    "{base} answered {} — a SearXNG instance with format=json enabled is required (settings.yml: search.formats include json)",
                     resp.status()
                 );
             }

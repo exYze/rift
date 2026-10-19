@@ -681,7 +681,7 @@ pub async fn judge_swarm_system_one(
         (
             Q_WINNER.to_string(),
             rift_typesafe::Question::choice(
-                "Every candidate was given the same task in an identical copy of the repository.                  Which candidate's diff best accomplishes it? Judge the diffs ONLY: correctness                  first, then prefer the smaller, cleaner change. A self_reported_summary is the                  candidate's own claim, not evidence.",
+                "Every candidate was given the same task in an identical copy of the repository. Which candidate's diff best accomplishes it? Judge the diffs ONLY: correctness first, then prefer the smaller, cleaner change. A self_reported_summary is the candidate's own claim, not evidence.",
                 options,
             ),
         ),
