@@ -290,3 +290,31 @@ async fn image_attachments_become_content_parts() {
         "image_url part missing: {raw}"
     );
 }
+
+// llama.cpp's /models lists the launch window (`meta.n_ctx`) next to the
+// training window (`meta.n_ctx_train`). Only the first is what the server
+// accepts — a 32k server for a 256k model — so it must win.
+#[tokio::test]
+async fn llama_cpp_context_is_the_launch_window_not_training() {
+    let server = MockServer::start(vec![MockResponse::json(
+        200,
+        "{\"object\":\"list\",\"data\":[{\"id\":\"orcacyber-nano\",\"object\":\"model\",\"owned_by\":\"llamacpp\",\"meta\":{\"n_ctx\":32768,\"n_ctx_train\":262144}}]}",
+    )])
+    .await;
+    let client = OpenAiClient::new(&server.base_url, None);
+    let caps = client.show("orcacyber-nano").await.expect("show");
+    assert_eq!(caps.context_length, Some(32768));
+}
+
+// Builds that report only the training window still yield a value.
+#[tokio::test]
+async fn llama_cpp_context_falls_back_to_training_window() {
+    let server = MockServer::start(vec![MockResponse::json(
+        200,
+        "{\"object\":\"list\",\"data\":[{\"id\":\"m\",\"object\":\"model\",\"meta\":{\"n_ctx_train\":131072}}]}",
+    )])
+    .await;
+    let client = OpenAiClient::new(&server.base_url, None);
+    let caps = client.show("m").await.expect("show");
+    assert_eq!(caps.context_length, Some(131072));
+}

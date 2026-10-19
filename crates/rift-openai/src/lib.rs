@@ -436,8 +436,14 @@ impl Provider for OpenAiClient {
         // gracefully via the 400 retry), and recover the context length from
         // the /models listing where servers expose it — vLLM
         // (`max_model_len`), OpenRouter (`context_length`), LM Studio
-        // (`max_context_length`), llama.cpp (`meta.n_ctx_train`). Absent or
+        // (`max_context_length`), llama.cpp (`meta.n_ctx`). Absent or
         // unreachable just means unknown.
+        //
+        // llama.cpp reports both `n_ctx` (the window the server was launched
+        // with, `-c`) and `n_ctx_train` (what the weights were trained on).
+        // Only the first is what it will accept — a 32k server for a 256k
+        // model rejects a 33k prompt — so `n_ctx_train` is a last resort for
+        // builds that don't report the runtime value.
         let context_length = async {
             let resp = send_with_retry(self.req(reqwest::Method::GET, "/models")).await.ok()?;
             let body: Value = resp.json().await.ok()?;
@@ -451,7 +457,8 @@ impl Provider for OpenAiClient {
                     return Some(n);
                 }
             }
-            entry.get("meta")?.get("n_ctx_train")?.as_u64()
+            let meta = entry.get("meta")?;
+            meta.get("n_ctx").or_else(|| meta.get("n_ctx_train"))?.as_u64()
         }
         .await
         .filter(|n| *n > 0);
