@@ -3,6 +3,32 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.9.1 — 2026-10-19
+
+- **llama.cpp: the context budget is the server's window, not the model's.**
+  llama.cpp's `/v1/models` reports both `meta.n_ctx` (the window the server
+  was launched with, `-c`) and `meta.n_ctx_train` (what the weights were
+  trained on), and rift read the second. Against a 32k server for a 256k
+  model it budgeted 262k: history grew straight past what the server
+  accepts, every request came back `exceed_context_size_error`, and
+  compaction never fired because rift thought it had room. `n_ctx` now wins;
+  `n_ctx_train` is only a fallback for builds that don't report it.
+- **`web_search` says when search is broken rather than empty.** SearXNG
+  answers a blocked upstream (CAPTCHA, rate-limit suspension) the same way it
+  answers a query with no hits — zero results — so the model was told "no
+  results" and could conclude the thing it searched for doesn't exist. When
+  every engine failed, the tool now errors with each engine and its reason
+  (`duckduckgo (CAPTCHA)`, `brave (Suspended: too many requests)`) and says
+  the backend is degraded; when only some failed, results come back flagged
+  as possibly incomplete.
+- **Tool descriptions lost their line-wrap gaps.** Eight wrapped string
+  literals had dropped their `\` continuations, leaving the next line's
+  indent as a run of 9–51 spaces mid-sentence — in the `fetch`, `web_search`
+  and `remember` descriptions the model reads on every request, the swarm
+  judge prompt, and four error messages (the "web search is not configured"
+  one among them). A test now fails if any built-in tool description carries
+  a space run.
+
 ## v2.9.0 — 2026-09-17
 
 - **Typed decisions: TypeSafe System One (Jev) support.** A System One model
