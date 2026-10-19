@@ -3,6 +3,35 @@
 All notable changes to rift. Versions follow the roadmap phases in
 [docs/ROADMAP.md](docs/ROADMAP.md); dates are release dates.
 
+## v2.9.2 — 2026-10-19
+
+- **Type while the agent works.** Enter during a turn used to answer
+  "agent is running — Esc to cancel first", so the only way to add a detail
+  or change course was to throw the turn away. Messages typed mid-turn are
+  now queued (the status bar shows `N queued`). The agent picks the queue
+  up at the next tool-call boundary — once every call of the current round
+  has its result, so the call/result sequence strict servers check stays
+  intact — and hands it to the model as a user message flagged as sent
+  mid-task. If the model finishes before another tool call, the queue goes
+  out as the next turn instead, ahead of task notifications and `/loop`
+  rounds. Queued text echoes into the transcript where the model actually
+  receives it, not while a reply is still streaming, and Esc cancels the
+  turn and returns undelivered messages to the input box rather than
+  sending them. @-mentions in queued messages expand as usual; images wait
+  for the next message sent.
+- **`/bg <task>` launches a background sub-agent from the chat input.**
+  It is the same detached child the `agent` tool's `background=true` mode
+  starts (full tool set, own context, listed in `/tasks`), and like `/btw`
+  it works while a turn is running. When it finishes, its report is shown
+  in the transcript as-is, and the model gets a `[task notification]` that
+  names the task and says the user started it. That wording matters: in
+  live testing with a 9B model, the generic "act on it if it affects the
+  ongoing work" notification, with no such work in the history, led the
+  model to invent a project and start building it.
+- The sub-agent handle now refreshes after every command, not only at the
+  start of a turn, so a `/bg` launched right after `/model` or `/host`
+  runs on the new model.
+
 ## v2.9.1 — 2026-10-19
 
 - **llama.cpp: the context budget is the server's window, not the model's.**
