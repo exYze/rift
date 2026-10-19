@@ -113,8 +113,8 @@ impl SwarmApp {
                 c.log.push_line(Kind::Info, "· finished — capturing diff…".into());
             }
             // Candidates run one turn from empty history; a fill gauge says
-            // nothing useful in the race view.
-            AgentEvent::Context { .. } => {}
+            // nothing useful in the race view, and nobody queues input.
+            AgentEvent::Context { .. } | AgentEvent::QueuedDelivered { .. } => {}
         }
     }
 

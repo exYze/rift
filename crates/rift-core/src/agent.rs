@@ -121,6 +121,9 @@ pub enum AgentEvent {
     /// A background task finished on its own (kills are silent). `preview`
     /// is the output tail (shell) or final report (agent), capped ~1KB.
     TaskFinished { id: u64, label: String, ok: bool, preview: String },
+    /// Messages the user typed while the turn was running were handed to
+    /// the model at a tool-call boundary (see InputQueue).
+    QueuedDelivered { count: usize },
     /// Turn finished (success or abort); always the final event of a turn.
     Done(TurnStats),
     /// Context-window occupancy: estimated tokens the conversation holds
@@ -128,6 +131,42 @@ pub enum AgentEvent {
     /// the agent-owning task after every turn/command (post-compaction),
     /// and once at startup so resumed sessions show their fill level.
     Context { used: u64, limit: u64 },
+}
+
+/// Messages the user sends while a turn is running. The frontend pushes;
+/// the agent drains the queue at the next tool-call boundary and hands the
+/// messages to the model mid-turn. Whatever is still queued when the turn
+/// ends is the frontend's to send as the next turn (drain it after Done).
+#[derive(Clone, Default)]
+pub struct InputQueue(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl InputQueue {
+    pub fn push(&self, text: String) {
+        if let Ok(mut q) = self.0.lock() {
+            q.push(text);
+        }
+    }
+
+    pub fn take_all(&self) -> Vec<String> {
+        self.0.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.lock().map(|q| q.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The user-role message a batch of queued input becomes mid-turn.
+fn queued_message(queued: &[String]) -> String {
+    format!(
+        "[the user sent this while you were working — take it into account now; it may \
+         redirect, refine, or add to the current task]\n\n{}",
+        queued.join("\n\n")
+    )
 }
 
 pub struct Agent {
@@ -153,6 +192,8 @@ pub struct Agent {
     /// user message). /rewind pops these to restore files (via the edit
     /// journal) and truncate the conversation together.
     turn_marks: Vec<(u64, usize)>,
+    /// Mid-turn user input (see InputQueue); shared with the frontend.
+    queue: InputQueue,
 }
 
 impl Agent {
@@ -168,7 +209,14 @@ impl Agent {
             interrupted: false,
             pending_images: vec![],
             turn_marks: vec![],
+            queue: InputQueue::default(),
         }
+    }
+
+    /// Handle for queueing user input while a turn runs (frontends clone
+    /// it before the agent moves onto its task).
+    pub fn input_queue(&self) -> InputQueue {
+        self.queue.clone()
     }
 
     /// How many turns /rewind can currently reach back.
@@ -413,7 +461,7 @@ impl Agent {
         // tools") disables the chat-only recovery machinery entirely — even
         // for headless work items, an answer in chat IS the deliverable.
         let chat_output = prompt_wants_chat_output(user_input);
-        let actionable_prompt =
+        let mut actionable_prompt =
             !chat_output && (self.cfg.always_task || prompt_looks_actionable(user_input));
 
         let tools_overhead =
@@ -784,6 +832,22 @@ impl Agent {
                 let _ = tx.send(AgentEvent::Done(stats.clone()));
                 return Ok(stats);
             }
+
+            // Tool-call boundary: every call of this round has its result,
+            // so a user message can follow without breaking the sequence.
+            // Hand over what the user typed meanwhile — unless no round is
+            // left to act on it (it then goes out as the next turn instead).
+            if iteration < self.cfg.max_iterations {
+                let queued = self.queue.take_all();
+                if !queued.is_empty() {
+                    actionable_prompt |= queued.iter().any(|q| prompt_looks_actionable(q));
+                    // New direction from the user: the failure streak so far
+                    // says nothing about the redirected work.
+                    consecutive_fail = 0;
+                    self.messages.push(Message::user(queued_message(&queued)));
+                    let _ = tx.send(AgentEvent::QueuedDelivered { count: queued.len() });
+                }
+            }
         }
 
         stats.duration_ms = start.elapsed().as_millis();
@@ -1049,6 +1113,122 @@ mod tests {
             }
         }
         assert!(saw_done);
+    }
+
+    /// Calls `ls` once, then answers. "Types" into the queue while call
+    /// `typed_at` is in flight; records whether round 2 saw the message.
+    struct SteeredProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        queue: InputQueue,
+        typed_at: usize,
+        saw_queued: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl Provider for SteeredProvider {
+        fn base_url(&self) -> &str {
+            "stub"
+        }
+        async fn tags(&self) -> Result<Vec<rift_provider::ModelEntry>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _m: &str) -> Result<rift_provider::ModelCapabilities> {
+            Ok(rift_provider::ModelCapabilities::default())
+        }
+        async fn chat_stream(
+            &self,
+            req: &ChatRequest,
+            _on_delta: &mut (dyn FnMut(StreamDelta) + Send),
+        ) -> Result<rift_provider::ChatOutcome> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == self.typed_at {
+                self.queue.push("also check the README".into());
+            }
+            let mut message = Message {
+                role: Role::Assistant,
+                content: String::new(),
+                thinking: None,
+                tool_calls: vec![],
+                tool_name: None,
+                tool_call_id: None,
+                provider_data: None,
+                images: vec![],
+            };
+            if n == 0 {
+                let mut args = serde_json::Map::new();
+                args.insert("path".into(), serde_json::Value::String(".".into()));
+                message.tool_calls = vec![rift_provider::ToolCall {
+                    id: Some("c0".into()),
+                    function: rift_provider::ToolCallFunction { index: None, name: "ls".into(), arguments: args },
+                }];
+            } else {
+                let last = req.messages.last().unwrap();
+                if last.role == Role::User && last.content.contains("also check the README") {
+                    self.saw_queued.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                message.content = "done".into();
+            }
+            Ok(rift_provider::ChatOutcome {
+                message,
+                done_reason: None,
+                stats: rift_provider::ChatStats::default(),
+                truncation_suspected: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_input_lands_at_the_next_tool_call_boundary() {
+        let queue = InputQueue::default();
+        let provider = Arc::new(SteeredProvider {
+            calls: 0.into(),
+            queue: queue.clone(),
+            typed_at: 0,
+            saw_queued: false.into(),
+        });
+        let mut agent = Agent::new(
+            provider.clone(),
+            AgentConfig::default(),
+            ToolRegistry::standard(),
+            ToolCtx::new(std::env::temp_dir()),
+            "system".into(),
+        );
+        agent.queue = queue.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        agent.run_turn("what files are here?", &tx, &CancellationToken::new()).await.unwrap();
+
+        assert!(provider.saw_queued.load(std::sync::atomic::Ordering::SeqCst), "round 2 never saw the queued text");
+        assert!(queue.is_empty(), "delivered input must leave the queue");
+        // It follows the tool result, so the call/result pairing stays intact.
+        let i = agent.messages.iter().position(|m| m.content.contains("also check the README")).unwrap();
+        assert_eq!(agent.messages[i - 1].role, Role::Tool);
+        let mut delivered = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if let AgentEvent::QueuedDelivered { count } = ev {
+                delivered += count;
+            }
+        }
+        assert_eq!(delivered, 1);
+    }
+
+    #[tokio::test]
+    async fn input_queued_after_the_last_tool_call_is_left_for_the_next_turn() {
+        // Typed while the final (text-only) round runs: no boundary follows,
+        // so the frontend must find it still queued after Done.
+        let queue = InputQueue::default();
+        let provider =
+            Arc::new(SteeredProvider { calls: 0.into(), queue: queue.clone(), typed_at: 1, saw_queued: false.into() });
+        let mut agent = Agent::new(
+            provider,
+            AgentConfig::default(),
+            ToolRegistry::standard(),
+            ToolCtx::new(std::env::temp_dir()),
+            "system".into(),
+        );
+        agent.queue = queue.clone();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        agent.run_turn("what files are here?", &tx, &CancellationToken::new()).await.unwrap();
+        assert_eq!(queue.take_all(), vec!["also check the README".to_string()]);
+        assert!(!agent.messages.iter().any(|m| m.content.contains("also check the README")));
     }
 
     #[test]

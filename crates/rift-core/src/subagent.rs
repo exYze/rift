@@ -382,40 +382,27 @@ async fn run_foreground(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskS
         .join("\n\n")
 }
 
+/// User-launched background agent (`/bg <task>` in the TUI): the same
+/// detached child the `agent` tool's background mode starts, reporting back
+/// through the task-notification channel. Returns the task id.
+pub fn launch_background(ctx: &ToolCtx, label: &str, prompt: &str) -> Result<u64> {
+    let Some(handle) = ctx.subagent_handle() else {
+        bail!("background agents are not available in this session");
+    };
+    let spec = TaskSpec { label: label.to_string(), prompt: prompt.to_string(), model: None, agent: None };
+    spawn_background(&handle, ctx, spec).map(|(id, _)| id)
+}
+
 /// Launch the children detached and return immediately. Each is a background
 /// task: its report lands in the task output buffer, and completion emits the
 /// TaskFinished notification the frontend turns into a [task notification].
 fn run_background(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskSpec>) -> Result<String> {
-    let reg = ctx.bg().clone();
     let mut lines = vec![];
-    for TaskSpec { label, prompt, model, agent: persona } in specs {
+    for spec in specs {
+        let label = spec.label.clone();
         // Routing failures surface as the tool result, before anything runs.
-        let mut agent = build_child(handle, ctx, model.as_deref(), persona.as_deref())?;
-        let (id, cancel) = reg.register(TaskKind::Agent, &label, None)?;
-        lines.push(format!("  #{id} — {label} ({})", agent.cfg.model));
-        let reg2 = reg.clone();
-        tokio::spawn(async move {
-            let (tx, rx) = mpsc::unbounded_channel();
-            let fwd = spawn_forwarder(rx, reg2.clone(), format!("task #{id}"));
-            let res = agent.run_turn(&prompt, &tx, &cancel).await;
-            drop(tx);
-            let _ = fwd.await;
-            if cancel.is_cancelled() {
-                return; // killed via the task tool — the registry already marked it
-            }
-            match res {
-                Ok(_) => {
-                    let report = final_text(&agent)
-                        .unwrap_or_else(|| "(the sub-agent finished without a final report)".into());
-                    reg2.append_output(id, &report);
-                    reg2.finish(id, Some(0));
-                }
-                Err(e) => {
-                    reg2.append_output(id, &format!("ERROR: sub-agent failed: {e:#}"));
-                    reg2.finish(id, Some(1));
-                }
-            }
-        });
+        let (id, model) = spawn_background(handle, ctx, spec)?;
+        lines.push(format!("  #{id} — {label} ({model})"));
     }
     Ok(format!(
         "launched {} background agent(s):\n{}\nThey keep running while the conversation continues. \
@@ -424,6 +411,38 @@ fn run_background(handle: &SubAgentHandle, ctx: &ToolCtx, specs: Vec<TaskSpec>) 
         lines.len(),
         lines.join("\n")
     ))
+}
+
+/// Register and start one detached child; returns (task id, model name).
+fn spawn_background(handle: &SubAgentHandle, ctx: &ToolCtx, spec: TaskSpec) -> Result<(u64, String)> {
+    let TaskSpec { label, prompt, model, agent: persona } = spec;
+    let reg = ctx.bg().clone();
+    let mut agent = build_child(handle, ctx, model.as_deref(), persona.as_deref())?;
+    let (id, cancel) = reg.register(TaskKind::Agent, &label, None)?;
+    let model = agent.cfg.model.clone();
+    tokio::spawn(async move {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let fwd = spawn_forwarder(rx, reg.clone(), format!("task #{id}"));
+        let res = agent.run_turn(&prompt, &tx, &cancel).await;
+        drop(tx);
+        let _ = fwd.await;
+        if cancel.is_cancelled() {
+            return; // killed via the task tool — the registry already marked it
+        }
+        match res {
+            Ok(_) => {
+                let report = final_text(&agent)
+                    .unwrap_or_else(|| "(the sub-agent finished without a final report)".into());
+                reg.append_output(id, &report);
+                reg.finish(id, Some(0));
+            }
+            Err(e) => {
+                reg.append_output(id, &format!("ERROR: sub-agent failed: {e:#}"));
+                reg.finish(id, Some(1));
+            }
+        }
+    });
+    Ok((id, model))
 }
 
 #[cfg(test)]

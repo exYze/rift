@@ -1680,6 +1680,13 @@ mod tests {
     }
 
     #[test]
+    fn bg_label_keeps_the_first_words() {
+        assert_eq!(bg_label("run the test suite"), "run the test suite");
+        assert_eq!(bg_label("audit every crate for unused dependencies and report"), "audit every crate for unused dependencies…");
+        assert!(bg_label(&"x".repeat(80)).chars().count() <= 48);
+    }
+
+    #[test]
     fn expand_mentions_attaches_outline_and_reports_missing() {
         let dir = std::env::temp_dir().join(format!("rift-mention-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1835,6 +1842,9 @@ struct App {
     /// Completed-task reports waiting to be fed back to the model as a
     /// [task notification] turn (fires on the next idle tick).
     task_notes: Vec<String>,
+    /// Some pending note is for work the model itself started (not only
+    /// /bg agents) — picks the notification's closing instruction.
+    task_notes_model: bool,
     /// Clipboard images staged by /paste (data URLs) — attached to the next
     /// prompt that gets sent.
     pending_paste: Vec<String>,
@@ -1843,6 +1853,20 @@ struct App {
     btw_exchanges: Vec<(String, String)>,
     /// A side question is in flight (one at a time keeps them coherent).
     btw_busy: bool,
+    /// Messages typed while a turn runs. Shared with the agent, which hands
+    /// them to the model at the next tool-call boundary; leftovers go out
+    /// as the next turn once the agent is idle.
+    queue: rift_core::InputQueue,
+    /// What the user typed for each queued entry, oldest first (the queue
+    /// holds the @-mention-expanded text). Echoed into the transcript when
+    /// the model actually receives it — mid-turn delivery or the next turn —
+    /// so it never splits a reply still streaming, and restored verbatim
+    /// to the input on Esc.
+    queued_raw: std::collections::VecDeque<String>,
+    /// Background agents the user launched with /bg (task id → task text):
+    /// their notification tells the model who started them and what for —
+    /// the model has never seen these tasks otherwise.
+    user_bg: std::collections::HashMap<u64, String>,
 }
 
 /// Running per-session counters surfaced by the `/stats` command.
@@ -1907,9 +1931,13 @@ impl App {
             editing_file: None,
             notes_popup: None,
             task_notes: vec![],
+            task_notes_model: false,
             pending_paste: vec![],
             btw_exchanges: vec![],
             btw_busy: false,
+            queue: rift_core::InputQueue::default(),
+            queued_raw: std::collections::VecDeque::new(),
+            user_bg: std::collections::HashMap::new(),
         }
     }
 
@@ -2232,6 +2260,15 @@ impl App {
             AgentEvent::SubAgentFinished { tag, steps } => {
                 self.log.push_block(Kind::Info, format!("· [{tag}] finished — {steps} step(s)"));
             }
+            AgentEvent::QueuedDelivered { count } => {
+                // Delivered entries are always the oldest ones (FIFO).
+                for raw in self.queued_raw.drain(..count.min(self.queued_raw.len())) {
+                    self.transcript.push_block(Kind::User, raw);
+                }
+                let what = if count == 1 { "queued message".to_string() } else { format!("{count} queued messages") };
+                self.transcript.push_block(Kind::Info, format!("↳ {what} delivered to the model mid-turn"));
+                self.log.push_block(Kind::Info, format!("· {what} delivered mid-turn"));
+            }
             AgentEvent::Plan(items) => self.plan = items,
             AgentEvent::Context { used, limit } => {
                 self.ctx_gauge = (limit > 0).then_some((used, limit));
@@ -2257,7 +2294,24 @@ impl App {
                 } else {
                     format!("\noutput tail:\n{}", preview.trim())
                 };
-                self.task_notes.push(format!("Task #{id} ({label}) {outcome}.{tail}"));
+                let note = match self.user_bg.remove(&id) {
+                    Some(task) => {
+                        // The user asked for this one: show its report as-is
+                        // rather than only through the model's paraphrase.
+                        if !preview.trim().is_empty() {
+                            self.transcript.push_block(Kind::Assistant, format!("/bg #{id} report:\n{}", preview.trim()));
+                        }
+                        format!(
+                            "Task #{id} is a background agent the user launched themselves with /bg — you did \
+                             not start it. Its task was: {task}\nIt {outcome}.{tail}"
+                        )
+                    }
+                    None => {
+                        self.task_notes_model = true;
+                        format!("Task #{id} ({label}) {outcome}.{tail}")
+                    }
+                };
+                self.task_notes.push(note);
             }
             AgentEvent::Warning(w) => {
                 self.log.push_block(Kind::Warn, format!("! {w}"));
@@ -2297,6 +2351,7 @@ impl App {
             // Don't fire a surprise notification turn right after a cancel;
             // the completions already showed in the transcript.
             self.task_notes.clear();
+            self.task_notes_model = false;
             if let Some(g) = self.goal.take() {
                 self.transcript
                     .push_block(Kind::Info, format!("◎ goal cancelled — /goal {} resumes it", g.condition));
@@ -2831,6 +2886,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
         n => format!(" · {n} bg tasks running"),
     };
     let bg_note = if app.btw_busy { format!("{bg_note} · btw pending") } else { bg_note };
+    let bg_note = match app.queue.len() {
+        0 => bg_note,
+        n => format!("{bg_note} · {n} queued"),
+    };
     // Context gauge: estimated fill of the working num_ctx, colored by how
     // close the next request is to the window (compaction kicks in near the
     // top, so red is "compaction imminent", not "about to fail").
@@ -3447,6 +3506,19 @@ fn goal_met(reply: &str) -> bool {
     reply.lines().any(|l| l.trim_start().starts_with("GOAL MET"))
 }
 
+/// Short task label for a /bg agent (status bar, notifications): the
+/// task's first few words.
+fn bg_label(task: &str) -> String {
+    let words: Vec<&str> = task.split_whitespace().take(6).collect();
+    let mut label = words.join(" ");
+    if label.chars().count() > 48 {
+        label = label.chars().take(47).collect::<String>() + "…";
+    } else if task.split_whitespace().count() > words.len() {
+        label.push('…');
+    }
+    label
+}
+
 /// Run one /btw side question on a UI-side task (modeled on Claude Code's
 /// /btw): it sees the whole conversation but has no tools, its exchange never
 /// enters the main history, and — because it bypasses the agent task entirely
@@ -3706,6 +3778,8 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     // UI-side ToolCtx handle: /btw side questions read the current provider
     // and model from it (kept fresh by run_turn) without touching the agent.
     let ui_ctx = agent.ctx().clone();
+    // Mid-turn input queue, shared between the input box and the agent.
+    let input_queue = agent.input_queue();
     // The addressable model name rides into the command context for /fork.
     let model_addr = model.clone();
     let agent_task = tokio::spawn(async move {
@@ -3736,6 +3810,9 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                 }
                 UiMsg::Command(line, cancel) => {
                     commands::run_command(&line, &mut agent, &mut cx, &fx_tx, &cancel).await;
+                    // /model and /host swap the client between turns; keep
+                    // the sub-agent handle current so an idle /bg uses it.
+                    agent.ctx().refresh_subagent(agent.client().clone(), agent.cfg.clone());
                 }
             }
             // Refresh the context gauge after every turn AND every command —
@@ -3757,6 +3834,7 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
     }));
 
     let mut app = App::new(model, skills, theme, cwd_ui.clone());
+    app.queue = input_queue;
     app.push_logo();
     if resumed.is_empty() {
         app.push_getting_started();
@@ -3952,17 +4030,51 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                     && app.editing_file.is_none()
                     && app.notes_popup.is_none()
                 {
+                    // Messages queued during the last turn that the agent
+                    // never reached a tool-call boundary for: they go out
+                    // as the next turn, ahead of notifications and loops.
+                    if !app.queue.is_empty() {
+                        let text = app.queue.take_all().join("\n\n");
+                        // Every delivery event has been handled by now (Done
+                        // came after them), so what's left is exactly this.
+                        for raw in std::mem::take(&mut app.queued_raw) {
+                            app.transcript.push_block(Kind::User, raw);
+                        }
+                        app.transcript.push_block(Kind::Info, "↳ queued while the last turn ran — sent now".into());
+                        let images = std::mem::take(&mut app.pending_paste);
+                        if !images.is_empty() {
+                            app.log.push_block(Kind::Info, format!("· attaching {} pasted image(s)", images.len()));
+                        }
+                        app.busy = true;
+                        app.turn_started = Some(Instant::now());
+                        app.transcript.scroll_from_bottom = 0;
+                        let cancel = CancellationToken::new();
+                        app.cancel = Some(cancel.clone());
+                        app.status = "sending queued message…".into();
+                        app.last_prompt = Some(text.clone());
+                        let _ = prompt_tx.send(UiMsg::Prompt(text, images, cancel));
+                        needs_redraw = true;
+                        continue;
+                    }
                     // Background tasks finished while the agent was busy (or
                     // idle): feed their reports back as ONE notification turn
                     // so the model can react — the Claude Code-style flow.
                     if app.pending_auto.is_none() && !app.task_notes.is_empty() {
                         let notes = std::mem::take(&mut app.task_notes).join("\n\n");
                         app.transcript.push_block(Kind::Info, "⚙ reporting finished background work to the model".into());
-                        app.pending_auto = Some(format!(
-                            "[task notification] Background work you started has finished:\n\n{notes}\n\n\
-                             If this completes or affects the ongoing work, act on it now; otherwise give \
+                        // /bg-only batches get a closing line that implies
+                        // no other work: with nothing else in the history, a
+                        // small model told to "act on the ongoing work"
+                        // invents some.
+                        let close = if std::mem::take(&mut app.task_notes_model) {
+                            "If this completes or affects the ongoing work, act on it now; otherwise give \
                              the user a one-line status."
-                        ));
+                        } else {
+                            "The user has already seen the report. Acknowledge it in one or two sentences and \
+                             stop — this message asks for nothing else."
+                        };
+                        app.pending_auto =
+                            Some(format!("[task notification] Background work has finished:\n\n{notes}\n\n{close}"));
                         needs_redraw = true;
                     }
                     // Fire a due /loop round (queued like any auto turn).
@@ -4272,6 +4384,27 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                 cancel.cancel();
                                 app.status = "cancelling…".into();
                             }
+                            // Cancelling drops the queue too — but back into
+                            // the input box, so nothing typed is lost and
+                            // nothing fires on its own after the cancel.
+                            let queued = app.queue.take_all();
+                            if !queued.is_empty() {
+                                // The undelivered entries are the newest ones;
+                                // older ones may still have a delivery event
+                                // in flight that will echo them.
+                                let keep = app.queued_raw.len().saturating_sub(queued.len());
+                                let mut back = Vec::from(app.queued_raw.split_off(keep)).join("\n");
+                                if !app.input.trim().is_empty() {
+                                    back.push('\n');
+                                    back.push_str(&app.input);
+                                }
+                                app.input = back;
+                                app.cursor = app.input.len();
+                                app.transcript.push_block(
+                                    Kind::Info,
+                                    format!("↩ {} queued message(s) returned to the input", queued.len()),
+                                );
+                            }
                         } else if app.goal.is_some() || app.loop_state.is_some() {
                             // Idle between auto turns: Esc stops the automation
                             // (during a turn, the cancel above reaches the same
@@ -4380,8 +4513,59 @@ pub async fn run_tui(agent: Agent, opts: TuiOptions) -> Result<Option<RestartSpe
                                     arg,
                                 );
                             }
+                        } else if app.input.trim() == "/bg" || app.input.trim().starts_with("/bg ") {
+                            // User-launched background sub-agent. Like /btw it
+                            // sits before the busy gate: launching never
+                            // touches the agent, so it works mid-turn too.
+                            let raw = std::mem::take(&mut app.input);
+                            app.cursor = 0;
+                            app.history.push(raw.clone());
+                            app.history_idx = None;
+                            let task = raw.trim().strip_prefix("/bg").map(str::trim).unwrap_or_default().to_string();
+                            if task.is_empty() {
+                                app.transcript.push_block(
+                                    Kind::Info,
+                                    "usage: /bg <task> — run a sub-agent in the background with the full tool set; \
+                                     it sees none of this conversation (spell the task out); its report shows here \
+                                     when done · works while the agent is busy · /tasks lists it"
+                                        .into(),
+                                );
+                            } else {
+                                app.transcript.push_block(Kind::User, raw.trim().to_string());
+                                match rift_core::launch_background(&ui_ctx, &bg_label(&task), &task) {
+                                    // TaskStarted announces it in the transcript.
+                                    Ok(id) => {
+                                        app.user_bg.insert(id, task.clone());
+                                        app.status = "background agent launched".into();
+                                    }
+                                    Err(e) => {
+                                        app.transcript.push_block(Kind::Warn, format!("! /bg: {e:#}"));
+                                    }
+                                }
+                            }
+                        } else if app.busy && !app.input.trim().is_empty() && !app.input.trim_start().starts_with('/') {
+                            // Typed mid-turn: queue it. The agent hands it to
+                            // the model at the next tool-call boundary; if the
+                            // turn ends first, it goes out as the next turn.
+                            let raw = std::mem::take(&mut app.input);
+                            app.cursor = 0;
+                            app.history.push(raw.clone());
+                            app.history_idx = None;
+                            let (expanded, notes, mut images) = expand_mentions(&raw, &app.cwd);
+                            for n in notes {
+                                app.log.push_block(Kind::Info, format!("· {n}"));
+                            }
+                            // Images can't join a turn already in flight —
+                            // stage them for the next message sent.
+                            app.pending_paste.append(&mut images);
+                            app.queued_raw.push_back(raw.trim_end().to_string());
+                            app.queue.push(expanded);
+                            app.status = format!(
+                                "queued ({}) — delivered at the next tool call · Esc cancels the turn and returns it",
+                                app.queue.len()
+                            );
                         } else if app.busy {
-                            app.status = "agent is running — Esc to cancel first".into();
+                            app.status = "agent is running — commands can't run mid-turn (Esc cancels; /bg and /btw work now)".into();
                         } else if !app.input.trim().is_empty() {
                             // With the palette open, Enter runs the selected
                             // command (completing any partial prefix first).

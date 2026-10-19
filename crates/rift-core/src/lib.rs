@@ -18,7 +18,7 @@ pub mod tasks;
 pub mod tools;
 pub mod trace;
 
-pub use agent::{Agent, AgentConfig, AgentEvent, TurnStats, EFFORT_LEVELS};
+pub use agent::{Agent, AgentConfig, AgentEvent, InputQueue, TurnStats, EFFORT_LEVELS};
 pub use config::{
     mcp_entry_trusted, trust_mcp_entry, typesafe_client, untrust_mcp_entry, Config, LoadedConfig,
     ProviderConfig, TypeSafeConfig,
@@ -28,7 +28,7 @@ pub use mcp::{McpClient, McpTool};
 pub use plugins::{commands_as_skills, load_plugins, register_tools as register_plugin_tools, Plugin};
 pub use session::{SavedSession, SessionStore};
 pub use skills::{load_skills, skills_prompt_section, Skill, SkillTool};
-pub use subagent::{AgentPersona, AgentTool, SubAgentHandle};
+pub use subagent::{launch_background, AgentPersona, AgentTool, SubAgentHandle};
 pub use tasks::{BgTasks, TaskKind, TaskStatus, TaskView};
 pub use swarm::{
     is_system_one_judge, judge_race, judge_swarm, judge_swarm_system_one, run_swarm, Candidate,

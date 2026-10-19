@@ -95,6 +95,7 @@ pub struct CmdCx {
 /// driving both `/help` and the input popup palette.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/approve", "[on|off]", "toggle approval mode for write/edit/bash"),
+    ("/bg", "<task>", "run a sub-agent in the background (full tools, no conversation context); reports back when done; works while the agent is busy"),
     ("/btw", "<question>|clear", "quick side question — sees the conversation, no tools, never joins the history; works while the agent is busy"),
     ("/clear", "", "wipe the conversation (keeps the session file)"),
     ("/config", "[edit]", "show or edit .rift.json (hot-reloads permissions)"),
@@ -153,6 +154,8 @@ fn help_text() -> String {
         "\nkeys: Enter send · Ctrl+J newline · Ctrl+V paste · Tab focus · Ctrl+L log · Ctrl+D live diff · Esc cancel · /quit exit\n\
          copy: drag the mouse inside either pane — the selection is copied on release, Esc clears it; \
          /copy [all|log] grabs a whole pane; Ctrl+T toggles mouse capture (off = the terminal's own selection)\n\
+         mid-turn: Enter queues the message — the model gets it at its next tool call, or as the \
+         next turn if it finishes first; Esc cancels the turn and returns queued text to the input\n\
          paste: Ctrl+V or right-click drops the clipboard into the input — text at the cursor, an image \
          staged as an attachment\n\
          @path in a prompt attaches a file outline; @photo.png attaches the image itself \
@@ -218,7 +221,7 @@ pub async fn run_command(
         "/worktrees" => cmd_worktrees(cx, fx).await,
         // Handled in the chat input (they drive UI state directly);
         // reachable here only via odd nesting like a /loop body.
-        "/goal" | "/loop" | "/btw" | "/theme" | "/deep-research" => {
+        "/goal" | "/loop" | "/btw" | "/bg" | "/theme" | "/deep-research" => {
             Err(anyhow!("{cmd} runs from the chat input directly"))
         }
         other => Err(anyhow!("unknown command '{other}' — /help lists available commands")),

@@ -119,6 +119,11 @@ fn event_json(ev: &AgentEvent) -> Value {
         AgentEvent::Context { used, limit } => {
             json!({"event": "context", "used": used, "limit": limit})
         }
+        // --serve rejects prompts mid-turn, so nothing queues today; render
+        // as a plain info line should a consumer ever see one.
+        AgentEvent::QueuedDelivered { count } => {
+            json!({"event": "info", "text": format!("delivered {count} queued message(s) to the model")})
+        }
         // Additive (still protocol v1): consumers that don't know the event
         // ignore the line. added/removed are precomputed so slim renderers
         // can show a "+3 −1" head without parsing the diff body.
